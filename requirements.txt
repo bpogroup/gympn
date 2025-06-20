@@ -1,0 +1,5 @@
+gymnasium~=1.0.0
+numpy~=1.26.4
+simpn~=1.2.9
+torch~=2.5.1
+torch-geometric~=2.6.1
