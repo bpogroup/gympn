@@ -1,7 +1,7 @@
 """
 This file implements a task assignment problem with two employees and a queue of tasks.
 The goal is to assign tasks to employees in a way that minimizes the total time taken to complete all tasks.
-The simulation uses a heuristic solver to assign tasks to employees based on their availability.
+The simulation uses a heuristic solver to assign tasks to employees based on their availability, as well as DRL and a random policy.
 """
 import copy
 import os
@@ -10,12 +10,21 @@ from gympn.simulator import GymProblem
 from gympn.solvers import GymSolver, RandomSolver, HeuristicSolver
 from gympn.visualisation import Visualisation
 
+import warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
+
 if __name__ == "__main__":
 
+    ###########################################################################
+    # Run configurations
     train = False #set to False to test a trained model
     run_name = '2025-06-18-22-10-15_run'
     visualize_random = False  # Set to True to visualize the random solver
-    visualize_ppo = False  # Set to True to visualize the PPO solver
+    visualize_heuristic = False # Set to True to visualize the heuristic solver
+    visualize_ppo = True  # Set to True to visualize the PPO solver
+
+    ###########################################################################
 
     # Instantiate a simulation problem.
     agency = GymProblem()
@@ -46,12 +55,10 @@ if __name__ == "__main__":
         :param r: the resource
         :return: a list of SimTokens representing the task and the resource that were assigned to them
         """
-        if c['task_type'] == 0 and r['code_employee'] == 0 or c['task_type'] == 1 and r['code_employee'] == 1:
+        if c['task_type'] == r['code_employee']:
             return [SimToken((c, r), delay=1)]
-        elif c['task_type'] == 0 and r['code_employee'] == 1 or c['task_type'] == 1 and r['code_employee'] == 0:
-            return [SimToken((c, r), delay=2)]
         else:
-            return [SimToken((c, r), delay=3)]
+            return [SimToken((c, r), delay=2)]
 
 
     agency.add_action([waiting, employee], [busy], behavior=start, name="start")
@@ -73,7 +80,7 @@ if __name__ == "__main__":
     default_args = {
         # Algorithm Parameters
         "algorithm": "ppo-clip",
-        "gam": 1,
+        "gam": 1, # With finite horizon, it is better to use gam=1
         "lam": 0.99,
         "eps": 0.2,
         "c": 0.2,
@@ -130,9 +137,7 @@ if __name__ == "__main__":
             for binding in el:
                 task = binding[0][1].value
                 resource = binding[1][1].value
-                if task['task_type'] == 0 and resource['code_employee'] == 0 or task['task_type'] == 1 and resource[
-                    'code_employee'] == 1:
-                    print(binding)
+                if task['task_type'] == resource['code_employee']:
                     return {k: binding}
 
 
@@ -164,10 +169,12 @@ if __name__ == "__main__":
 
         heuristic_average = 0
         heuristic_std = 0
+        heuristic_reward = []
         for i in range(10):
             frozen_agency = copy.deepcopy(agency)
             solver = HeuristicSolver(perfect_heuristic)
             res = frozen_agency.testing_run(length=10, solver=solver)
+            heuristic_reward.append(res)
             heuristic_average += res
             heuristic_std += res ** 2
 
@@ -184,7 +191,7 @@ if __name__ == "__main__":
         if visualize_ppo:
             frozen_agency = copy.deepcopy(agency)
             frozen_agency.set_solver(GymSolver(weights_path=weights_path, metadata=agency.make_metadata()))
-            frozen_agency.length = 10  # TODO: parameterize in a better way
+            frozen_agency.length = 10
             visual = Visualisation(frozen_agency)
             visual.show()
         else:
@@ -198,21 +205,19 @@ if __name__ == "__main__":
 
             ppo_average /= 10
             ppo_std = (ppo_std / 10 - ppo_average ** 2) ** 0.5
-            print(f"PPO solver average reward: {ppo_average}, std: {ppo_std}")
+            print(f"DRL solver average reward: {ppo_average}, std: {ppo_std}")
 
-    if not visualize_random and not visualize_ppo:
-        #create a boxplot
-        import matplotlib.pyplot as plt
-        import numpy as np
+        if not visualize_random and not visualize_ppo:
+            #create a boxplot
+            import matplotlib.pyplot as plt
+            data = [random_reward, heuristic_reward, ppo_reward]  # List of lists for boxplot
+            labels = ['Random', 'Heuristic', 'DRL']  # Labels for the solvers
 
-        data = [random_reward, ppo_reward]  # List of lists for boxplot
-        labels = ['Random', 'DRL']  # Labels for the solvers
+            fig, ax = plt.subplots()
+            ax.boxplot(data, tick_labels=labels, patch_artist=True, boxprops=dict(facecolor="lightblue"))
 
-        fig, ax = plt.subplots()
-        ax.boxplot(data, labels=labels, patch_artist=True, boxprops=dict(facecolor="lightblue"))
+            ax.set_ylabel('Reward')
+            ax.set_title('Reward Distribution for Different Solvers')
+            plt.show()
 
-        ax.set_ylabel('Reward')
-        ax.set_title('Reward Distribution for Different Solvers')
-        plt.show()
-
-        print("Run finished. If you want to visualize the results, set visualize_random or visualize_ppo to True.")
+            print("Run finished. If you want to visualize the results, set visualize_random or visualize_ppo to True.")

@@ -1122,7 +1122,7 @@ class GymProblem(SimProblem):
                 if reporter is not None:
                     # report changes in marking
                     self.print_report(reporter, timed_binding)
-                print(f"Fired binding {timed_binding}")
+                #print(f"Fired binding {timed_binding}")
                 return timed_binding, active_model
             elif len(bindings) > 0 and self.network_tag.is_action():
                 if type(self.solver) is GymSolver:
@@ -1131,7 +1131,7 @@ class GymProblem(SimProblem):
                     max_index = torch.argmax(act_probs).item()
                     timed_binding = obs['actions_dict'][max_index]
                     self.fire(timed_binding)
-                    print(f"Fired binding {timed_binding}")
+                    #print(f"Fired binding {timed_binding}")
                     if timed_binding[-1]._id in self.reward_functions.keys():
                         self.update_reward(timed_binding)
                     if reporter is not None:
@@ -1147,7 +1147,7 @@ class GymProblem(SimProblem):
                     if reporter is not None:
                         # report changes in marking
                         self.print_report(reporter, timed_binding)
-                    print(f"Fired binding {timed_binding}")
+                    #print(f"Fired binding {timed_binding}")
                     return timed_binding, active_model
 
         return None, active_model
@@ -1191,7 +1191,7 @@ class GymProblem(SimProblem):
                 binding, active_model = self.step(reporter, length)
                 #print(f"Binding: {binding}")
 
-        print(f'Final reward: {self.reward}')
+        #print(f'Final reward: {self.reward}')
         return self.reward
 
     def set_unobservable(self, simvars=None, token_attrs=None):

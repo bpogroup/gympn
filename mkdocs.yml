@@ -1,0 +1,18 @@
+site_name: gympn
+site_description: A Python library for building and interacting with custom reinforcement learning environments
+site_author: Riccardo Lo Bianco
+repo_url: https://github.com/bpogroup/gympn
+theme:
+  name: material
+  palette:
+    primary: indigo
+    accent: indigo
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - API Reference: api.md
+  - Examples: examples.md
+  - Contributing: contributing.md
+  - FAQ: faq.md
+plugins:
+  - search
