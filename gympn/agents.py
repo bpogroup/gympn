@@ -298,7 +298,23 @@ class Agent:
         return history
 
     def _fit_policy_model(self, dataloader, logpis, epochs=1):
-        """Fit policy model using data from dataset."""
+        """Fit policy model using data from dataset.
+
+        Parameters
+        ----------
+        dataloader : DataLoader
+            The data loader for the dataset.
+        logpis : list of Tensors
+            The log probabilities of the actions taken in the dataset.
+        epochs : int, optional
+            The number of epochs to train the policy model.
+        Returns
+
+        -------
+        history : dict
+            Dictionary with loss, KLD, and entropy history for each epoch.
+
+        """
         history = {'loss': [], 'kld': [], 'ent': []}
 
 
@@ -326,7 +342,23 @@ class Agent:
         return {k: np.array(v) for k, v in history.items()}
 
     def _fit_policy_model_step(self, batch, logpis):
-        """Fit policy model on one batch of data."""
+        """Fit policy model on one batch of data.
+
+        Parameters
+        ----------
+        batch : DataBatch
+            The batch of data containing states, actions, advantages, etc.
+        logpis : list of Tensors
+            The log probabilities of the actions taken in the dataset.
+        Returns
+        -------
+        loss : float
+            The loss value for the policy model.
+        kld : float
+            The Kullback-Leibler divergence between the new and old policies.
+        ent : float
+            The entropy of the policy distribution.
+        """
         self.policy_model.train()  # set model to training mode
         self.policy_optimizer.zero_grad()  # zero out gradients
 

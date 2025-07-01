@@ -47,10 +47,8 @@ if __name__ == "__main__":
     agency.add_event([arrival], [arrival, waiting], arrive)
 
     def start(c, r):
-        """
-        Resource 0 takes 1 time unit to finish tasks of type 0, and 2 time units to finish tasks of type 1.
-        Resource 1 takes 2 time units to finish tasks of type 0, and 1 time unit to finish tasks of type 1.
-        Resource 2 takes 3 time units to finish any task.
+        """"
+        This function is called when a task is assigned to an employee.
         :param c: the task
         :param r: the resource
         :return: a list of SimTokens representing the task and the resource that were assigned to them

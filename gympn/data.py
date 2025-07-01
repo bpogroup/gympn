@@ -5,6 +5,32 @@ import numpy as np
 
 
 class GraphDataLoader(torch.utils.data.Dataset):
+    """
+    A custom data loader for graph data in PyTorch Geometric format.
+    This class is designed to handle both heterogeneous and homogeneous graph data.
+    It takes in a batch size and lists of states, actions, logprobs, advantages,
+    logpis, and values, and prepares them for training in a PyTorch DataLoader.
+    Parameters
+    ----------
+    :param batch_size: int
+        The size of the batches to be created.
+    :param states: list
+        A list of states, where each state is a dictionary containing graph data.
+    :param actions: list
+        A list of actions corresponding to each state.
+    :param logprobs: list
+        A list of log probabilities for the actions taken.
+    :param advantages: list
+        A list of advantages for each action taken.
+    :param logpis: list
+        A list of log probabilities for all actions in the state.
+    :param values: list
+        A list of value estimates for each state.
+    :param data_type: str, optional
+        (Unused) The type of graph data, either 'hetero' for heterogeneous or 'homogeneous' for homogeneous.
+        Default is 'hetero'.
+    """
+
     def __init__(self, batch_size, states, actions, logprobs, advantages, logpis, values, data_type='hetero', force_batch_size=True):
         self.states = states
         self.actions = actions
@@ -29,7 +55,6 @@ class GraphDataLoader(torch.utils.data.Dataset):
                         for index in range(len(states))]
         else:
             raise ValueError("data_type must be either 'hetero' or 'homogeneous'")
-        #self.batch = Batch.from_data_list(self.data_list)
 
         #Cut the data list to be a multiple of the batch size
         if force_batch_size:
