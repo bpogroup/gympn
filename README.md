@@ -21,7 +21,8 @@ pip install -r requirements.txt
 ```
 
 ## Examples
-Check the examples/ directory for sample scripts demonstrating how to use GymPN for different use cases.  
+For examples of how to use GymPN, check out the [examples directory](./examples). You can find various scripts demonstrating how to create environments, define agents, and run simulations.
+Alternatively, a gentle introduction to the library is available in the [gentle introduction](./gentle_introduction.md).
 
 ## Contributing
 Contributions are welcome! Please open an issue or submit a pull request if you have ideas for improvements or new features.  

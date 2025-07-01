@@ -21,3 +21,6 @@ git clone https://github.com/bpogroup/gympn.git
 cd gympn
 pip install -r requirements.txt
 ```
+
+## Quick Start
+To get started with GymPN, check our [gentle introduction](./gentle_introduction.md).
