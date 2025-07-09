@@ -18,11 +18,13 @@ if __name__ == "__main__":
 
     ###########################################################################
     # Run configurations
-    train = False #set to False to test a trained model
-    run_name = '2025-06-18-22-10-15_run'
+    train = True #set to False to test a trained model
+    run_name = ''
     visualize_random = False  # Set to True to visualize the random solver
     visualize_heuristic = False # Set to True to visualize the heuristic solver
     visualize_ppo = True  # Set to True to visualize the PPO solver
+
+    weights_path = os.path.join(os.getcwd(), "data", "train", run_name, f"best_policy.pth") #customize if needed
 
     ###########################################################################
 
@@ -180,7 +182,7 @@ if __name__ == "__main__":
         heuristic_std = (heuristic_std / 10 - heuristic_average ** 2) ** 0.5
         print(f"Heuristic solver average reward: {heuristic_average}, std: {heuristic_std}")
 
-        weights_path = os.path.join(os.getcwd(), "data", "train", run_name, f"best_policy.pth")
+
 
         ppo_average = 0
         ppo_std = 0

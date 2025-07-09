@@ -12,12 +12,18 @@ GymPN is a Python library designed for creating and training reinforcement learn
 
 ## Installation
 
-To install the library, clone the repository and install the dependencies:
+To install the library and run a basic example, first clone the repository and install the dependencies (**important**: make sure you have Python 3.12 or higher):
 
 ```bash
 git clone https://github.com/bpogroup/gympn.git
 cd gympn
 pip install -r requirements.txt
+```
+
+Then you can run a basic example to see how the library works:
+
+```bash
+python -m examples/example_minimal_task_assignment
 ```
 
 ## Examples
