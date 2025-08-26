@@ -28,7 +28,7 @@ python -m examples/example_minimal_task_assignment
 
 ## Examples
 For examples of how to use GymPN, check out the [examples directory](./examples). You can find various scripts demonstrating how to create environments, define agents, and run simulations.
-Alternatively, a gentle introduction to the library is available in the [gentle introduction](./gentle_introduction.md).
+Alternatively, a gentle introduction to the library is available in the [gentle introduction](./docs/gentle_introduction.md).
 
 ## Contributing
 Contributions are welcome! Please open an issue or submit a pull request if you have ideas for improvements or new features.  
