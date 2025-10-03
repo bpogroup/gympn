@@ -6,15 +6,29 @@ from torch_geometric.data import HeteroData
 matplotlib.use("TkAgg")
 
 class GraphPlotter:
+    """
+    A singleton class for plotting graphs side by side using Matplotlib and NetworkX.
+    Used as a debugging tool when applying graph neural networks to Petri nets.
+    """
+
+
     _instance = None  # Class-level variable to hold the singleton instance
 
     def __new__(cls, *args, **kwargs):
+        """
+        Override __new__ to implement the singleton pattern.
+        This ensures that only one instance of GraphPlotter is created.
+        """
         if cls._instance is None:
             cls._instance = super(GraphPlotter, cls).__new__(cls)
             cls._instance._initialized = False
         return cls._instance
 
     def __init__(self):
+        """
+        Initialize the GraphPlotter instance. This method will only run once due to the singleton pattern.
+        """
+
         if self._initialized:
             return  # Prevent reinitialization
         self._initialized = True
@@ -24,6 +38,17 @@ class GraphPlotter:
         self.fig, self.axes = plt.subplots(1, 2, figsize=(16, 8))  # Create a single figure with two subplots
 
     def plot_hetero_data(self, data: HeteroData):
+        """
+        Convert a HeteroData object to a NetworkX directed graph and return it.
+
+        Parameters
+        ----------
+        :param data: HeteroData object containing node and edge information.
+
+        Returns
+        ----------
+        :graph: A NetworkX directed graph representing the HeteroData.
+        """
         # Create a directed graph
         graph = nx.DiGraph()
 
@@ -44,8 +69,29 @@ class GraphPlotter:
         return graph
 
     def plot_side_by_side(self, expanded_pn, ret_graph):
+        """
+        Plot two graphs side by side for comparison.
+        Parameters
+        ----------
+        :param expanded_pn: The expanded Petri net object containing arcs.
+        :param ret_graph: The HeteroData object representing the ret graph.
+
+        Returns
+        ----------
+        None
+        """
+
         def grid_layout(graph):
-            """Generate a grid layout for the nodes."""
+            """Generate a grid layout for the nodes.
+
+            Parameters
+            ----------
+            :param graph: The NetworkX graph to layout.
+
+            Returns
+            ----------
+            :return: A dictionary mapping nodes to positions.
+            """
             num_nodes = len(graph.nodes)
             cols = int(num_nodes ** 0.5) + 1  # Number of columns in the grid
             positions = {}

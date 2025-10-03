@@ -283,7 +283,9 @@ class GymProblem(SimProblem):
 
         # Return the timed bindings that have time <= clock
         bindings = [(binding, time, t) for (binding, time, t) in timed_bindings_curr if time <= self.clock]
-        return bindings, True
+        # The other bindings are useful to delay
+        #time_other_bindings = [t[1] for t in timed_bindings_other][0] if len(timed_bindings_other) > 0 else None
+        return bindings, True#, time_other_bindings
 
     def simulate(self, duration, reporter=None):
         """

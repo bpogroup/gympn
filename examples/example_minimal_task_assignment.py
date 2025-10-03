@@ -19,7 +19,7 @@ if __name__ == "__main__":
     ###########################################################################
     # Run configurations
     train = True #set to False to test a trained model
-    run_name = ''
+    run_name = '2025-06-18-22-10-15_run'
     visualize_random = False  # Set to True to visualize the random solver
     visualize_heuristic = False # Set to True to visualize the heuristic solver
     visualize_ppo = True  # Set to True to visualize the PPO solver
@@ -34,7 +34,7 @@ if __name__ == "__main__":
     # Define cases.
     arrival = agency.add_var("arrival", var_attributes=['task_type'])
     waiting = agency.add_var("waiting", var_attributes=['task_type'])
-    busy = agency.add_var("busy", var_attributes=['task_type', 'code_employee'])
+    busy = agency.add_var("busy", var_attributes=['task_type', 'resource_id'])
     arrival.put({'task_type': 0})
     arrival.put({'task_type': 1})
 
@@ -50,7 +50,7 @@ if __name__ == "__main__":
 
     def start(c, r):
         """"
-        This function is called when a task is assigned to an employee.
+        This function is called when a task is assigned to an resources.
         :param c: the task
         :param r: the resource
         :return: a list of SimTokens representing the task and the resource that were assigned to them
@@ -72,7 +72,7 @@ if __name__ == "__main__":
         """
         return [SimToken(b[1])]
 
-    agency.add_event([busy], [employee], complete, name='done', reward_function=lambda x: 1)
+    agency.add_event([busy], [employee], complete, name='complete', reward_function=lambda x: 1)
 
 
 
@@ -127,12 +127,12 @@ if __name__ == "__main__":
     # define perfect heuristic
     def perfect_heuristic(observable_net, tokens_comb):
         """
-        This heuristic function selects the best binding based on the task type and employee code.
+        This heuristic function selects the best binding based on the task type and resources code.
         :param observable_net: the observable net.
         :param tokens_comb: the list of all possible bindings.
         :return: the best binding.
         """
-        # The perfect heuristic is to always assign the task to the employee that can do it the fastest (so taks type 0 to resource 0 and task type 1 to resource 1)
+        # The perfect heuristic is to always assign the task to the resources that can do it the fastest (so taks type 0 to resource 0 and task type 1 to resource 1)
         for k, el in tokens_comb.items():
             for binding in el:
                 task = binding[0][1].value

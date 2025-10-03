@@ -189,7 +189,22 @@ def make_parser():
 
 
 def make_env(args, aepn = None):
-    """Return the training environment for this run."""
+    """
+    Return the training environment for this run.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Command line arguments.
+    aepn : GymProblem
+        The Petri net problem instance to train on.
+
+    Returns
+    ----------
+    env : AEPN_Env
+        The training environment.
+
+    """
     if args.environment == 'ActionEvolutionPetriNetEnv':
         env = AEPN_Env(aepn)
     else:
@@ -200,7 +215,22 @@ def make_env(args, aepn = None):
 
 
 def make_policy_network(args, metadata=None):
-    """Return the policy network for this run."""
+    """
+    Return the policy network for this run.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Command line arguments.
+    metadata : dict
+        Metadata for the heterogeneous graph.
+
+    Returns
+    ----------
+    policy_network : torch.nn.Module
+        The policy network.
+
+    """
     if args.environment == 'ActionEvolutionPetriNetEnv':
         if args.load_policy_network:
             policy_network = torch.load(os.path.join(os.getcwd(), args.logdir, args.name, args.policy_network))
@@ -220,7 +250,21 @@ def make_policy_network(args, metadata=None):
 
 
 def make_value_network(args, metadata=None):
-    """Return the value network for this run."""
+    """
+    Return the value network for this run.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Command line arguments.
+    metadata : dict
+        Metadata for the heterogeneous graph.
+
+    Returns
+    ----------
+    value_network : torch.nn.Module or None
+        The value network, or None if no value network is used.
+    """
     if args.value_model == 'none':
         value_network = None
     elif args.environment == 'ActionEvolutionPetriNetEnv':
@@ -239,7 +283,20 @@ def make_value_network(args, metadata=None):
 
 
 def make_agent(args, metadata=None):
-    """Return the agent for this run."""
+    """Return the agent for this run.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Command line arguments.
+    metadata : dict
+        Metadata for the heterogeneous graph.
+
+    Returns
+    ----------
+    agent : PGAgent (experimental) or PPOAgent
+        The agent.
+    """
     policy_network = make_policy_network(args, metadata=metadata)
     value_network = make_value_network(args, metadata=metadata)
 
@@ -263,7 +320,18 @@ def make_agent(args, metadata=None):
 
 
 def make_logdir(args):
-    """Return the directory name for this run."""
+    """Return the directory name for this run.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Command line arguments.
+
+    Returns
+    ----------
+    logdir : str
+        The directory name for this run.
+    """
     run_name = args.name
     if args.datetag:
         time_string = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")

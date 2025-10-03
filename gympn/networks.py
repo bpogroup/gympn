@@ -44,9 +44,6 @@ class HeteroActor(ActorCritic):
             print(f"Index unique values {len(set(index.tolist()))}")
 
         x_dict = graph.x_dict
-        #print(f"Input x_dict a_transition shape: {x_dict['a_transition'].shape}")
-        #print(f"Input x_dict e_transition shape: {x_dict['e_transition'].shape}")
-        #print("-----------------------------------------------------------------")
 
         edge_index_dict = graph.edge_index_dict
 
@@ -60,7 +57,6 @@ class HeteroActor(ActorCritic):
             if torch.isnan(value).any():
                 print(f"NaN values found in {key} after encoding.")
                 # Handle NaN values if necessary (e.g., replace with zeros, etc.)
-                #import pdb; pdb.set_trace()
                 x_dict[key] = torch.nan_to_num(value)
 
         # Decode 'a_transition' nodes one by one
@@ -184,9 +180,6 @@ class HeteroActorDecoder(ActorCritic):
             x = data
             index = data['a_transition']['batch']
 
-        x_dict = x.x_dict
-        edge_index_dict = x.edge_index_dict
-
         x_dict = self.encoder(data)
 
         # First convolution
@@ -197,7 +190,7 @@ class HeteroActorDecoder(ActorCritic):
 
 class HeteroCriticDecoder(ActorCritic):
     def __init__(self, encoder, input_size=-1, hidden_size=64, output_size=16, metadata=None, num_heads=1):
-        super(HeteroActorDecoder, self).__init__()
+        super(ActorCritic, self).__init__()
 
         self.input_size = input_size
         self.hidden_size = hidden_size

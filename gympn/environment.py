@@ -1,14 +1,28 @@
 import copy
-
 from gymnasium import spaces, Env
-from typing import List
-
-
 
 class AEPN_Env(Env):
     """
-    Gym environment for training a Deep Reinforcement Learning agent on the AEPN (Action-Evolution Petri Net) simulator.
-    The environment is developed to be ready to be used without need for modifications.
+    Gym environment for training a Deep Reinforcement Learning agent on the AEPN simulator.
+
+    Attributes
+    ----------
+    pn : GymProblem
+        The Petri net problem instance.
+    frozen_pn : GymProblem
+        A deep copy of the initial Petri net state.
+    metadata : dict
+        Environment metadata.
+    action_space : gymnasium.spaces.Discrete
+        The action space of the environment.
+    observation_space : gymnasium.spaces.Dict
+        The observation space of the environment.
+    run : list
+        List to track the simulation run.
+    i : int
+        Current step counter.
+    active_model : bool
+        Flag indicating if the model is active.
     """
 
     def __init__(self, aepn):
@@ -38,11 +52,26 @@ class AEPN_Env(Env):
         self.active_model = True
 
     def step(self, action):
+        """
+            Execute one step in the environment.
+
+            Parameters
+            ----------
+            action : int
+                The action to take, must be between 0 and len(self.pn.pn_actions)-1.
+
+            Returns
+            -------
+            tuple
+                Contains (observation, reward, terminated, truncated, info) where:
+                - observation: The current state of the environment
+                - reward: The reward obtained from the action
+                - terminated: Whether the episode has ended
+                - truncated: Whether the episode was artificially terminated
+                - info: Additional information (dictionary with 'pn_reward')
+        """
 
         old_rewards = self.pn.reward
-        #old_clock = self.pn.clock
-
-        # import pdb; pdb.set_trace()
         if action < 0 or action >= len(self.pn.pn_actions):
             raise ValueError(f"Action {action} is not valid. Must be between 0 and {len(self.pn.pn_actions)-1}")
 
@@ -62,7 +91,20 @@ class AEPN_Env(Env):
         info = {'pn_reward': self.pn.reward}
         return observation, reward, terminated, False, info
 
-    def reset(self):
+    def reset(self, seed=None, options=None):
+        """
+        Reset the environment to its initial state.
+
+        Parameters
+        ----------
+        :param seed: Optional seed for random number generation.
+        :param options: Optional dictionary of options for resetting the environment.
+
+        Returns
+        -------
+        :return: The initial observation of the environment.
+        """
+
         print(f"Entered reset with current reward for PN: {self.pn.reward} \n")
         self.pn = copy.deepcopy(self.frozen_pn)
         if self.pn.network_tag.is_evolution():

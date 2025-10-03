@@ -29,6 +29,8 @@ class GraphDataLoader(torch.utils.data.Dataset):
     :param data_type: str, optional
         (Unused) The type of graph data, either 'hetero' for heterogeneous or 'homogeneous' for homogeneous.
         Default is 'hetero'.
+    force_batch_size : bool, optional
+        If True, truncates the dataset to be a multiple of batch_size. Default is True.
     """
 
     def __init__(self, batch_size, states, actions, logprobs, advantages, logpis, values, data_type='hetero', force_batch_size=True):
@@ -82,6 +84,14 @@ class GraphDataLoader(torch.utils.data.Dataset):
         return data
 
     def __len__(self):
+        """
+            Returns the length of the dataset.
+
+            Returns
+            -------
+            int
+                Number of samples in the dataset.
+        """
         return len(self.data_list)
 
 def discount_rewards(rewards, gam):
@@ -98,12 +108,6 @@ def discount_rewards(rewards, gam):
     -------
     rewards : ndarray
         1D array of discounted rewards-to-go.
-
-    Examples
-    --------
-    >>> rewards = [1, 2, 3, 4, 5]
-    >>> discount_rewards(rewards, 0.5)
-    [1, 2, 6.25, 6.5, 5]
 
     """
     cumulative_reward = 0
@@ -258,8 +262,9 @@ class TrajectoryBuffer:
 
         Returns
         -------
-        dataset : tf.Dataset
-        batch_size : int
+        DataLoader
+        A PyTorch Geometric DataLoader containing the batched trajectory data.
+
 
         """
 
@@ -338,8 +343,24 @@ class TrajectoryBuffer:
 
 
 def print_status_bar(i, epochs, history, verbose=1):
-    """Print a status line."""
+    """
+    Print a formatted status bar showing training progress.
+
+    Parameters
+    ----------
+    i : int
+        Current epoch number.
+    epochs : int
+        Total number of epochs.
+    history : dict
+        Dictionary containing training metrics.
+    verbose : int, optional
+        Verbosity level. Default is 1.
+        - 0: No output
+        - 1 or higher: One line per epoch
+    """
     metrics = "".join([" - {}: {:.4f}".format(m, history[m][i])
                        for m in ['mean_returns']])
     end = "\n" if verbose == 2 or i+1 == epochs else ""
-    print("\rEpoch {}/{}".format(i+1, epochs) + metrics, end=end)
+    if verbose > 0:
+        print("\rEpoch {}/{}".format(i+1, epochs) + metrics, end=end)

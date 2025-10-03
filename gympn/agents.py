@@ -121,7 +121,7 @@ class Agent:
             return self.value_model(state)
 
     def train(self, env, episodes=10, epochs=1, max_episode_length=None, verbose=0, save_freq=1,
-              logdir=None, batch_size=64, sort_states=False, test_env=None, test_freq=5, test_episodes=10):
+              logdir=None, batch_size=64, sort_states=False, test_env=None, test_freq=5, test_episodes=100):
         """Train the agent on env with optional testing during training.
 
         Parameters
@@ -311,7 +311,7 @@ class Agent:
         Returns
 
         -------
-        history : dict
+        dict
             Dictionary with loss, KLD, and entropy history for each epoch.
 
         """
@@ -403,6 +403,13 @@ class Agent:
 
     # Assuming `model` is your PyTorch model
     def check_gradient_norms(self, model):
+        """Check and print the gradient norms for each parameter in the model.
+
+        Parameters
+        ----------
+        model : torch.nn.Module
+            The PyTorch model to check gradients for.
+        """
         for name, param in model.named_parameters():
             if param.grad is not None:
                 grad_norm = torch.norm(param.grad).item()
@@ -411,15 +418,43 @@ class Agent:
                 print(f"No gradient for {name}")
 
     def load_policy_weights(self, filename):
-        """Load weights from filename into the policy model."""
+        """Load weights from filename into the policy model.
+
+        Parameters
+        ----------
+        filename : str
+            The path to the file from which the model weights will be loaded.
+        """
         self.policy_model.load_weights(filename)
 
     def save_policy_weights(self, filename):
-        """Save the current weights in the policy model to filename."""
+        """Save the current weights in the policy model to filename.
+
+        Parameters
+        ----------
+        filename : str
+            The path to the file where the model weights will be saved.
+        """
         self.policy_model.save_weights(filename)
 
     def _fit_value_model(self, dataloader, epochs=1):
-        """Fit value model using data from dataset."""
+        """Fit value model using data from dataset.
+
+        Parameters
+        ----------
+        dataloader : DataLoader
+            The data loader for the dataset.
+        logpis : list of Tensors
+            The log probabilities of the actions taken in the dataset.
+        epochs : int, optional
+            The number of epochs to train the policy model.
+
+        Returns
+        -------
+        dict
+            Dictionary containing training history with key 'loss'.
+
+        """
         if self.value_model is None or isinstance(self.value_model, str):
             epochs = 0
         history = {'loss': []}
@@ -458,7 +493,7 @@ class Agent:
 
         return loss.item()
 
-    def test_in_train(self, env, episodes=10, max_episode_length=None, deterministic=True, logdir=None):
+    def test_in_train(self, env, episodes=100, max_episode_length=None, deterministic=True, logdir=None):
         """Evaluate the agent on a test environment during training.
 
         Parameters
@@ -485,16 +520,20 @@ class Agent:
             done = False
             episode_length = 0
             total_reward = 0
+            info = {'pn_reward': 0}
             while not done:
                 action = self.act(state, deterministic=deterministic)
-                next_state, reward, done, truncated, _ = env.step(action)
+                next_state, reward, done, truncated, info = env.step(action)
                 #if (max_episode_length is not None and episode_length > max_episode_length) or done or truncated:
                 #    break
                 episode_length += 1
-                total_reward += reward
-
+                #total_reward += reward
                 state = next_state
-            history['returns'][i] = total_reward
+
+            if episode_length == 0:
+                print("Warning: Episode length is zero, this episode did not produce any valid action.")
+            history['returns'][i] = info['pn_reward'] #total_reward
+            print(f"The recorded reward was: {info['pn_reward']}")
             history['lengths'][i] = episode_length
 
         test_metrics = {
@@ -535,15 +574,41 @@ class Agent:
             self.value_model.save_weights(filename)
 
     def save_policy_network(self, filename):
-        """Save the current weights in the value model to filename."""
+        """Save the current policy to file.
+
+        Parameters
+        ----------
+        filename : str
+            The path to the file where the model will be saved.
+        """
+
         torch.save(self.policy_model, filename)
 
     def load_policy_network(self, filename):
-        """Save the current weights in the value model to filename."""
+        """Load the current policy from file.
+
+        Parameters
+        ----------
+        filename : str
+            The path to the file from which the model will be loaded.
+        """
         self.policy_model = torch.load(torch.load(filename))
 
     def _fit_policy_and_value_models(self, dataloader, epochs=1):
-        """Fit policy and value model using data from dataset."""
+        """Fit both policy and value models simultaneously using data from dataset.
+
+        Parameters
+        ----------
+        dataloader : torch.utils.data.DataLoader
+            The data loader containing batches of training data.
+        epochs : int, optional
+            Number of epochs to train for.
+
+        Returns
+        -------
+        dict
+            Dictionary containing training history with keys 'loss', 'kld', and 'ent'.
+        """
         history = {'loss': [], 'kld': [], 'ent': []}
         for epoch in range(epochs):
             loss, kld, ent, batches = 0, 0, 0, 0
@@ -569,7 +634,18 @@ class Agent:
         return {k: np.array(v) for k, v in history.items()}
 
     def _fit_policy_and_value_model_step(self, batch):#, logpis):
-        """Fit policy and value model on one batch of data."""
+        """Perform one training step for both policy and value models.
+
+        Parameters
+        ----------
+        batch : dict
+            Batch of training data containing states, actions, advantages, etc.
+
+        Returns
+        -------
+        tuple
+            (policy_loss, kld, entropy) for the training step.
+        """
         self.policy_model.train()  # set model to training mode
         self.value_model.train()  # set model to training mode
 

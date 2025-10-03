@@ -2,7 +2,45 @@ import simpn.visualisation
 from simpn.visualisation import *
 
 class Visualisation(simpn.visualisation.Visualisation):
+    """
+    A class for visualizing a Petri net simulation problem using pygame.
+
+    Attributes
+    ----------
+    _problem : GymProblem
+        The Petri net simulation problem to visualize.
+    _nodes : dict
+        A dictionary mapping node IDs to their visual representations.
+    _edges : list
+        A list of edges connecting the visual nodes.
+    _selected_nodes : list or None
+        A list of currently selected nodes, or None if no nodes are selected.
+    _size : tuple
+        The size of the pygame window.
+    _buttons : list
+        A list of buttons for user interaction.
+    _screen : pygame.Surface
+        The pygame screen surface for rendering.
+
+    Methods
+    -------
+    __init__(sim_problem, layout_file=None)
+        Initializes the visualization with the given Petri net simulation problem and optional layout file.
+    """
     def __init__(self, sim_problem, layout_file=None):
+        """
+        Initialize the visualization with the given Petri net simulation problem.
+
+        Parameters
+        ----------
+        :param sim_problem: The Petri net simulation problem to visualize.
+        :param layout_file: Optional path to a layout file for node positions.
+
+        Returns
+        ----------
+        None
+        """
+
         pygame.init()
         pygame.font.init()
         pygame.display.set_caption('Petri Net Visualisation')
