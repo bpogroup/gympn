@@ -32,9 +32,11 @@ Transitions can **fire** when certain conditions (commonly called **guard functi
 Classic Petri Nets, however, do not allow representing tokens with different characteristics (colours) or time-dependent behaviour, which limits their applicability in complex systems. For this reason, several extensions have been proposed, such as Coloured Petri Nets (CPN) and Timed Petri Nets (TPN).
 The combination of these two extensions leads to Coloured Timed Petri Nets (CTPN), which allow representing tokens with different characteristics and time-dependent behaviour. CTPNs are implemented in `simpn`, the core library on top of which `gympn` is built. Before introducing A-E PNs, it is important to have a basic understanding of CTPNs. To this end, let us consider the following example:
 
-!images/ctpn_example.png
 
-In this example, we have a simple CTPN with three places
+![Image not found](./images/ctpn_example.png)
+
+In this example, we present a simple CTPN with four places: _Arrival_ containing incoming tasks, _Waiting_ containing tasks waiting to be assigned to an employee, _Busy_ containing tasks currently being processed by an employee, and _Resources_ containing available employees. Three transitions define the system behavior: _Arrive_, which models the arrival of new tasks; _Start_, which assigns a task to an available employee; and _Complete_, which marks the completion of a task by an employee. Time is represented through delays associated with tokens, indicating the time required for tasks to arrive and be completed.
+Notice that, in the case of the _Start_ transition, the time required to complete a task depends on the type of task and the employee assigned to it. This is represented through the time function _tf(X, Y)_, which checks if the type of task matches the employee's code. If they match, the task is completed in 1 time unit; otherwise, it takes 2 time units. In the system defined above, the initial marking contains two tasks in _Arrival_ (one of type 0 and one of type 1) and two employees in _Resources_ (one with code 0 and one with code 1). If we consider the problem of assigning tasks to employees to minimize the overall completion time, we can observe that the CTPN model does not provide a mechanism to express this decision-making problem. The _Start_ transition is non-deterministic, meaning that when it is enabled, the combination of tokens used to fire it is chosen randomly. This randomness does not allow for strategic decision-making based on the current state of the system. Additionally, there is no reward signal to evaluate the quality of the actions taken, making it impossible for an agent to learn and improve its decision-making over time.
 
 ### Action-Evolution Petri Nets
 

@@ -5,6 +5,8 @@ The simulation uses a heuristic solver to assign tasks to employees based on the
 """
 import copy
 import os
+
+import numpy as np
 from simpn.simulator import SimToken
 from gympn.simulator import GymProblem
 from gympn.solvers import GymSolver, RandomSolver, HeuristicSolver
@@ -19,10 +21,10 @@ if __name__ == "__main__":
 
     ###########################################################################
     # Run configurations
-    train = True #set to False to test a trained model
-    run_name = '2025-09-29-13-23-43_run'
+    train = False #set to False to test a trained model
+    run_name = '2025-10-02-11-14-25_run' #specify the run name to load the weights from
+    num_experiments = 1000 #number of test experiments to run (if train=False)
     visualize_random = False  # Set to True to visualize the random solver
-    visualize_heuristic = False # Set to True to visualize the heuristic solver
     visualize_ppo = False  # Set to True to visualize the PPO solver
 
     weights_path = os.path.join(os.getcwd(), "data", "train", run_name, f"best_policy.pth") #customize if needed
@@ -218,31 +220,26 @@ if __name__ == "__main__":
     }
 
 
-    # define perfect heuristic
-    def perfect_heuristic(observable_net, tokens_comb):
-        """
-        This heuristic function selects the best binding based on the task type and resources code.
-        :param observable_net: the observable net.
-        :param tokens_comb: the list of all possible bindings.
-        :return: the best binding.
-        """
-        # The perfect heuristic is to always assign the task to the resources that can do it the fastest (so taks type 0 to resource 0 and task type 1 to resource 1)
-        for k, el in tokens_comb.items():
-            for binding in el:
-                task = binding[0][1].value
-                resource = binding[1][1].value
-                if task['task_type'] == resource['code_employee']:
-                    return {k: binding}
-
-
     if train:
         #training functions
         agency.training_run(length=10, args_dict=default_args)
 
     else:
-        random_average = 0
-        random_std = 0
-        random_reward = []
+        def run_experiments(problem, solver, num_experiments, reporter=None, length=None):
+            rewards = []
+            for i in range(num_experiments):
+                # Set a unique random seed for each experiment
+                #random.seed(i)
+
+                # Create a fresh copy of the problem
+                problem_copy = copy.deepcopy(problem)
+
+                # Run the experiment
+                reward = problem_copy.testing_run(solver, reporter=reporter, length=length)
+                rewards.append(reward)
+            return np.mean(rewards), np.std(rewards)
+
+
         if visualize_random:
             frozen_agency = copy.deepcopy(agency)
             frozen_agency.length = 100 #TODO: parameterize in a better way
@@ -250,37 +247,10 @@ if __name__ == "__main__":
             visual = Visualisation(frozen_agency)
             visual.show()
         else:
-            for i in range(100):
-                frozen_agency = copy.deepcopy(agency)
-                res = frozen_agency.testing_run(length=100, solver=RandomSolver())
-                random_reward.append(res)
-                random_average += res
-                random_std += res ** 2
+            solver = RandomSolver()
+            random_average, random_std = run_experiments(agency, solver, num_experiments, length=10)
 
-            random_average /= 100
-            random_std = (random_std / 100 - random_average ** 2) ** 0.5
             print(f"Random solver average reward: {random_average}, std: {random_std}")
-
-        #heuristic_average = 0
-        #heuristic_std = 0
-        #heuristic_reward = []
-        #for i in range(10):
-        #    frozen_agency = copy.deepcopy(agency)
-        #    solver = HeuristicSolver(perfect_heuristic)
-        #    res = frozen_agency.testing_run(length=10, solver=solver)
-        #    heuristic_reward.append(res)
-        #    heuristic_average += res
-        #    heuristic_std += res ** 2
-
-        #heuristic_average /= 10
-        #heuristic_std = (heuristic_std / 10 - heuristic_average ** 2) ** 0.5
-        #print(f"Heuristic solver average reward: {heuristic_average}, std: {heuristic_std}")
-
-
-
-        ppo_average = 0
-        ppo_std = 0
-        ppo_reward = []
 
         if visualize_ppo:
             frozen_agency = copy.deepcopy(agency)
@@ -289,29 +259,28 @@ if __name__ == "__main__":
             visual = Visualisation(frozen_agency)
             visual.show()
         else:
-            for i in range(100):
-                frozen_agency = copy.deepcopy(agency)
-                solver = GymSolver(weights_path=weights_path, metadata=agency.make_metadata())
-                res = agency.testing_run(length=100, solver=solver)
-                ppo_reward.append(res)
-                ppo_average += res
-                ppo_std += res ** 2
-
-            ppo_average /= 100
-            ppo_std = (ppo_std / 100 - ppo_average ** 2) ** 0.5
+            solver = GymSolver(weights_path=weights_path, metadata=agency.make_metadata())
+            ppo_average, ppo_std = run_experiments(agency, solver, num_experiments, length=10)
             print(f"DRL solver average reward: {ppo_average}, std: {ppo_std}")
 
         if not visualize_random and not visualize_ppo:
-            #create a boxplot
-            import matplotlib.pyplot as plt
-            data = [random_reward, ppo_reward]  # List of lists for boxplot
-            labels = ['Random', 'DRL']  # Labels for the solvers
 
-            fig, ax = plt.subplots()
-            ax.boxplot(data, tick_labels=labels, patch_artist=True, boxprops=dict(facecolor="lightblue"))
+            #perform z-test to verify the statistical significance of the difference in average rewards
+            from math import sqrt
+            from scipy.stats import norm
 
-            ax.set_ylabel('Reward')
-            ax.set_title('Reward Distribution for Different Solvers')
-            plt.show()
+            def check_statistical_significance(mean1, std1, n1, mean2, std2, n2, alpha=0.05):
+                # Calculate the z-score
+                z = (mean1 - mean2) / sqrt((std1 ** 2 / n1) + (std2 ** 2 / n2))
 
-            print("Run finished. If you want to visualize the results, set visualize_random or visualize_ppo to True.")
+                # Calculate the p-value (two-tailed test)
+                p_value = 2 * norm.sf(abs(z))
+
+                # Check significance
+                significant = p_value < alpha
+
+                return z, p_value, significant
+
+            z, p_value, significant = check_statistical_significance(ppo_average, ppo_std, num_experiments, random_average, random_std, num_experiments)
+            print(f"Z-score: {z}, P-value: {p_value}, Statistically Significant: {significant}")
+            print(f"The percentage difference between the two average rewards is {100 * (ppo_average - random_average) / abs(random_average)}%")
