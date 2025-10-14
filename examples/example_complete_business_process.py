@@ -169,9 +169,6 @@ if __name__ == "__main__":
 
     ###########################################################################
 
-
-
-
     # Default training arguments (change them as needed)
     default_args = {
         # Algorithm Parameters
@@ -228,9 +225,6 @@ if __name__ == "__main__":
         def run_experiments(problem, solver, num_experiments, reporter=None, length=None):
             rewards = []
             for i in range(num_experiments):
-                # Set a unique random seed for each experiment
-                #random.seed(i)
-
                 # Create a fresh copy of the problem
                 problem_copy = copy.deepcopy(problem)
 

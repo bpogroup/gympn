@@ -201,4 +201,5 @@ print(res)
 This code initializes a `GymSolver` object with the trained weights and metadata from the A-E PN environment, allowing the agent to interact with the environment and make decisions based on the learned policy.
 
 ### Conclusion
-This short tutorial focused on the main concepts and constructs in `gympn` to model decision-making problems using Action-Evolution Petri Nets. More advanced features 
+This short tutorial focused on the main concepts and constructs in `gympn` to model decision-making problems using Action-Evolution Petri Nets.
+To check a more complex example, continue to the [complete example](complete_example.md) tutorial.
