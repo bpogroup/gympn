@@ -27,7 +27,7 @@ def test_training():
     Test a training in the Gym Simulator.
     """
 
-    train = True  # if True, train a model, else test the trained model
+    train = False  # if True, train a model, else test the trained model
     test = True
     random = True
     heuristic = True
@@ -44,10 +44,9 @@ def test_training():
     stock_phone_cases = supply_chain.add_var("stock_phone_cases", var_attributes=['id'])
     stock_chips = supply_chain.add_var("stock_chips", var_attributes=['id'])
     stock_game_cases = supply_chain.add_var("stock_game_cases", var_attributes=['id'])
-    stock_phone_NL = supply_chain.add_var("stock_phone_NL", var_attributes=['id']) #can transport is a boolean variable that indicates if the stock can be transported to DE
+    stock_phone_NL = supply_chain.add_var("stock_phone_NL", var_attributes=['id'])
     stock_game_NL = supply_chain.add_var("stock_game_NL", var_attributes=['id'])
     stock_phone_DE = supply_chain.add_var("stock_phone_DE", var_attributes=['id'])
-
 
     # Define demand variables
     demand = supply_chain.add_var("demand", var_attributes=['node', "count"])
@@ -57,7 +56,7 @@ def test_training():
     supply_pool.put({'product_type': 2})  # game cases
     supply_pool.put({'product_type': 3})  # external phone order
     supply_pool.put({'product_type': 4})  # external game order
- 
+
 
     ordering_budget.put({'budget': 6})
 
@@ -103,11 +102,7 @@ def test_training():
     # Transportation actions
     supply_chain.add_action([stock_phone_NL], [stock_phone_DE],
                             behavior=lambda x: [SimToken({'product_type': 4}, delay=1)],
-                            name="transport_phone") # TODO: how not to act (for now, it only postpones the availability of the inventory in NL)
-
-    # Do not transport
-    supply_chain.add_action([stock_phone_NL], [stock_phone_NL], behavior= lambda x: [SimToken(x, delay=1)], name="do_not_transport_phone")
-    #supply_chain.add_event([not_transported_stock_phone_NL], [stock_phone_NL], behavior= lambda x: [SimToken(x, delay=1)], name="make_stock_available")
+                            name="transport_phone") # TODO: how not to act
 
     # Demand fulfillment
 
@@ -115,28 +110,28 @@ def test_training():
                            behavior= lambda x,y: [SimToken({'node': 0, 'count': y['count'] - 1})],
                            guard= lambda x,y: y['node'] == 0 and y['count'] > 0, name="demand_phone_NL",
                            reward_function=lambda x,y: 1)
-    supply_chain.add_event([stock_phone_DE, demand], [demand], 
+    supply_chain.add_event([stock_phone_DE, demand], [demand],
                            behavior= lambda x,y: [SimToken({'node': 1, 'count': y['count'] - 1})],
                            guard= lambda x,y: y['node'] == 1 and y['count'] > 0, name="demand_phone_DE",
                            reward_function=lambda x,y: 1)
-    supply_chain.add_event([stock_game_NL, demand], [demand], 
+    supply_chain.add_event([stock_game_NL, demand], [demand],
                            behavior= lambda x,y: [SimToken({'node': 2, 'count': y['count'] - 1})],
                            guard= lambda x,y: y['node'] == 2 and y['count'] > 0, name="demand_game_NL",
                            reward_function=lambda x,y: 1)
-    
+
     def demand_function(a, d):
         # Generate next turn demand
         node = int(np.random.randint(0, 3))
         count = int(np.random.randint(1, 7))
 
         return [a, SimToken({'node': node, 'count': count}, delay=1)]
-    
+
 
     supply_chain.add_event([stock_phone_NL.queue, demand], [stock_phone_NL.queue, demand],
                            behavior = demand_function,
-                           guard = lambda x, y: y['count'] == 0, 
+                           guard = lambda x, y: y['count'] == 0,
                            name="demand_next_round")
-    
+
     # Define which variables are observable (by default, every SimVar is observable, only unobservable if specified)
     supply_chain.set_unobservable(simvars = ['demand'], token_attrs = {'demand': ['node', 'count']})
 
@@ -152,8 +147,6 @@ def test_training():
 
         total_phone_cases = len(phone_cases_stock_values) + ordered_phone_cases
         total_chips = len(chips_stock_values) + ordered_chips
-
-
 
         # If we can produce phones, always do that
         if 'produce_phone' in actions_dict.keys():
@@ -188,80 +181,7 @@ def test_training():
             v = actions_dict[k][0]
             return {k: v}
 
-    def balanced_heuristic(pn, actions_dict):
-        """
-        A heuristic that balances the production of phones and games.
-        :param pn: the Petri net.
-        :param actions_dict: the available actions.
-        :return: a dictionary with the action to take.
-        """
-        # Get current stock levels by checking the marking length of each place
-        ordered_token_values = HeuristicSolver.get_place_tokens(place_id='ordered', pn=pn)
-        phone_cases_stock_values = [t.value for p in pn.places if p._id == 'stock_phone_cases' for t in p.marking]
-        chips_stock_values = [t.value for p in pn.places if p._id == 'stock_chips' for t in p.marking]
-        game_cases_stock_values = [t.value for p in pn.places if p._id == 'stock_game_cases' for t in p.marking]
 
-        # Get total expected inventory (current stock + orders in transit)
-        ordered_phone_cases = len([t for t in ordered_token_values if t['product_type'] == 0])
-        ordered_chips = len([t for t in ordered_token_values if t['product_type'] == 1])
-        ordered_game_cases = len([t for t in ordered_token_values if t['product_type'] == 2])
-
-        total_phone_cases = len(phone_cases_stock_values) + ordered_phone_cases
-        total_chips = len(chips_stock_values) + ordered_chips
-        total_game_cases = len(game_cases_stock_values) + ordered_game_cases
-
-        # Get total inventory of completed phones NL, completed games NL, and completed phones DE
-        phone_NL_stock_values = [t.value for p in pn.places if p._id == 'stock_phone_NL' for t in p.marking]
-        game_NL_stock_values = [t.value for p in pn.places if p._id == 'stock_game_NL' for t in p.marking]
-        phone_DE_stock_values = [t.value for p in pn.places if p._id == 'stock_phone_DE' for t in p.marking]
-
-        # If we can order, first we do that
-        if 'order' in actions_dict.keys():
-
-            # if we have less than 3 chips, order chips
-            if total_chips < 3:
-                ret_val = HeuristicSolver.get_attribute_based_assignments(action="order",
-                                                                          attribute_dict={'product_type': 1},
-                                                                          actions_dict=actions_dict)
-                return {'order': ret_val[0]}
-
-            elif total_phone_cases <= total_game_cases:
-                # order phones if we have more phone cases than chips and game cases
-                ret_val = HeuristicSolver.get_attribute_based_assignments(action="order",
-                                                                          attribute_dict={'product_type': 0},
-                                                                          actions_dict=actions_dict)
-                return {'order': ret_val[0]}
-            elif total_game_cases < total_phone_cases:
-                # order chips if we have more game cases than phone cases and chips
-                ret_val = HeuristicSolver.get_attribute_based_assignments(action="order",
-                                                                          attribute_dict={'product_type': 2},
-                                                                          actions_dict=actions_dict)
-                return {'order': ret_val[0]}
-
-        # If we can produce phones, we do
-        if 'produce_phone' in actions_dict.keys() and len(phone_NL_stock_values) < 2*len(game_NL_stock_values):
-            assignable = actions_dict['produce_phone']
-
-            return {'produce_phone': assignable[0]}
-        elif 'produce_game' in actions_dict.keys():
-            assignable = actions_dict['produce_game']
-
-            # If we can only produce games, do that
-            return {'produce_game': assignable[0]}
-
-
-        #TRANSPORTATION
-        if 'transport_phone' in actions_dict.keys() and len(phone_NL_stock_values) > len(phone_DE_stock_values):
-            assignable = actions_dict['transport_phone']
-            return {'transport_phone': assignable[0]}
-        elif 'not_transport_phone' in actions_dict.keys() and len(phone_NL_stock_values) <= len(phone_DE_stock_values):
-            assignable = actions_dict['not_transport_phone']
-            return {'not_transport_phone': assignable[0]}
-
-
-
-
-        
     # Default training arguments (change them as needed)
     default_args = {
         # Algorithm Parameters
@@ -275,25 +195,25 @@ def test_training():
 
         # Policy Model
         "policy_model": "gnn",
-        "policy_kwargs": {"hidden_layers": [128]},
+        "policy_kwargs": {"hidden_layers": [64]},
         "policy_lr": 3e-4,
-        "policy_updates": 4,
+        "policy_updates": 5,
         "policy_kld_limit": 0.1,
         "policy_weights": "",
         "policy_network": "",
         "score": False,
-        "score_weight": 3e-4,
+        "score_weight": 1e-3,
 
         # Value Model
         "value_model": "gnn",
-        "value_kwargs": {"hidden_layers": [128]},
+        "value_kwargs": {"hidden_layers": [64]},
         "value_lr": 3e-4,
         "value_updates": 10,
         "value_weights": "",
 
         # Training Parameters
         "episodes": 20,
-        "epochs": 500,
+        "epochs": 100,
         "max_episode_length": None,
         "batch_size": 64,
         "sort_states": False,
@@ -327,14 +247,14 @@ def test_training():
 
     if heuristic:
         supply_chain = copy.deepcopy(frozen_pn)
-        solver_heuristic = HeuristicSolver(balanced_heuristic)
+        solver_heuristic = HeuristicSolver(max_phone_production)
         reporter = SimpleReporter()
         res_h = supply_chain.testing_run(solver_heuristic, reporter=reporter)
         print(f'Heuristic policy: {res_h}')
-        
+
     if test:
         supply_chain = copy.deepcopy(frozen_pn)
-        w_p = "C:/Users/20215143/tue_repos/gympn/examples/data/train/2025-07-09-02-16-41_run/best_policy.pth"
+        w_p = "C:/Users/20215143/tue_repos/gympn/examples/data/train/2025-06-05-15-04-36_run/best_policy.pth"
         solver_test = GymSolver(weights_path=w_p, metadata=supply_chain.make_metadata())
         reporter = SimpleReporter()
         supply_chain.set_solver(solver_test)
