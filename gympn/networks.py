@@ -41,6 +41,10 @@ class HeteroActor(ActorCritic):
         else:
             graph = data
             index = data['a_transition']['batch']
+            if 'postpone' in graph.x_dict.keys()  and graph.x_dict['postpone'] is not None:
+                index_postpone = data['postpone']['batch']
+                index = torch.cat((index, index_postpone), dim=0)
+
             print(f"Index unique values {len(set(index.tolist()))}")
 
         x_dict = graph.x_dict
@@ -59,14 +63,23 @@ class HeteroActor(ActorCritic):
                 # Handle NaN values if necessary (e.g., replace with zeros, etc.)
                 x_dict[key] = torch.nan_to_num(value)
 
+
         # Decode 'a_transition' nodes one by one
         x_dict['a_transition'] = self.decoder(x_dict['a_transition'])
 
-        if 'graph' in data.keys():
-            x_dict = softmax(x_dict['a_transition'], dim=0)
+        # check if graph.x_dict contains 'postpone', if so it needs to be decoded as well
+        if 'postpone' in x_dict.keys() and x_dict['postpone'] is not None:
+            x_dict['postpone'] = self.decoder(x_dict['postpone'])
+            relevant_x_dict = torch.cat((x_dict['a_transition'], x_dict['postpone']), dim=0)
         else:
-            x_dict = pyg_softmax(x_dict['a_transition'], index)
+            relevant_x_dict = x_dict['a_transition']
 
+        if 'graph' in data.keys():
+            x_dict = softmax(relevant_x_dict, dim=0)
+        else:
+            x_dict = pyg_softmax(relevant_x_dict, index)
+
+            print(f"relevant_x_dict shape: {relevant_x_dict.shape}, index shape: {index.shape}")
 
         return x_dict
 
@@ -103,14 +116,7 @@ class HeteroCritic(ActorCritic):
         # First convolution
         x_dict = self.conv1(x_dict, edge_index_dict)
 
-        # Aggregation
-        #if 'graph' in data.keys():
-        #    x_dict = {k: v.max(dim=0, keepdim=True) for k, v in x_dict.items() if v is not None}
-        #    x = sum(x_dict.values())  # simple aggregation
-        #else:
-        #    x_dict = scatter(x_dict['a_transition'], index, dim=0, reduce='max')
-        #    x = x_dict
-
+        #TODO: update with postpone as well
         x = global_max_pool(x_dict['a_transition'], index)
 
         # Final linear layer

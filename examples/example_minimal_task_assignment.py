@@ -120,7 +120,7 @@ if __name__ == "__main__":
         "datetag": True,
         "logdir": "data/train",
         "save_freq": 1,
-        "open_tensorboard": True, # Open TensorBoard during training (defaults to False)
+        "open_tensorboard": False, # Open TensorBoard during training (defaults to False)
     }
 
 

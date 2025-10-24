@@ -33,7 +33,7 @@ def test_training():
     heuristic = True
 
     # Instantiate a simulation problem.
-    supply_chain = GymProblem()
+    supply_chain = GymProblem(allow_postpone=True)
 
     # Define ordering variables
     supply_pool = supply_chain.add_var("supply_pool", var_attributes=['product_type'])
@@ -119,17 +119,17 @@ def test_training():
                            guard= lambda x,y: y['node'] == 2 and y['count'] > 0, name="demand_game_NL",
                            reward_function=lambda x,y: 1)
 
-    def demand_function(a, d):
+    def demand_function(d):
         # Generate next turn demand
         node = int(np.random.randint(0, 3))
         count = int(np.random.randint(1, 7))
 
-        return [a, SimToken({'node': node, 'count': count}, delay=1)]
+        return [SimToken({'node': node, 'count': count}, delay=1)]
 
 
-    supply_chain.add_event([stock_phone_NL.queue, demand], [stock_phone_NL.queue, demand],
+    supply_chain.add_event([demand], [demand],
                            behavior = demand_function,
-                           guard = lambda x, y: y['count'] == 0,
+                           #guard = lambda x: x['count'] == 0, #I don't get this guard... and it makes the system go into deadlock when using postpone!
                            name="demand_next_round")
 
     # Define which variables are observable (by default, every SimVar is observable, only unobservable if specified)
@@ -190,14 +190,14 @@ def test_training():
         "lam": 0.99,
         "eps": 0.2,
         "c": 0.2,
-        "ent_bonus": 0.01,
+        "ent_bonus": 0.05,
         "agent_seed": None,
 
         # Policy Model
         "policy_model": "gnn",
-        "policy_kwargs": {"hidden_layers": [64]},
-        "policy_lr": 3e-4,
-        "policy_updates": 5,
+        "policy_kwargs": {"hidden_layers": [128]},
+        "policy_lr": 1e-4,
+        "policy_updates": 20,
         "policy_kld_limit": 0.1,
         "policy_weights": "",
         "policy_network": "",
@@ -207,15 +207,15 @@ def test_training():
         # Value Model
         "value_model": "gnn",
         "value_kwargs": {"hidden_layers": [64]},
-        "value_lr": 3e-4,
-        "value_updates": 10,
+        "value_lr": 1e-4,
+        "value_updates": 20,
         "value_weights": "",
 
         # Training Parameters
-        "episodes": 20,
+        "episodes": 100,
         "epochs": 100,
         "max_episode_length": None,
-        "batch_size": 64,
+        "batch_size": 32,
         "sort_states": False,
         "use_gpu": False,
         "load_policy_network": False,
@@ -226,7 +226,7 @@ def test_training():
         "datetag": True,
         "logdir": "data/train",
         "save_freq": 1,
-        "open_tensorboard": True, # Open TensorBoard during training (defaults to False)
+        "open_tensorboard": False, # Open TensorBoard during training (defaults to False)
     }
 
     res_r = 0
@@ -254,12 +254,12 @@ def test_training():
 
     if test:
         supply_chain = copy.deepcopy(frozen_pn)
-        w_p = "C:/Users/20215143/tue_repos/gympn/examples/data/train/2025-06-05-15-04-36_run/best_policy.pth"
+        w_p = "C:/Users/lobia/PycharmProjects/gympn/data/train/2025-10-24-14-24-42_run/best_policy.pth"
         solver_test = GymSolver(weights_path=w_p, metadata=supply_chain.make_metadata())
         reporter = SimpleReporter()
         supply_chain.set_solver(solver_test)
-        visual = Visualisation(supply_chain)
-        visual.show()
+        #visual = Visualisation(supply_chain)
+        #visual.show()
         res_p = supply_chain.testing_run(solver_test, reporter=reporter, length=10)
         print(f'PPO policy: {res_p}')
     

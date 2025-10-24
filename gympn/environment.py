@@ -73,13 +73,23 @@ class AEPN_Env(Env):
 
         old_rewards = self.pn.reward
         if action < 0 or action >= len(self.pn.pn_actions):
-            raise ValueError(f"Action {action} is not valid. Must be between 0 and {len(self.pn.pn_actions)-1}")
+            valid_len = len(self.pn.pn_actions)-1
+            raise ValueError(f"Action {action} is not valid. Must be between 0 and {valid_len}")
 
-        binding = self.pn.pn_actions[action]
-        self.pn.fire(binding) #the third value is priority (highest for sinle assignment)
-        if binding[-1]._id in self.pn.reward_functions.keys():
-            self.pn.update_reward(binding)
-        self.pn.bindings() #updates the network tag if needed
+        #handle postpone
+        if action == len(self.pn.pn_actions)-1 and self.pn.pn_actions[-1][0] == ['postpone']:
+            self.pn.postpone() #TODO: currently postpone is always reward 0, consider changing it
+            self.pn.just_postponed = True
+            print("Postpone!")
+        else:
+            binding = self.pn.pn_actions[action]
+            self.pn.just_postponed = False
+            print(f"Action {action}: {binding} at time {self.pn.clock}")
+
+            self.pn.fire(binding) #the third value is priority (highest for sinle assignment)
+            if binding[-1]._id in self.pn.reward_functions.keys():
+                self.pn.update_reward(binding)
+            self.pn.bindings() #updates the network tag if needed
 
         observation, terminated, self.i = self.pn.run_evolutions(self.run, self.i, self.active_model)
 

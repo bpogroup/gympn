@@ -121,7 +121,7 @@ class Agent:
             return self.value_model(state)
 
     def train(self, env, episodes=10, epochs=1, max_episode_length=None, verbose=0, save_freq=1,
-              logdir=None, batch_size=64, sort_states=False, test_env=None, test_freq=5, test_episodes=100):
+              logdir=None, batch_size=64, sort_states=False, test_env=None, test_freq=5, test_episodes=10):
         """Train the agent on env with optional testing during training.
 
         Parameters
@@ -269,7 +269,7 @@ class Agent:
             buffer.finish()
         return total_reward, episode_length
 
-    def run_episodes(self, env, episodes=100, max_episode_length=None, store=False):
+    def run_episodes(self, env, episodes=100, tot_steps=None, max_episode_length=None, store=False):
         """Run several episodes, store interaction in buffer, and return history.
 
         Parameters
@@ -278,6 +278,8 @@ class Agent:
             The environment to interact with.
         episodes : int, optional
             The number of episodes to perform.
+        tot_steps : int, optional
+            The total number of steps to perform across all episodes, if episodes is None.
         max_episode_length : int, optional
             The maximum number of steps before the episode is terminated.
         store : bool, optional
@@ -289,6 +291,8 @@ class Agent:
             Dictionary which contains information from the runs.
 
         """
+
+
         history = {'returns': np.zeros(episodes),
                    'lengths': np.zeros(episodes)}
         for i in range(episodes):
@@ -650,6 +654,14 @@ class Agent:
         self.value_model.train()  # set model to training mode
 
         indexes = batch['a_transition'].batch.data
+
+        #handle postpone nodes if present
+        if 'postpone' in batch.x_dict.keys():
+            postpone_indexes = batch['postpone'].batch.data
+            indexes = torch.cat((indexes, postpone_indexes), dim=0)
+        else:
+            print("No postpone nodes found in batch.")
+
         states = batch
         actions = torch.tensor(batch.y)
         logprobs = batch.logprobs.clone()
@@ -662,8 +674,16 @@ class Agent:
 
         # new_logprobs contains, for each unique index in indexes, the value in the slice of logpis corresponding
         # to the current index in indexes with index action[index]
-        new_logprobs = torch.stack(
-            [new_logpis[indexes == index][actions[index]] for index in indexes.unique()]).squeeze(1)
+        try:
+            new_logprobs = torch.stack(
+                [new_logpis[indexes == index][actions[index]] for index in indexes.unique()]).squeeze(1)
+
+
+
+
+        except IndexError:
+            print("IndexError encountered while stacking new_logprobs. Check action indices and batch data.")
+            raise
 
         # Compute the loss and gradients
         # Calculate batch size
@@ -674,8 +694,11 @@ class Agent:
 
         # Compute normalized KLD
         #logpis = torch.cat(logpis, dim=0)
-        kld = torch.sum(new_probs * (new_logpis - logpis)) / batch_size
-
+        try:
+            kld = torch.sum(new_probs * (new_logpis - logpis)) / batch_size
+        except RuntimeError:
+            print("RuntimeError encountered while computing KLD. Check dimensions of new_logpis and logpis.")
+            raise
 
         loss_value = torch.mean(
             self.value_loss.forward(input=self.value_model(states).squeeze(), target=batch.value.clone()))

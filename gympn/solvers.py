@@ -47,7 +47,7 @@ class GymSolver(BaseSolver):
         ----------
         None
         """
-        self.policy_model = torch.load(weights_path)
+        self.policy_model = torch.load(weights_path, weights_only=False)
 
     def solve(self, obs) -> Any:
         return self.policy_model.forward(obs)

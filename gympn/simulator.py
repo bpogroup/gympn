@@ -1,8 +1,9 @@
 import copy
-import inspect
 import os
 import itertools
 import random
+import inspect
+
 
 import numpy as np
 import torch
@@ -40,11 +41,13 @@ class GymProblem(SimProblem):
         :param debugging: if set to True, produces more information for debugging purposes (defaults to True).
     """
 
-    def __init__(self, debugging=True, binding_priority=lambda bindings: bindings[0], tag='e', has_var_attrs=True, solver=None, plot_observations=False):
+    def __init__(self, debugging=True, binding_priority=lambda bindings: bindings[0], tag='e', has_var_attrs=True, solver=None, plot_observations=False, allow_postpone=True):
         super().__init__(debugging, binding_priority)
 
         self.network_tag = NetworkTag(tag)  # boolean to indicate if it is time to take action ('a') or evolutions (i.e. normal events, 'e')
         self.has_var_attrs = has_var_attrs  # boolean to indicate if the problem has variable attributes (necessary for DRL)
+        self.allow_postpone = allow_postpone  # boolean to indicate if the problem allows postponing actions
+        self.just_postponed = False  # boolean to indicate if the system just postponed
 
         self.reward_functions = {} # reward functions are associated to events/actions through a dictionary for backward compatibility with simpn events
         self.var_attributes = {} # similarly, places need to be associated with the attributes of their tokens
@@ -103,7 +106,7 @@ class GymProblem(SimProblem):
 
         :param name: the identifier of the SimVar.
         :param initial: the initial value of the SimVar.
-        :var_attributes: the set of attributes that characterize the tokens in the Simvar
+        :var\_attributes: the set of attributes that characterize the tokens in the Simvar
         :categorical: a dictionary containing var attributes as names and a list [min, max, step] specifying the range and step (necessary for one-hot-encoding)
         :return: a SimVar with the specified parameters.
         """
@@ -211,8 +214,46 @@ class GymProblem(SimProblem):
                 raise TypeError(
                     "Event " + t_name + ": the constraint function must take as many parameters as there are input variables.")
 
+        # If the problem allows postpone, all SimActions also have a guard that checks if the action was just postponed
+
+
+
+        if self.allow_postpone:
+            if guard is not None:
+                old_guard = guard
+                sig = inspect.signature(old_guard)
+                params = ', '.join(sig.parameters.keys())
+
+                # Create the function code as a string
+                func_code = f"""def new_guard({params}):
+                if self.just_postponed:
+                    return False
+                return old_guard({params})
+                """
+
+                # Prepare the local namespace for exec
+                local_vars = {'self': self, 'old_guard': old_guard}
+                exec(func_code, local_vars)
+                guard = local_vars['new_guard']
+            else:
+                sig = inspect.signature(behavior)
+                params = ', '.join(sig.parameters.keys())
+
+                # Create the function code as a string
+                func_code = f"""def new_guard({params}):
+                if self.just_postponed:
+                    return False
+                return True
+                """
+
+                # Prepare the local namespace for exec
+                local_vars = {'self': self}
+                exec(func_code, local_vars)
+                guard = local_vars['new_guard']
+
         # Generate and add SimEvent
         result = SimAction(t_name, guard=guard, behavior=behavior, incoming=inflow, outgoing=outflow, solver=solver)
+
         self.actions.append(result)
 
         if reward_function is not None:
@@ -261,6 +302,10 @@ class GymProblem(SimProblem):
         timed_bindings_curr.sort(key=lambda b: b[1])
         timed_bindings_other.sort(key=lambda b: b[1])
 
+        # Prevent advancing clock to action bindings if just postponed
+        if self.allow_postpone and self.just_postponed and self.network_tag.is_action():
+            return [], True
+
         # Check if the tag needs to be updated
         if len(timed_bindings_curr) > 0 and timed_bindings_curr[0][1] <= self.clock:
             pass
@@ -268,15 +313,19 @@ class GymProblem(SimProblem):
             if len(timed_bindings_other) > 0:
                 if timed_bindings_other[0][1] < timed_bindings_curr[0][1]: #switch tag only if the time that enables bindings in the other tag is strictly lower than the time that enables new bindings in the current tag
                     self.network_tag.update_tag()
-                    self.clock = timed_bindings_other[0][1]
+                    if self.clock < timed_bindings_other[0][1]:
+                        self.clock = timed_bindings_other[0][1]
                     timed_bindings_curr = timed_bindings_other
                 else:
-                    self.clock = timed_bindings_curr[0][1]
+                    if self.clock < timed_bindings_curr[0][1]:
+                        self.clock = timed_bindings_curr[0][1]
             else:
-                self.clock = timed_bindings_curr[0][1]
+                if self.clock < timed_bindings_curr[0][1]:
+                    self.clock = timed_bindings_curr[0][1]
         elif len(timed_bindings_curr) == 0 and len(timed_bindings_other) != 0:
             self.network_tag.update_tag()
-            self.clock = timed_bindings_other[0][1]
+            if self.clock < timed_bindings_other[0][1]:
+                self.clock = timed_bindings_other[0][1]
             timed_bindings_curr = timed_bindings_other
         else:
             return [], False
@@ -397,7 +446,7 @@ class GymProblem(SimProblem):
         node_types.append('a_transition')
         node_types.append('e_transition')
 
-        self.expanded_pn, transition_binding_map = self.expand()  # expand the petri net into a new petri net with 1-bounded places
+        self.expanded_pn, transition_binding_map = self.expand_no_future_tokens()  # expand the petri net into a new petri net with 1-bounded places
 
         # Update the HeteroData object with the places attributes and the transition nodes
         for n_t in node_types:
@@ -409,6 +458,7 @@ class GymProblem(SimProblem):
                     if p_name_original == n_t:
 
                         if p.marking:
+
                             for token in p.marking:  # will always be only a single token because places were expanded already
                                 if isinstance(token.value, dict): #token attrs observability assumes tokens are dictionaries
                                     token_value = torch.tensor([float(value) for key, value in token.value.items() if key not in self.unobservable_token_attrs and key not in self.categorical_token_attrs.get(p_name_original, {})]).type(
@@ -460,8 +510,16 @@ class GymProblem(SimProblem):
                     if b_time <= self.clock:
                         pn_bindings[i] = (b_list, b_time)
                         t_nodes.append(torch.tensor(t_values).type(torch.float32))
-                    else:
-                        t_nodes.append(torch.tensor(t_values).type(torch.float32))
+                    #else:
+                    #    t_nodes.append(torch.tensor(t_values).type(torch.float32))
+
+                    #if b_time <= self.clock:
+                    #    pn_bindings[i] = (b_list, b_time)
+                    #    t_nodes.append(torch.tensor(t_values).type(torch.float32))
+                    #    transition_binding_map.append((b_list, b_time, t))  # include only valid bindings
+                    #else:
+                    #    t_nodes.append(
+                    #        torch.tensor(t_values).type(torch.float32))  # still add node, but not as valid action
 
                     a_transition_dict[t._id] = i
 
@@ -554,13 +612,6 @@ class GymProblem(SimProblem):
                         else:
                             ret_graph[key].edge_index = torch.cat((ret_graph[key].edge_index, new_values), dim=1)
 
-        #complete missing edges based on metadata
-        #for edge in self.metadata[1]:
-        #    if edge not in ret_graph.edge_types:
-        #        #create empty edge
-        #        ret_graph[edge] = HeteroData()
-        #        ret_graph[edge].edge_index = torch.empty([2, 0], dtype=torch.int64)
-
         if add_self_loops:
             #create self loops on 'a_transition' nodes
             if 'a_transition' in ret_graph.node_types:
@@ -594,7 +645,31 @@ class GymProblem(SimProblem):
             ret_graph = transform(ret_graph)
 
         self.pn_actions = transition_binding_map
-        if self.metadata is None:
+
+        if self.allow_postpone:
+            # postpone is a new node type that allows to delay actions
+            # it is connected to all nodes if not just_postponed, otherwise it is isolated
+            postpone_node_feature = torch.tensor([[1.0 if not self.just_postponed else 0.0]]).type(torch.float32)
+            ret_graph['postpone'].x = postpone_node_feature
+            if True:#not self.just_postponed:
+                #create edges from all nodes to postpone
+                for n_t in ret_graph.node_types:
+                    if n_t != 'postpone':
+                        num_nodes = ret_graph[n_t].x.size(0)
+                        source_indices = torch.arange(num_nodes)
+                        dest_indices = torch.zeros(num_nodes, dtype=torch.int64)  # all point to the single postpone node
+                        edge_indices = torch.stack([source_indices, dest_indices])
+                        key = (n_t, 'edge', 'postpone')
+                        if key not in ret_graph.edge_types:
+                            ret_graph[key].edge_index = edge_indices
+                        else:
+                            ret_graph[key].edge_index = torch.cat((ret_graph[key].edge_index, edge_indices), dim=1)
+
+                #also include postpone in self.pn_actions with special binding
+                transition_binding_map.append((['postpone'], self.clock)) #no binding, time is current clock
+
+
+        if self.metadata is None: #TODO: handle case where postpone is initially not available
             self.metadata = ret_graph.metadata()
 
         if self.plot_observations:
@@ -633,6 +708,116 @@ class GymProblem(SimProblem):
 
         return updated_graph
 
+    def expand_no_future_tokens(self):
+        """
+        Expands the attributed A-E PN into a 1-bounded attributed A-E PN.
+        Filters out tokens and bindings with time > self.clock.
+        :return: A tuple containing:
+        - The expanded `GymProblem` instance.
+        - A mapping of transitions to their bindings in the expanded problem.
+        """
+        expanded_pn = GymProblem(has_var_attrs=True)
+        expanded_pn.arcs = []
+
+        #keep track of valid tokens in every place
+        token_map = {}
+
+        # Expand places, filtering out future tokens
+        for p in self.places:
+            valid_tokens = [t for t in p.marking if t.time <= self.clock]
+            token_map[p._id] = valid_tokens
+            if valid_tokens:
+                for i, t in enumerate(valid_tokens):
+                    new_place_id = f"{p._id}.{i}"
+                    new_place = expanded_pn.add_var(name=new_place_id, var_attributes=self.var_attributes[p._id])
+                    new_place.put(t.value, time=t.time)
+            else:
+                new_place_id = f"{p._id}.0"
+                expanded_pn.add_var(name=new_place_id, var_attributes=self.var_attributes[p._id])
+
+        # Expand events (evolutions)
+        for t in self.events:
+            new_inflow = []
+            for p in t.incoming:
+                if isinstance(p, SimVar):
+                    if len(token_map[p._id]):
+                        for i in range(len(token_map[p._id])):
+                            new_inflow.append(expanded_pn.id2node[f"{p._id}.{i}"])
+                            expanded_pn.arcs.append((expanded_pn.id2node[f"{p._id}.{i}"], t))
+                    else:
+                        new_inflow.append(expanded_pn.id2node[f"{p._id}.0"])
+                        expanded_pn.arcs.append((expanded_pn.id2node[f"{p._id}.0"], t))
+                elif isinstance(p, SimVarQueue):
+                    new_inflow.append(p)
+
+            new_outflow = []
+            for p in t.outgoing:
+                if isinstance(p, SimVar):
+                    if len(token_map[p._id]):
+                        for i in range(len(token_map[p._id])):
+                            new_outflow.append(expanded_pn.id2node[f"{p._id}.{i}"])
+                            expanded_pn.arcs.append((t, expanded_pn.id2node[f"{p._id}.{i}"]))
+                    else:
+                        new_outflow.append(expanded_pn.id2node[f"{p._id}.0"])
+                        expanded_pn.arcs.append((t, expanded_pn.id2node[f"{p._id}.0"]))
+                elif isinstance(p, SimVarQueue):
+                    new_outflow.append(p)
+
+            expanded_pn.add_event(new_inflow, new_outflow, behavior=t.behavior, name=t._id)
+
+        # Expand actions (transitions)
+        transition_binding_map = []
+        for t in self.actions:
+            transition_bindings = self.event_bindings(t)
+            valid_transition_bindings = [(binding, time) for (binding, time) in transition_bindings if time <= self.clock]
+            if len(valid_transition_bindings) == 0:
+                continue  # No valid bindings for this transition
+            for binding, time in valid_transition_bindings:
+                if time > self.clock:
+                    print("Unexpected future binding found during expansion.")
+                    continue  # Skip future bindings
+
+                transition_binding_map.append([binding, time, t])
+                new_inflows = {}
+                new_outflows = {}
+
+                for place, token in binding:
+                    for new_place in [pl for pl in expanded_pn.places if
+                                      self._get_string_before_last_dot(pl._id) == place._id]:
+                        new_inflows.setdefault(place._id, []).append(new_place)
+
+                for p in t.outgoing:
+                    if len(token_map[p._id]):
+                        for i in range(len(token_map[p._id])):
+                            new_outflows.setdefault(p._id, []).append(expanded_pn.id2node[f"{p._id}.{i}"])
+                    else:
+                        new_outflows[p._id] = [expanded_pn.id2node[f"{p._id}.0"]]
+
+                in_cartesian_product = [list(comb) for comb in itertools.product(*new_inflows.values())]
+                out_cartesian_product = list(new_outflows.values())[0]
+
+            for index_new_action, io in enumerate(in_cartesian_product):
+                new_inflow = io
+                new_outflow = out_cartesian_product
+                #dummy behavior that does nothing, as the actual behavior is not relevant in the expanded net
+                #dummy behavior takes as many arguments as there are input places of the new transition
+                dummy_behavior = self._make_dummy_behavior(len(new_inflow))
+
+                new_tr = expanded_pn.add_action(new_inflow, new_outflow, behavior=dummy_behavior, name=f"{t._id}.{index_new_action}")
+                for el in new_tr.incoming:
+                    expanded_pn.arcs.append((el, new_tr))
+                for el in new_tr.outgoing:
+                    expanded_pn.arcs.append((new_tr, el))
+
+        return expanded_pn, transition_binding_map
+
+    def _make_dummy_behavior(self, num_args):
+        # Create a dummy function with the correct number of arguments
+        arg_list = ', '.join([f'arg{i}' for i in range(num_args)])
+        func_code = f"def dummy_behavior({arg_list}):\n    return [None] * {num_args}"
+        local_vars = {}
+        exec(func_code, {}, local_vars)
+        return local_vars['dummy_behavior']
 
     def expand(self):
         """
@@ -905,6 +1090,9 @@ class GymProblem(SimProblem):
             bindings, active_model = self.bindings()
             if self.clock <= self.length:
                 if len(bindings) > 0 and self.network_tag.is_evolution():
+                    if self.just_postponed:
+                        print("Postpone taking place!")
+                    self.just_postponed = False
                     binding = random.choice(bindings)
                     run.append(binding)
                     self.fire(binding)
@@ -913,15 +1101,19 @@ class GymProblem(SimProblem):
                     i += 1
 
                 elif len(bindings) > 0 and self.network_tag.is_action():#give control to the gym env by returning the current observation
-                    if len(bindings) > 1: #only call the environment if there is more than one action available
-                        return self.get_graph_observation(), self.clock > self.length or not active_model, i
+                    if not self.allow_postpone:
+                        if len(bindings) > 1: #only call the environment if there is more than one action available
+                            return self.get_graph_observation(), self.clock > self.length or not active_model, i
+                        else:
+                            binding = bindings[0]
+                            run.append(binding)
+                            self.fire(binding)
+                            if binding[-1]._id in self.reward_functions.keys():
+                                self.update_reward(binding)
+                            i += 1
                     else:
-                        binding = bindings[0]
-                        run.append(binding)
-                        self.fire(binding)
-                        if binding[-1]._id in self.reward_functions.keys():
-                            self.update_reward(binding)
-                        i += 1
+                        active_model = False if self.just_postponed else True
+                        return self.get_graph_observation(), self.clock > self.length or not active_model, i
                 else:
                     active_model = False
             else:
@@ -980,13 +1172,11 @@ class GymProblem(SimProblem):
                     if e_m not in edges_meta:
                         edges_meta.append(e_m)
 
-        #include also metadata for all the places to all other places
-        #for p in self.places:
-        #    for p2 in self.places:
-        #       if p != p2:
-        #            e_m = (p._id, 'edge', p2._id)
-        #            if e_m not in edges_meta:
-        #               edges_meta.append(e_m)
+        if self.allow_postpone:
+            nodes_meta.append('postpone')
+            for n in nodes_meta:
+                if n != 'postpone':
+                    edges_meta.append((n, 'edge', 'postpone'))
 
         return tuple([nodes_meta, edges_meta])
 
@@ -1234,6 +1424,16 @@ class GymProblem(SimProblem):
                 if attr not in self.var_attributes[k]:
                     raise Exception(f"Exception in setting unobservable token attrs. Unobservable attribute {attr} must be present in the place's attributes.")
 
+    def postpone(self):
+        """
+        Postpones the current action by advancing the clock to the next valid evolution event.
+        Ensures time monotonicity and avoids structural livelock.
+        """
+        if not self.allow_postpone:
+            raise Exception("Postpone is not allowed in this A-E PN.")
+
+        self.network_tag.tag = 'e'
+        self.just_postponed = True
 
 class SimAction(SimEvent):
     """
@@ -1268,6 +1468,7 @@ class SimAction(SimEvent):
         :param binding: The binding to execute, represented as a tuple ([(place, token), ...], time, action).
         :param problem: The `GymProblem` instance representing the simulation problem.
         """
+
         return self.solver.solve(binding, problem)
 
     def create_environment(self):
