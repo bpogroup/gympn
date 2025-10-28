@@ -341,7 +341,7 @@ class Agent:
             history['kld'].append(kld / batches)
             history['ent'].append(ent / batches)
             if self.kld_limit is not None and kld/batches > self.kld_limit:
-                print(f'Early stopping at epoch {epoch+1} due to KLD divergence.')
+                print(f'Early stopping at epoch {epoch+1} due to KLD divergence. The computed KLD was {kld/batches}.')
                 return {k: np.array(v) for k, v in history.items()}
         return {k: np.array(v) for k, v in history.items()}
 
@@ -403,6 +403,7 @@ class Agent:
         #torch.nn.utils.clip_grad_norm_(self.policy_model.parameters(), 0.5) #as implemented in tianshou ppo
         self.policy_optimizer.step()
 
+        print(f"KLD divergence: {kld.item()}")
         return loss.item(), kld.item(), ent.item()
 
     # Assuming `model` is your PyTorch model
@@ -633,7 +634,7 @@ class Agent:
             history['kld'].append(kld / batches)
             history['ent'].append(ent / batches)
             if self.kld_limit is not None and kld/batches > self.kld_limit:
-                print(f'Early stopping at epoch {epoch+1} due to KLD divergence.')
+                print(f'Early stopping at epoch {epoch+1} due to KLD divergence. The computed KLD was {kld/batches}.')
                 return {k: np.array(v) for k, v in history.items()}
         return {k: np.array(v) for k, v in history.items()}
 
@@ -696,6 +697,7 @@ class Agent:
         #logpis = torch.cat(logpis, dim=0)
         try:
             kld = torch.sum(new_probs * (new_logpis - logpis)) / batch_size
+            #print(f'KLD divergence computed: {kld.item()}')
         except RuntimeError:
             print("RuntimeError encountered while computing KLD. Check dimensions of new_logpis and logpis.")
             raise

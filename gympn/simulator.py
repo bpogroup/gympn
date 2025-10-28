@@ -277,6 +277,9 @@ class GymProblem(SimProblem):
             - A list of tuples ([(place, token), (place, token), ...], time, event) representing the enabled bindings.
             - A boolean indicating whether the model is still active.
         """
+        #if self.just_postponed:
+            #print("Just postponed, checking bindings...")
+
         timed_bindings_evo = []
         timed_bindings_act = []
 
@@ -439,14 +442,15 @@ class GymProblem(SimProblem):
         new_values = None  # used to store the new values of the current place
         a_transition_dict = {}  # helper to keep track of the transitions indexes in the graph
         e_transition_dict = {}  # helper to keep track of the transitions indexes in the graph
-        pn_bindings = {}  # the observation contains the bindings corresponding to expanded action nodes
 
+
+        transition_binding_map = []
         node_types = [p._id for p in self.places if
                       p._id not in self.unobservable_simvars]  # [set(p.tokens_attributes.keys()) for p in self.places]
         node_types.append('a_transition')
         node_types.append('e_transition')
 
-        self.expanded_pn, transition_binding_map = self.expand_no_future_tokens()  # expand the petri net into a new petri net with 1-bounded places
+        self.expanded_pn, transition_binding_map_wrong = self.expand_no_future_tokens()  # expand the petri net into a new petri net with 1-bounded places
 
         # Update the HeteroData object with the places attributes and the transition nodes
         for n_t in node_types:
@@ -505,11 +509,14 @@ class GymProblem(SimProblem):
                         t_values = [] #otherwise they do not need to carry information
 
                     b_list = [el.marking[0] for el in t.incoming]
+                    binds = [([place for place in self.places if place._id == GymProblem._get_string_before_last_dot(el._id)][0], el.marking[0]) for el in t.incoming]
                     b_time = max([t.time for t in b_list]) #changed min to max, it was an error!
+                    original_transition = [action for action in self.actions if action._id == GymProblem._get_string_before_last_dot(t._id)][0]
 
                     if b_time <= self.clock:
-                        pn_bindings[i] = (b_list, b_time)
+
                         t_nodes.append(torch.tensor(t_values).type(torch.float32))
+                        transition_binding_map.append((binds, b_time, original_transition))  # include only valid bindings
                     #else:
                     #    t_nodes.append(torch.tensor(t_values).type(torch.float32))
 
@@ -560,75 +567,75 @@ class GymProblem(SimProblem):
 
 
         # Update the HeteroData object with the arcs
-        edge_types = ['edge'] # possibly expand with something like [a.inscription for a in expanded_pn.arcs]
-        for e_t in edge_types:
-            if e_t != 'self_loop': #currently self loops are not supported
-                for a in self.expanded_pn.arcs:
-                    #a[0] is the source
-                    source_name = GymProblem._get_string_before_last_dot(a[0]._id)
-                    dest_name = GymProblem._get_string_before_last_dot(a[1]._id)
-                    key = None
+        for a in self.expanded_pn.arcs:
+            #a[0] is the source
+            source_name = GymProblem._get_string_before_last_dot(a[0]._id)
+            dest_name = GymProblem._get_string_before_last_dot(a[1]._id)
+            key = None
 
-                    if type(a[0]) is SimVar and source_name not in self.unobservable_simvars:# and source_name in ret_graph: #if the place has tokens inside of it
-                        if type(a[1]) is SimAction:
-                            key = (source_name, 'edge', 'a_transition')
-                            if a[0].marking:
-                                new_values = torch.tensor(
-                                    [[int(a[0]._id.split('.')[-1])],
-                                     [a_transition_dict[a[1]._id]]]).type(torch.int64)
-                            else:
-                                new_values = torch.empty([2, 0], dtype=torch.int64)
-                        else:
-                            key = (source_name, 'edge', 'e_transition')
-                            if a[0].marking:
-                                new_values = torch.tensor(
-                                    [[int(a[0]._id.split('.')[-1])],
-                                     [e_transition_dict[a[1]._id]]]).type(torch.int64)
-                            else:
-                                new_values = torch.empty([2, 0], dtype=torch.int64)
+            if type(a[0]) is SimVar and source_name not in self.unobservable_simvars:# and source_name in ret_graph: #if the place has tokens inside of it
+                if type(a[1]) is SimAction:
+                    #key = (source_name, 'edge', 'a_transition')
+                    #different edge type for each place to transition connection
+                    key = (source_name, 'edge_to_a_transition', 'a_transition')
+                    if a[0].marking:
+                        new_values = torch.tensor(
+                            [[int(a[0]._id.split('.')[-1])],
+                             [a_transition_dict[a[1]._id]]]).type(torch.int64)
+                    else:
+                        new_values = torch.empty([2, 0], dtype=torch.int64)
+                else:
+                    #key = (source_name, 'edge', 'e_transition')
+                    key = (source_name, 'edge_to_e_transition', 'e_transition')
+                    if a[0].marking:
+                        new_values = torch.tensor(
+                            [[int(a[0]._id.split('.')[-1])],
+                             [e_transition_dict[a[1]._id]]]).type(torch.int64)
+                    else:
+                        new_values = torch.empty([2, 0], dtype=torch.int64)
 
-                    elif type(a[1]) is SimVar and dest_name not in self.unobservable_simvars:# and ret_graph[dest_name]: #if the place has tokens inside of it
-                        if type(a[0]) is SimAction:
-                            key = ('a_transition', 'edge', dest_name)
-                            if a[1].marking:
-                                new_values = torch.tensor(
-                                    [[a_transition_dict[a[0]._id]],
-                                     [int(a[1]._id.split('.')[-1])]]).type(torch.int64)
-                            else:
-                                new_values = torch.empty([2, 0], dtype=torch.int64)
-                        else:
-                            key = ('e_transition', 'edge', a[1]._id.split('.')[0])
-                            if a[1].marking:
-                                new_values = torch.tensor(
-                                    [[e_transition_dict[a[0]._id]],
-                                     [int(a[1]._id.split('.')[-1])]]).type(torch.int64)
-                            else:
-                                new_values = torch.empty([2, 0], dtype=torch.int64)
+            elif type(a[1]) is SimVar and dest_name not in self.unobservable_simvars:# and ret_graph[dest_name]: #if the place has tokens inside of it
+                if type(a[0]) is SimAction:
+                    #key = ('a_transition', 'edge', dest_name)
+                    key = ('a_transition', 'edge_to_' + dest_name, dest_name)
+                    if a[1].marking:
+                        new_values = torch.tensor(
+                            [[a_transition_dict[a[0]._id]],
+                             [int(a[1]._id.split('.')[-1])]]).type(torch.int64)
+                    else:
+                        new_values = torch.empty([2, 0], dtype=torch.int64)
+                else:
+                    #key = ('e_transition', 'edge', a[1]._id.split('.')[0])
+                    key = ('e_transition', 'edge_to_' + dest_name, dest_name)
+                    if a[1].marking:
+                        new_values = torch.tensor(
+                            [[e_transition_dict[a[0]._id]],
+                             [int(a[1]._id.split('.')[-1])]]).type(torch.int64)
+                    else:
+                        new_values = torch.empty([2, 0], dtype=torch.int64)
 
 
-                    if key is not None:
-                        if key not in ret_graph.edge_types:
-                            ret_graph[key].edge_index = new_values
-                        else:
-                            ret_graph[key].edge_index = torch.cat((ret_graph[key].edge_index, new_values), dim=1)
+            if key is not None:
+                if key not in ret_graph.edge_types:
+                    ret_graph[key].edge_index = new_values
+                else:
+                    ret_graph[key].edge_index = torch.cat((ret_graph[key].edge_index, new_values), dim=1)
 
         if add_self_loops:
             #create self loops on 'a_transition' nodes
             if 'a_transition' in ret_graph.node_types:
                 num_a_transitions = ret_graph['a_transition'].x.size(0)
                 self_loop_edges = torch.stack([torch.arange(num_a_transitions), torch.arange(num_a_transitions)])
-                if ('a_transition', 'edge', 'a_transition') not in ret_graph.edge_types:
-                    ret_graph[('a_transition', 'edge', 'a_transition')].edge_index = self_loop_edges
+                #if ('a_transition', 'edge', 'a_transition') not in ret_graph.edge_types:
+                #    ret_graph[('a_transition', 'edge', 'a_transition')].edge_index = self_loop_edges
+                #else:
+                #    ret_graph[('a_transition', 'edge', 'a_transition')].edge_index = torch.cat(
+                #        (ret_graph[('a_transition', 'edge', 'a_transition')].edge_index, self_loop_edges), dim=1)
+                if ('a_transition', 'self_loop', 'a_transition') not in ret_graph.edge_types:
+                    ret_graph[('a_transition', 'self_loop', 'a_transition')].edge_index = self_loop_edges
                 else:
-                    ret_graph[('a_transition', 'edge', 'a_transition')].edge_index = torch.cat(
-                        (ret_graph[('a_transition', 'edge', 'a_transition')].edge_index, self_loop_edges), dim=1)
-
-        #try:
-        #    if ret_graph['a_transition']['x'].shape[0] != len(transition_binding_map):
-        #        raise ValueError("The number of action transitions in the graph does not match the number of actions in the problem.")
-        #except KeyError:
-        #    raise ValueError("The graph does not contain action transitions.") #breaks on last observation
-
+                    ret_graph[('a_transition', 'self_loop', 'a_transition')].edge_index = torch.cat(
+                        (ret_graph[('a_transition', 'self_loop', 'a_transition')].edge_index, self_loop_edges), dim=1)
 
         if remove_empty_nodes:
             #remove empty nodes connects all the incoming edges to the outgoing edges
@@ -651,22 +658,26 @@ class GymProblem(SimProblem):
             # it is connected to all nodes if not just_postponed, otherwise it is isolated
             postpone_node_feature = torch.tensor([[1.0 if not self.just_postponed else 0.0]]).type(torch.float32)
             ret_graph['postpone'].x = postpone_node_feature
-            if True:#not self.just_postponed:
-                #create edges from all nodes to postpone
-                for n_t in ret_graph.node_types:
-                    if n_t != 'postpone':
-                        num_nodes = ret_graph[n_t].x.size(0)
-                        source_indices = torch.arange(num_nodes)
-                        dest_indices = torch.zeros(num_nodes, dtype=torch.int64)  # all point to the single postpone node
-                        edge_indices = torch.stack([source_indices, dest_indices])
-                        key = (n_t, 'edge', 'postpone')
-                        if key not in ret_graph.edge_types:
-                            ret_graph[key].edge_index = edge_indices
-                        else:
-                            ret_graph[key].edge_index = torch.cat((ret_graph[key].edge_index, edge_indices), dim=1)
+            #create special edges from all nodes to postpone
+            for n_t in ret_graph.node_types:
+                if n_t != 'postpone':
+                    num_nodes = ret_graph[n_t].x.size(0)
+                    source_indices = torch.arange(num_nodes)
+                    dest_indices = torch.zeros(num_nodes,
+                                               dtype=torch.int64)  # all point to the single postpone node
+                    edge_indices = torch.stack([source_indices, dest_indices])
 
-                #also include postpone in self.pn_actions with special binding
-                transition_binding_map.append((['postpone'], self.clock)) #no binding, time is current clock
+                    # Use a source-specific edge type
+                    #edge_type = (n_t, f'to_postpone_from_{n_t}', 'postpone')
+                    edge_type = (n_t, 'to_postpone', 'postpone')
+                    if edge_type not in ret_graph.edge_types:
+                        ret_graph[edge_type].edge_index = edge_indices
+                    else:
+                        ret_graph[edge_type].edge_index = torch.cat((ret_graph[edge_type].edge_index, edge_indices),
+                                                                    dim=1)
+
+            #also include postpone in self.pn_actions with special binding
+            transition_binding_map.append((['postpone'], self.clock)) #no binding, time is current clock
 
 
         if self.metadata is None: #TODO: handle case where postpone is initially not available
@@ -1026,6 +1037,11 @@ class GymProblem(SimProblem):
             raise Exception("Though it is strictly speaking possible, we do not allow events like '" + str(
                 self) + "' without incoming arcs.")
 
+        if self.allow_postpone:
+            if type(event) is SimAction:
+                if self.just_postponed:
+                    return []  # cannot take any action right after postponing
+
         bindings = self.tokens_combinations(event)
 
         # a binding must have all incoming places
@@ -1090,8 +1106,8 @@ class GymProblem(SimProblem):
             bindings, active_model = self.bindings()
             if self.clock <= self.length:
                 if len(bindings) > 0 and self.network_tag.is_evolution():
-                    if self.just_postponed:
-                        print("Postpone taking place!")
+                    #if self.just_postponed:
+                        #print("Postpone taking place!")
                     self.just_postponed = False
                     binding = random.choice(bindings)
                     run.append(binding)
@@ -1099,6 +1115,7 @@ class GymProblem(SimProblem):
                     if binding[-1]._id in self.reward_functions.keys():
                         self.update_reward(binding)
                     i += 1
+                    #print(f"Evolution fired at time {self.clock}")
 
                 elif len(bindings) > 0 and self.network_tag.is_action():#give control to the gym env by returning the current observation
                     if not self.allow_postpone:
@@ -1140,8 +1157,47 @@ class GymProblem(SimProblem):
         #print(f"produced reward {r_f} with binding {binding}")
         self.reward += r_f
 
-
     def make_metadata(self, add_self_loops=True):
+        nodes_meta = ['e_transition', 'a_transition']
+        edges_meta = []
+        if add_self_loops:
+            edges_meta.append(('a_transition', 'self_loop', 'a_transition'))
+
+        for p in self.places:
+            nodes_meta.append(p._id)
+        for e in self.events:
+            for inc in e.incoming:
+                if type(inc) is SimVar:
+                    e_m = (inc._id, 'edge_to_e_transition', 'e_transition')
+                    if e_m not in edges_meta:
+                        edges_meta.append(e_m)
+            for out in e.outgoing:
+                if type(out) is SimVar:
+                    e_m = ('e_transition', 'edge_to_' + out._id, out._id)
+                    if e_m not in edges_meta:
+                        edges_meta.append(e_m)
+        for a in self.actions:
+            for inc in a.incoming:
+                if type(inc) is SimVar:
+                    e_m = (inc._id, 'edge_to_a_transition', 'a_transition')
+                    if e_m not in edges_meta:
+                        edges_meta.append(e_m)
+            for out in a.outgoing:
+                if type(out) is SimVar:
+                    e_m = ('a_transition', 'edge_to_' + out._id, out._id)
+                    if e_m not in edges_meta:
+                        edges_meta.append(e_m)
+
+        if self.allow_postpone:
+            nodes_meta.append('postpone')
+            for n in nodes_meta:
+                if n != 'postpone':
+                    edges_meta.append((n, 'to_postpone', 'postpone'))
+
+        return tuple([nodes_meta, edges_meta])
+
+
+    def old_make_metadata(self, add_self_loops=True):
         nodes_meta = ['e_transition', 'a_transition']
         edges_meta = []
         if add_self_loops:
@@ -1176,7 +1232,7 @@ class GymProblem(SimProblem):
             nodes_meta.append('postpone')
             for n in nodes_meta:
                 if n != 'postpone':
-                    edges_meta.append((n, 'edge', 'postpone'))
+                    edges_meta.append((n, f'to_postpone_from_{n}', 'postpone'))
 
         return tuple([nodes_meta, edges_meta])
 

@@ -195,10 +195,10 @@ def test_training():
 
         # Policy Model
         "policy_model": "gnn",
-        "policy_kwargs": {"hidden_layers": [128]},
+        "policy_kwargs": {"hidden_layers": [128, 64]},
         "policy_lr": 1e-4,
-        "policy_updates": 20,
-        "policy_kld_limit": 0.1,
+        "policy_updates": 4,
+        "policy_kld_limit": 0.5,
         "policy_weights": "",
         "policy_network": "",
         "score": False,
@@ -206,7 +206,7 @@ def test_training():
 
         # Value Model
         "value_model": "gnn",
-        "value_kwargs": {"hidden_layers": [64]},
+        "value_kwargs": {"hidden_layers": [128, 64]},
         "value_lr": 1e-4,
         "value_updates": 20,
         "value_weights": "",

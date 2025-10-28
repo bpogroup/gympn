@@ -16,7 +16,7 @@ class ActorCritic(torch.nn.Module):
         self.load_state_dict(torch.load(filename))
 
 class HeteroActor(ActorCritic):
-    def __init__(self, input_size=-1, hidden_size=64, output_size=16, metadata=None, num_heads=1):
+    def __init__(self, input_size=-1, hidden_size=128, output_size=64, metadata=None, num_heads=1):
         super(HeteroActor, self).__init__()
 
         self.input_size = input_size
@@ -79,15 +79,13 @@ class HeteroActor(ActorCritic):
         else:
             x_dict = pyg_softmax(relevant_x_dict, index)
 
-            print(f"relevant_x_dict shape: {relevant_x_dict.shape}, index shape: {index.shape}")
-
         return x_dict
 
 
 
 
 class HeteroCritic(ActorCritic):
-    def __init__(self, input_size=-1, hidden_size=64, output_size=16, metadata=None, num_heads=1):
+    def __init__(self, input_size=-1, hidden_size=128, output_size=64, metadata=None, num_heads=1):
         super(HeteroCritic, self).__init__()
 
         self.input_size = input_size
