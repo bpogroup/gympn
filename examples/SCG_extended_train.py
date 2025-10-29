@@ -18,9 +18,18 @@ from simpn.simulator import SimToken
 from gympn.simulator import GymProblem
 from simpn.reporters import SimpleReporter
 from gympn.solvers import HeuristicSolver, GymSolver, RandomSolver
-from gympn.visualisation import Visualisation
-from gympn.utils import sim_tokens_values_from_bindings, binding_from_tokens_values
 
+
+def run_experiments(problem, solver, num_experiments, reporter=None, length=None):
+    rewards = []
+    for i in range(num_experiments):
+        # Create a fresh copy of the problem
+        problem_copy = copy.deepcopy(problem)
+
+        # Run the experiment
+        reward = problem_copy.testing_run(solver, reporter=reporter, length=length)
+        rewards.append(reward)
+    return np.mean(rewards), np.std(rewards)
 
 def test_training():
     """
@@ -28,9 +37,8 @@ def test_training():
     """
 
     train = False  # if True, train a model, else test the trained model
-    test = True
-    random = True
-    heuristic = True
+    test_episodes = 100
+
 
     # Instantiate a simulation problem.
     supply_chain = GymProblem(allow_postpone=True)
@@ -190,13 +198,13 @@ def test_training():
         "lam": 0.99,
         "eps": 0.2,
         "c": 0.2,
-        "ent_bonus": 0.05,
+        "ent_bonus": 0.1,
         "agent_seed": None,
 
         # Policy Model
         "policy_model": "gnn",
         "policy_kwargs": {"hidden_layers": [128, 64]},
-        "policy_lr": 1e-4,
+        "policy_lr": 3e-5,
         "policy_updates": 4,
         "policy_kld_limit": 0.5,
         "policy_weights": "",
@@ -207,15 +215,15 @@ def test_training():
         # Value Model
         "value_model": "gnn",
         "value_kwargs": {"hidden_layers": [128, 64]},
-        "value_lr": 1e-4,
-        "value_updates": 20,
+        "value_lr": 3e-5,
+        "value_updates": 10,
         "value_weights": "",
 
         # Training Parameters
-        "episodes": 100,
+        "episodes": 20,
         "epochs": 100,
         "max_episode_length": None,
-        "batch_size": 32,
+        "batch_size": 64,
         "sort_states": False,
         "use_gpu": False,
         "load_policy_network": False,
@@ -229,45 +237,29 @@ def test_training():
         "open_tensorboard": False, # Open TensorBoard during training (defaults to False)
     }
 
-    res_r = 0
-    res_h = 0
-    res_p = 0
 
     frozen_pn = copy.deepcopy(supply_chain)
 
     if train:
         supply_chain.training_run(length=10, args_dict=default_args)
 
-    if random:
-        supply_chain = copy.deepcopy(frozen_pn)
-        solver_random = RandomSolver()
-        reporter = SimpleReporter()
-        res_r = supply_chain.testing_run(solver_random, reporter=reporter)
-        print(f'Random policy: {res_r}')
 
-    if heuristic:
-        supply_chain = copy.deepcopy(frozen_pn)
-        solver_heuristic = HeuristicSolver(max_phone_production)
-        reporter = SimpleReporter()
-        res_h = supply_chain.testing_run(solver_heuristic, reporter=reporter)
-        print(f'Heuristic policy: {res_h}')
+    supply_chain = copy.deepcopy(frozen_pn)
+    solver_random = RandomSolver()
+    random_average, random_std = run_experiments(supply_chain, solver_random, test_episodes, length=10)
 
-    if test:
-        supply_chain = copy.deepcopy(frozen_pn)
-        w_p = "C:/Users/lobia/PycharmProjects/gympn/data/train/2025-10-24-14-24-42_run/best_policy.pth"
-        solver_test = GymSolver(weights_path=w_p, metadata=supply_chain.make_metadata())
-        reporter = SimpleReporter()
-        supply_chain.set_solver(solver_test)
-        #visual = Visualisation(supply_chain)
-        #visual.show()
-        res_p = supply_chain.testing_run(solver_test, reporter=reporter, length=10)
-        print(f'PPO policy: {res_p}')
-    
+
+    supply_chain = copy.deepcopy(frozen_pn)
+    w_p = "C:/Users/lobia/PycharmProjects/gympn/data/train/2025-10-28-18-07-02_run/best_policy.pth"
+    solver_test = GymSolver(weights_path=w_p, metadata=supply_chain.make_metadata())
+    supply_chain.set_solver(solver_test)
+    ppo_average, ppo_std = run_experiments(supply_chain, solver_test, test_episodes, length=10)
+
+
     print("--------------------------------")
     print("Summary of results:")
-    print(f'Random policy: {res_r}')
-    print(f'Heuristic policy: {res_h}')      
-    print(f'PPO policy: {res_p}')
+    print(f'Random policy: average {random_average}, std {random_std}')
+    print(f'PPO policy: average {ppo_average}, std {ppo_std}')
     print("--------------------------------")
 
 if __name__ == "__main__":

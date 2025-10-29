@@ -1378,13 +1378,17 @@ class GymProblem(SimProblem):
                     act_probs = self.solver.solve(obs)
                     max_index = torch.argmax(act_probs).item()
                     timed_binding = obs['actions_dict'][max_index]
-                    self.fire(timed_binding)
-                    #print(f"Fired binding {timed_binding}")
-                    if timed_binding[-1]._id in self.reward_functions.keys():
-                        self.update_reward(timed_binding)
-                    if reporter is not None:
-                        # report changes in marking
-                        self.print_report(reporter, timed_binding)
+                    if self.allow_postpone and timed_binding[0] == ['postpone']:
+                        self.postpone()
+                        # print("Postponed!")
+                    else:
+                        self.fire(timed_binding)
+                        # print(f"Fired binding {timed_binding}")
+                        if timed_binding[-1]._id in self.reward_functions.keys():
+                            self.update_reward(timed_binding)
+                        if reporter is not None:
+                            # report changes in marking
+                            self.print_report(reporter, timed_binding)
                     return timed_binding, active_model
                 else:  # currently the other types are RandomSolver and HeuristicSolver
                     # timed_binding = random.choice(bindings)
