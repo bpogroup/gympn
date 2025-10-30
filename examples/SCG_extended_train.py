@@ -37,7 +37,8 @@ def test_training():
     """
 
     train = False  # if True, train a model, else test the trained model
-    test_episodes = 100
+    test_episodes = 1000
+    path_to_trained_model = "C:/Users/lobia/PycharmProjects/gympn/data/train/2025-10-28-18-07-02_run/best_policy.pth"
 
 
     # Instantiate a simulation problem.
@@ -143,52 +144,39 @@ def test_training():
     # Define which variables are observable (by default, every SimVar is observable, only unobservable if specified)
     supply_chain.set_unobservable(simvars = ['demand'], token_attrs = {'demand': ['node', 'count']})
 
-    def max_phone_production(pn, actions_dict):
-        # Get current stock levels by checking the marking length of each place
-        ordered_token_values = HeuristicSolver.get_place_tokens(place_id='ordered', pn=pn)
-        phone_cases_stock_values = [t.value for p in pn.places if p._id == 'stock_phone_cases' for t in p.marking]
-        chips_stock_values = [t.value for p in pn.places if p._id == 'stock_chips' for t in p.marking]
 
-        # Get total expected inventory (current stock + orders in transit)
-        ordered_phone_cases = len([t for t in ordered_token_values if t['product_type'] == 0]) #(2) get_place_tokens_type(place_id = 'ordered', type = 0). Probably best without len
-        ordered_chips = len([t for t in ordered_token_values if t['product_type'] == 1])
+    def demand_aware_heuristic(pn, actions_dict):
+        # Get current demand
+        demand_tokens = HeuristicSolver.get_place_tokens(place_id='demand', pn=pn)
+        demand_counts = {0: 0, 1: 0, 2: 0}
+        for t in demand_tokens:
+            node = t['node']
+            count = t['count']
+            demand_counts[node] += count
 
-        total_phone_cases = len(phone_cases_stock_values) + ordered_phone_cases
-        total_chips = len(chips_stock_values) + ordered_chips
+        # Prioritize fulfilling demand directly
+        if 'demand_phone_NL' in actions_dict and demand_counts[0] > 0:
+            return {'demand_phone_NL': actions_dict['demand_phone_NL'][0]}
+        if 'demand_phone_DE' in actions_dict and demand_counts[1] > 0:
+            return {'demand_phone_DE': actions_dict['demand_phone_DE'][0]}
+        if 'demand_game_NL' in actions_dict and demand_counts[2] > 0:
+            return {'demand_game_NL': actions_dict['demand_game_NL'][0]}
 
-        # If we can produce phones, always do that
-        if 'produce_phone' in actions_dict.keys():
-            assignable = actions_dict['produce_phone'] #(3) get_available_assignments(action)
+        # If we can produce something, do it
+        for action in ['produce_phone', 'produce_game']:
+            if action in actions_dict:
+                return {action: actions_dict[action][0]}
 
-            return {'produce_phone': assignable[0]}
+        # If we can order and have budget, order the most needed item
+        if 'order' in actions_dict:
+            # Estimate which product type is most needed
+            # (e.g., based on stock levels or demand)
+            # For now, just alternate between chips and phone cases
+            return {'order': actions_dict['order'][0]}
 
-        # If we can't produce phones but can order
-        if 'order' in actions_dict.keys():
-            assignable = actions_dict['order']
-
-            if total_phone_cases >= total_chips:  # order chips if we have more phone cases than chips
-                # for i in assignable:
-                #    if i[0][1].value['product_type'] == 1:
-                #        return {'order': i} #(4) attribute_based_assignments(action="order", attribute="product_type", value=1)
-                ret_val = HeuristicSolver.get_attribute_based_assignments(action="order",
-                                                                          attribute_dict={'product_type': 1},
-                                                                          actions_dict=actions_dict)
-                return {'order': ret_val[0]}
-            else:
-                # for i in assignable:
-                #    if i[0][1].value['product_type'] == 0:
-                #        return {'order': i}
-                ret_val = HeuristicSolver.get_attribute_based_assignments(action="order",
-                                                                          attribute_dict={'product_type': 0},
-                                                                          actions_dict=actions_dict)
-                return {'order': ret_val[0]}
-
-        else:
-            #return a random binding (the first in list)
-            k = list(actions_dict.keys())[0]
-            v = actions_dict[k][0]
-            return {k: v}
-
+        # Fallback: pick any available action
+        for k, v in actions_dict.items():
+            return {k: v[0]}
 
     # Default training arguments (change them as needed)
     default_args = {
@@ -204,7 +192,7 @@ def test_training():
         # Policy Model
         "policy_model": "gnn",
         "policy_kwargs": {"hidden_layers": [128, 64]},
-        "policy_lr": 3e-5,
+        "policy_lr": 3e-4,
         "policy_updates": 4,
         "policy_kld_limit": 0.5,
         "policy_weights": "",
@@ -215,7 +203,7 @@ def test_training():
         # Value Model
         "value_model": "gnn",
         "value_kwargs": {"hidden_layers": [128, 64]},
-        "value_lr": 3e-5,
+        "value_lr": 3e-4,
         "value_updates": 10,
         "value_weights": "",
 
@@ -248,9 +236,12 @@ def test_training():
     solver_random = RandomSolver()
     random_average, random_std = run_experiments(supply_chain, solver_random, test_episodes, length=10)
 
+    supply_chain = copy.deepcopy(frozen_pn)
+    solver_heuristic = HeuristicSolver(heuristic_function=demand_aware_heuristic)
+    heuristic_average, heuristic_std = run_experiments(supply_chain, solver_heuristic, test_episodes, length=10)
 
     supply_chain = copy.deepcopy(frozen_pn)
-    w_p = "C:/Users/lobia/PycharmProjects/gympn/data/train/2025-10-28-18-07-02_run/best_policy.pth"
+    w_p = path_to_trained_model
     solver_test = GymSolver(weights_path=w_p, metadata=supply_chain.make_metadata())
     supply_chain.set_solver(solver_test)
     ppo_average, ppo_std = run_experiments(supply_chain, solver_test, test_episodes, length=10)
@@ -259,6 +250,7 @@ def test_training():
     print("--------------------------------")
     print("Summary of results:")
     print(f'Random policy: average {random_average}, std {random_std}')
+    print(f'Heuristic policy: average {heuristic_average}, std {heuristic_std}')
     print(f'PPO policy: average {ppo_average}, std {ppo_std}')
     print("--------------------------------")
 
