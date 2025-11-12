@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 from torch_geometric.data import Data, Batch
 from torch_geometric.loader import DataLoader
@@ -40,6 +42,7 @@ class GraphDataLoader(torch.utils.data.Dataset):
         self.advantages = advantages
         self.values = values
         self.logpis = logpis
+
 
         if data_type == 'hetero':
             self.data_list = []
@@ -117,37 +120,57 @@ def discount_rewards(rewards, gam):
         discounted_rewards[i] = cumulative_reward
     return discounted_rewards
 
-
-def compute_advantages(rewards, values, gam, lam):
-    """Return generalized advantage estimates computed from inputs.
+def apply_causal_credits(causal_trace):
+    """
+    Apply causal credits to redistribute rewards based on causal trace information.
 
     Parameters
     ----------
-    :param rewards : Tensor
-        1D tensor of rewards from a single complete trajectory.
-    :param values : Tensor
-        1D tensor of value predictions from a single complete trajectory.
-    :param gam : float
-        Discount rate.
-    :param lam : float
-        Parameter for generalized advantage estimation.
-    :param end_flag : Tensor, optional
-        1D tensor indicating whether the episode ends at each step.
+    :param causal_trace : CausalTrace object
+
 
     Returns
     -------
-    advantages : Tensor
-        1D tensor of computed advantage scores.
+    action_rewards : list
+        List of redistributed rewards per action.
     """
-    advantages = torch.zeros_like(rewards)
-    gae = 0
-    for t in reversed(range(len(rewards))):
+    return torch.tensor(causal_trace.redistribute_rewards(), dtype=torch.float32)
 
-        next_value = 0 if t + 1 >= len(values) else values[t + 1]
-        delta = rewards[t] + gam * next_value - values[t]
-        gae = delta + gam * lam * gae
+
+def compute_advantages(
+    rewards: torch.Tensor,
+    values: torch.Tensor,
+    gamma: float,
+    lam: float,
+    dones: Optional[torch.Tensor] = None,
+    last_value: float = 0.0,
+) -> torch.Tensor:
+    """
+    rewards: shape (T,)
+    values:  shape (T,) or (T+1,)  (if T+1, values[t+1] used directly)
+    dones:   optional bool tensor shape (T,) where True means episode ended after step t
+    """
+    device = rewards.device
+    rewards = rewards.to(dtype=torch.float32, device=device)
+    values = values.to(dtype=torch.float32, device=device)
+    T = rewards.shape[0]
+
+    if dones is None:
+        masks = torch.ones(T, dtype=torch.float32, device=device)
+    else:
+        masks = (1.0 - dones.to(dtype=torch.float32, device=device))
+
+    advantages = torch.zeros(T, dtype=torch.float32, device=device)
+    gae = torch.tensor(0.0, dtype=torch.float32, device=device)
+
+    for t in reversed(range(T)):
+        next_value = values[t + 1] if values.shape[0] > t + 1 else torch.tensor(float(last_value), device=device)
+        delta = rewards[t] + gamma * next_value * masks[t] - values[t]
+        gae = delta + gamma * lam * masks[t] * gae
         advantages[t] = gae
+
     return advantages
+
 
 class TrajectoryBuffer:
     """A buffer to store and compute with trajectories.
@@ -155,7 +178,7 @@ class TrajectoryBuffer:
     The buffer is used to store information from each step of interaction
     between the agent and environment. When a trajectory is finished it
     computes the discounted rewards and generalized advantage estimates. After
-    some number of trajectories are finished it can return a tf.Dataset of the
+    some number of trajectories are finished it can return a dataset of the
     training data for policy gradient algorithms.
 
     Parameters
@@ -191,7 +214,7 @@ class TrajectoryBuffer:
         self.prev_policy_loss = 0
 
 
-    def store(self, state, action, reward, logprob, value, logpis):
+    def store(self, state, action, reward, logprob, value, logpis, token_ids: Optional[list] = None):
         """Store the information from one interaction with the environment.
 
         Parameters
@@ -216,9 +239,38 @@ class TrajectoryBuffer:
         self.logprobs = torch.cat((self.logprobs, torch.tensor([logprob])))
         self.values = torch.cat((self.values, torch.tensor([value])))
         self.logpis.append(logpis)
+        # keep parallel list for token ids that generated/are associated with this stored step
+        if not hasattr(self, 'token_ids'):
+            self.token_ids = []
+        self.token_ids.append(token_ids if token_ids is not None else [])
         self.end += 1
 
-    def finish(self):
+    def apply_action_rewards(self, action_rewards: dict):
+        """
+        Replace rewards in the buffer using redistributed rewards per action.
+        Each step may be associated with multiple token_ids; we use the first one to find the action.
+        """
+        new_rewards = []
+        for i, token_ids in enumerate(getattr(self, 'token_ids', [])):
+            # Use first token_id to trace back to action
+            if token_ids:
+                # Assume token_ids are linked to actions via causal trace
+                # You may need to store action index per step if not already
+                action_index = None
+                for tid in token_ids:
+                    if tid in action_rewards:
+                        action_index = tid
+                        break
+                if action_index is not None:
+                    new_rewards.append(action_rewards[action_index])
+                else:
+                    new_rewards.append(self.rewards[i].item())  # fallback to original reward
+            else:
+                new_rewards.append(self.rewards[i].item())  # no token info, keep original
+
+        self.rewards = torch.tensor(new_rewards, dtype=torch.float32, requires_grad=True)
+
+    def finish(self, causal_trace: Optional[object] = None):
         """
         Finish an episode and compute advantages and discounted rewards.
         Advantages are stored in place of `values` and discounted rewards are
@@ -229,8 +281,11 @@ class TrajectoryBuffer:
         # Create end_flag tensor: True for the last step of the trajectory
         end_flag = torch.zeros_like(self.rewards[tau], dtype=torch.bool)
         end_flag[-1] = True  # Mark the last step as terminal
-        values = compute_advantages(self.rewards[tau], self.values[tau], self.gam, self.lam)
-        rewards = discount_rewards(self.rewards[tau], self.gam)
+        values = compute_advantages(self.rewards[tau], self.values[tau], self.gam, self.lam, dones=end_flag)
+        if causal_trace is not None:
+            rewards = apply_causal_credits(causal_trace)
+        else:
+            rewards = discount_rewards(self.rewards[tau], self.gam)
         self.rewards[tau] = rewards
         self.values[tau] = values
         self.start = self.end

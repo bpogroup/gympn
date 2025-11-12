@@ -8,10 +8,11 @@ import inspect
 import numpy as np
 import torch
 from torch_geometric.data import HeteroData
-from torch_geometric.utils import add_self_loops
 from torch_geometric.transforms import BaseTransform
 
-from simpn.simulator import SimProblem, SimEvent, SimVar, SimVarQueue
+from simpn.simulator import SimProblem, SimEvent, SimVar, SimVarQueue, SimToken
+
+from gympn.causal_traces import CausalTraces
 from gympn.environment import AEPN_Env
 from gympn.solvers import BaseSolver, GymSolver
 from gympn.train import make_agent, make_parser, make_logdir, launch_tensorboard
@@ -41,7 +42,7 @@ class GymProblem(SimProblem):
         :param debugging: if set to True, produces more information for debugging purposes (defaults to True).
     """
 
-    def __init__(self, debugging=True, binding_priority=lambda bindings: bindings[0], tag='e', has_var_attrs=True, solver=None, plot_observations=False, allow_postpone=True):
+    def __init__(self, debugging=True, binding_priority=lambda bindings: bindings[0], tag='e', has_var_attrs=True, solver=None, plot_observations=False, allow_postpone=True, causal_rl=True):
         super().__init__(debugging, binding_priority)
 
         self.network_tag = NetworkTag(tag)  # boolean to indicate if it is time to take action ('a') or evolutions (i.e. normal events, 'e')
@@ -80,6 +81,11 @@ class GymProblem(SimProblem):
         #categorical token attributes
         self.categorical_token_attrs = {}
 
+        #helpers for causal traces
+        self.causal_rl = causal_rl  # whether to use causal traces for reward assignment
+        if self.causal_rl:
+            self.causal_trace = CausalTraces()  # tune gamma/lam if needed
+            self._action_index = 0  # will be set/incremented by AEPN_Env.step when actions originate from the agent
 
     def add_gym_var(self, name, attributes: dict, priority=lambda token: token.time):
         """
@@ -364,13 +370,67 @@ class GymProblem(SimProblem):
                 for a in self.actions:
                     timed_binding = a.execute(bindings, self)
                     #timed_binding = [el for el in bindings if el[0] == chosen_binding][0]
-                    self.fire(timed_binding)
+                    #result_tokens = self.fire(timed_binding)
                     if timed_binding[-1]._id in self.reward_functions.keys():
                         self.update_reward(timed_binding)
                     if reporter is not None:
                         #report changes in marking
                         self.print_report(reporter, timed_binding)
 
+    def fire(self, timed_binding):
+        """
+        Fires the specified timed binding.
+        Binding is a tuple ([(place, token), (place, token), ...], time, event)
+        """
+        try:
+            (binding, time, event) = timed_binding
+        except:
+            raise TypeError("Binding " + str(timed_binding) + ": is not a valid timed binding.")
+
+        # process incoming places:
+        variable_assignment = []
+        for (place, token) in binding:
+            # remove tokens from incoming places
+            place.remove_token(token)
+            # assign values to the variables on the arcs
+            variable_assignment.append(token.value)
+
+        # calculate the result of the behavior of the event
+        try:
+            result = event.behavior(*variable_assignment)
+        except Exception as e:
+            raise TypeError("Event " + str(event) + ": behavior function generates exception for values " + str(variable_assignment) + ".") from e
+        if self._debugging:
+            if type(result) != list:
+                raise TypeError("Event " + str(event) + ": behavior function does not generate a list for values " + str(variable_assignment) + ".")
+            if len(result) != len(event.outgoing):
+                raise TypeError("Event " + str(event) + ": behavior function does not generate as many values as there are output variables for values " + str(variable_assignment) + ".")
+            i = 0
+            for r in result:
+                if r is not None:
+                    if isinstance(event.outgoing[i], SimVarQueue):
+                        if not isinstance(r, list):
+                            raise TypeError("Event " + str(event) + ": does not generate a queue for variable " + str(event.outgoing[i]) + " for values " + str(variable_assignment) + ".")
+                    else:
+                        if not isinstance(r, SimToken):
+                            raise TypeError("Event " + str(event) + ": does not generate a token for variable " + str(event.outgoing[i]) + " for values " + str(variable_assignment) + ".")
+                        if not (type(r.delay) is int or type(r.delay) is float):
+                            raise TypeError("Event " + str(event) + ": does not generate a numeric value for the delay of variable " + str(event.outgoing[i]) + " for values " + str(variable_assignment) + ".")
+                        if not (type(r.time) is int or type(r.time) is float):
+                            raise TypeError("Event " + str(event) + ": does not generate a numeric value for the time of variable " + str(event.outgoing[i]) + " for values " + str(variable_assignment) + ".")
+                i += 1
+
+        for i in range(len(result)):
+            if result[i] is not None:
+                if isinstance(event.outgoing[i], SimVarQueue):
+                    event.outgoing[i].add_token(result[i])
+                else:
+                    if result[i].time > 0 and result[i].delay == 0:
+                        raise TypeError("Deprecated functionality: Event " + str(event) + ": generates a token with a delay of 0, but a time > 0, for variable " + str(event.outgoing[i]) + " for values " + str(variable_assignment) + ". It seems you are using the time of the token to represent the delay.")
+                    token = SimToken(result[i].value, time=self.clock + result[i].delay)
+                    event.outgoing[i].add_token(token)
+
+        return result
 
 
     def print_report(self, reporter, timed_binding):
@@ -1088,9 +1148,9 @@ class GymProblem(SimProblem):
             #same as step() in SimProblem
             if len(bindings) > 0:
                 timed_binding = self.binding_priority(bindings)
-                self.fire(timed_binding)
-                if timed_binding[-1]._id in self.reward_functions.keys():
-                    self.update_reward(timed_binding)
+                result_tokens = self.fire(timed_binding)
+                #if timed_binding[-1]._id in self.reward_functions.keys():
+                self.update_reward(timed_binding, result_tokens)
                 #return timed_binding
             else:
                 raise Exception("Invalid initial state for the network")
@@ -1111,22 +1171,24 @@ class GymProblem(SimProblem):
                     self.just_postponed = False
                     binding = random.choice(bindings)
                     run.append(binding)
-                    self.fire(binding)
-                    if binding[-1]._id in self.reward_functions.keys():
-                        self.update_reward(binding)
+                    result_tokens = self.fire(binding)
+                    #if binding[-1]._id in self.reward_functions.keys():
+                    self.update_reward(binding, result_tokens)
                     i += 1
                     #print(f"Evolution fired at time {self.clock}")
 
                 elif len(bindings) > 0 and self.network_tag.is_action():#give control to the gym env by returning the current observation
                     if not self.allow_postpone:
-                        if len(bindings) > 1: #only call the environment if there is more than one action available
+                        condition = True if self.causal_rl else len(bindings) > 1
+                        #if len(bindings) > 1: #only call the environment if there is more than one action available
+                        if condition: #the old condition creates problems with causal tracing
                             return self.get_graph_observation(), self.clock > self.length or not active_model, i
                         else:
                             binding = bindings[0]
                             run.append(binding)
-                            self.fire(binding)
-                            if binding[-1]._id in self.reward_functions.keys():
-                                self.update_reward(binding)
+                            result_tokens = self.fire(binding)
+                            #if binding[-1]._id in self.reward_functions.keys():
+                            self.update_reward(binding, result_tokens)
                             i += 1
                     else:
                         active_model = False if self.just_postponed else True
@@ -1138,24 +1200,36 @@ class GymProblem(SimProblem):
 
         return self.get_graph_observation(), self.clock > self.length or not active_model, i
 
-
-    def update_reward(self, timed_binding):
+    def update_reward(self, timed_binding, result_tokens=None):
         binding, time, transition = timed_binding
         variable_values = []
-        for (place, token) in binding:
-            variable_values.append(token.value)
 
-        try:
-            r_f = self.reward_functions[transition._id](*variable_values)
-        except Exception as e:
-            raise TypeError(
-                "Transition " + transition._id + ": reward function generates exception for values " + str(variable_values) + ".") from e
-        if self._debugging and not isinstance(r_f, (float, int)):
-            raise TypeError(
-                "Transition " + transition._id + ": reward function evaluate to a non-numeric type for values " + str(variable_values) + ".")
+        if transition._id in self.reward_functions:
+            for (place, token) in binding:
+                variable_values.append(token.value)
+            try:
+                r_f = self.reward_functions[transition._id](*variable_values)
+            except Exception as e:
+                raise TypeError(
+                    "Transition " + transition._id + ": reward function generates exception for values " + str(
+                        variable_values) + ".") from e
+            if self._debugging and not isinstance(r_f, (float, int)):
+                raise TypeError(
+                    "Transition " + transition._id + ": reward function evaluate to a non-numeric type for values " + str(
+                        variable_values) + ".")
+            self.reward += r_f
 
-        #print(f"produced reward {r_f} with binding {binding}")
-        self.reward += r_f
+        else:
+            r_f = 0
+
+        print(f"produced reward {r_f} with binding {binding}")
+        #update causal reward buffer if enabled
+        if self.causal_rl:
+            self.update_causal_trace(binding, result_tokens, r_f, transition)
+
+
+        return r_f, variable_values
+
 
     def make_metadata(self, add_self_loops=True):
         nodes_meta = ['e_transition', 'a_transition']
@@ -1364,7 +1438,7 @@ class GymProblem(SimProblem):
         if self.clock <= self.length:
             if len(bindings) > 0 and self.network_tag.is_evolution():
                 timed_binding = bindings[0]
-                self.fire(timed_binding)
+                output_tokens = self.fire(timed_binding)
                 if timed_binding[-1]._id in self.reward_functions.keys():
                     self.update_reward(timed_binding)
                 if reporter is not None:
@@ -1487,13 +1561,66 @@ class GymProblem(SimProblem):
     def postpone(self):
         """
         Postpones the current action by advancing the clock to the next valid evolution event.
-        Ensures time monotonicity and avoids structural livelock.
+        Also registers all tokens that were available for action bindings but were not used
+        because of the postpone into the eligibility trace with zero immediate reward.
         """
         if not self.allow_postpone:
             raise Exception("Postpone is not allowed in this A-E PN.")
 
+        if self.causal_rl:
+            # collect current enabled bindings (timed bindings: (binding, time, transition))
+            bindings, _ = self.bindings()
+            self.update_causal_trace_postpone(bindings)
+
+        # perform original postpone behavior
         self.network_tag.tag = 'e'
         self.just_postponed = True
+
+    def update_causal_trace_postpone(self, bindings):
+        # collect tokens from action-type bindings and register zero reward for eligibility tracking
+        reward_tokens = {}
+        for timed_binding in bindings:
+            try:
+                binding, _, transition = timed_binding
+            except Exception:
+                # defensive: if format differs, skip
+                continue
+            # only consider actions (postpone applies to skipping actions)
+            if isinstance(transition, SimAction):
+                for (place, token) in binding:
+                    reward_tokens[id(token)] = 0.0
+
+        if len(reward_tokens) > 0:
+            # update eligibility traces so these tokens are remembered as "available but postponed"
+            # the eligibility implementation can then decay or later attribute credit when those tokens are used
+            pass
+
+    def update_causal_trace(self, bindings, result_tokens, reward, transition):
+        """
+        Updates the causal trace with the provided bindings, result tokens, and reward.
+        Parameters
+        ----------
+        bindings
+        result_tokens
+        reward
+
+        Returns
+        -------
+
+        """
+
+        #add the transition to the transition history in causal trace
+
+        consumed_tokens = [t for (p, t) in bindings]
+
+        for p_token in result_tokens:
+            #add consumed tokens to the history of produced tokens
+            self.causal_trace.register_token(p_token, transition, consumed_tokens)
+
+        #update transition history with the reward obtained
+        self.causal_trace.register_transition(transition, consumed_tokens, result_tokens, is_action=(isinstance(transition, SimAction)), reward=reward)
+
+        print("Registered")
 
 class SimAction(SimEvent):
     """

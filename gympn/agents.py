@@ -120,6 +120,28 @@ class Agent:
         with torch.no_grad():  # disable gradient calculation
             return self.value_model(state)
 
+    def redistribute_rewards(self, token_history, reward_transitions):
+        """
+        reward_transitions: dict of {transition_id: reward_value}
+        Returns: dict of {action_index: cumulative_reward}
+        """
+        from collections import defaultdict
+        action_rewards = defaultdict(float)
+
+        for transition_id, reward in reward_transitions.items():
+            token_ids = token_history.get_tokens_by_transition(transition_id)
+            for tid in token_ids:
+                chain = token_history.get_causal_chain(tid)
+                if chain:
+                    per_action_reward = reward / len(chain)
+                    for action, _ in chain:
+                        if action is not None:
+                            action_rewards[action] += per_action_reward
+
+        return action_rewards
+
+
+
     def train(self, env, episodes=10, epochs=1, max_episode_length=None, verbose=0, save_freq=1,
               logdir=None, batch_size=64, sort_states=False, test_env=None, test_freq=5, test_episodes=10):
         """Train the agent on env with optional testing during training.
@@ -162,6 +184,17 @@ class Agent:
             self.buffer.clear()
             return_history = self.run_episodes(env, episodes=episodes, max_episode_length=max_episode_length,
                                                store=True)
+
+            if hasattr(env.problem, "token_history") and hasattr(env.problem, "causal_trace"):
+                # Extract reward-generating transitions and their rewards
+                reward_transitions = env.problem.causal_trace.get_reward_transitions()  # You may need to implement this
+
+                # Redistribute rewards
+                action_rewards = self.redistribute_rewards(env.problem.token_history, reward_transitions)
+
+                # Apply redistributed rewards to buffer
+                self.buffer.apply_action_rewards(action_rewards)
+
             dataloader = self.buffer.get(normalize_advantages=self.normalize_advantages, batch_size=batch_size,
                                          sort=sort_states)
 
@@ -257,16 +290,23 @@ class Agent:
                 value = env.value(strategy=self.value_model, gamma=self.gam)
             else:
                 value = self.value(state)
-            next_state, reward, done, truncated, _ = env.step(action)
+            next_state, reward, done, truncated, info = env.step(action)#, action_index=self.buffer.end)
             if buffer is not None:
-                buffer.store(state, action, reward, logprob, value, logpis)
+                buffer.store(state, action, reward, logprob, value, logpis, token_ids=info.get('produced_token_ids'))
+            # After storing, apply any eligibility credits returned by the environment
+
             episode_length += 1
             total_reward += reward
             if max_episode_length is not None and episode_length > max_episode_length:
                 break
             state = next_state
         if buffer is not None:
-            buffer.finish()
+            if 'eligibility_credits' in info:
+                buffer.finish(info['eligibility_credits'])
+            else:
+                buffer.finish()
+
+
         return total_reward, episode_length
 
     def run_episodes(self, env, episodes=100, tot_steps=None, max_episode_length=None, store=False):
@@ -678,10 +718,6 @@ class Agent:
         try:
             new_logprobs = torch.stack(
                 [new_logpis[indexes == index][actions[index]] for index in indexes.unique()]).squeeze(1)
-
-
-
-
         except IndexError:
             print("IndexError encountered while stacking new_logprobs. Check action indices and batch data.")
             raise

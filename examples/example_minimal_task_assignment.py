@@ -82,7 +82,7 @@ if __name__ == "__main__":
         "algorithm": "ppo-clip",
         "gam": 1, # With finite horizon, it is better to use gam=1
         "lam": 0.99,
-        "eps": 0.2,
+        "eps": 0.3,
         "c": 0.2,
         "ent_bonus": 0.0,
         "agent_seed": None,

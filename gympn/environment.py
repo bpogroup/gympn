@@ -76,6 +76,7 @@ class AEPN_Env(Env):
             valid_len = len(self.pn.pn_actions)-1
             raise ValueError(f"Action {action} is not valid. Must be between 0 and {valid_len}")
 
+
         #handle postpone
         if action == len(self.pn.pn_actions)-1 and self.pn.pn_actions[-1][0] == ['postpone']:
             self.pn.postpone() #TODO: currently postpone is always reward 0, consider changing it
@@ -86,19 +87,30 @@ class AEPN_Env(Env):
             self.pn.just_postponed = False
             print(f"Action {action}: {binding} at time {self.pn.clock}")
 
-            self.pn.fire(binding) #the third value is priority (highest for sinle assignment)
-            if binding[-1]._id in self.pn.reward_functions.keys():
-                self.pn.update_reward(binding)
+            result_tokens = self.pn.fire(binding) #the third value is priority (highest for single assignment)
+
+
+            self.pn.update_reward(binding, result_tokens)
+
+
             self.pn.bindings() #updates the network tag if needed
 
         observation, terminated, self.i = self.pn.run_evolutions(self.run, self.i, self.active_model)
 
-        if terminated: print(f'Terminated at time {self.pn.clock}')
+        if terminated:
+            print(f'Terminated at time {self.pn.clock}')
+            info = {'pn_reward': self.pn.reward,
+                    'eligibility_credits': self.pn.causal_trace}
+        else:
+            info = {'pn_reward': self.pn.reward}
 
-        reward = (self.pn.reward - old_rewards)  # /(1+(self.pn.clock - old_clock))
+        if not self.pn.causal_rl:
+            reward = (self.pn.reward - old_rewards)  # /(1+(self.pn.clock - old_clock))
+        else:
+            reward = 0.0 #the reward will be assigned through causal traces when the episode ends
 
         # print(f"Action taken: {action}, corresponding to binding: {binding}, generated reward: {reward}")
-        info = {'pn_reward': self.pn.reward}
+
         return observation, reward, terminated, False, info
 
     def reset(self, seed=None, options=None):
@@ -117,6 +129,8 @@ class AEPN_Env(Env):
 
         print(f"Entered reset with current reward for PN: {self.pn.reward} \n")
         self.pn = copy.deepcopy(self.frozen_pn)
+        # ensure per-episode action index alignment with buffer indices
+        self.pn._action_index = 0
         if self.pn.network_tag.is_evolution():
             self.pn.get_to_first_action()
         observation = self.pn.get_graph_observation()

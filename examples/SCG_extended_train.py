@@ -36,8 +36,8 @@ def test_training():
     Test a training in the Gym Simulator.
     """
 
-    train = False  # if True, train a model, else test the trained model
-    test_episodes = 1000
+    train = True  # if True, train a model, else test the trained model
+    test_episodes = 10
     path_to_trained_model = "C:/Users/lobia/PycharmProjects/gympn/data/train/2025-10-28-18-07-02_run/best_policy.pth"
 
 
@@ -80,7 +80,7 @@ def test_training():
         po = s['product_type']
 
         return [SimToken({'product_type': po}), SimToken({'budget': b['budget'] - 1}), SimToken(
-            {'product_type': po})]  # TODO: check if task assignment works like this and not like tuple (s,b)
+            {'product_type': po})]
 
     # Ordering action
     supply_chain.add_action([supply_pool, ordering_budget], [supply_pool, ordering_budget, ordered], behavior=order,
@@ -111,7 +111,7 @@ def test_training():
     # Transportation actions
     supply_chain.add_action([stock_phone_NL], [stock_phone_DE],
                             behavior=lambda x: [SimToken({'product_type': 4}, delay=1)],
-                            name="transport_phone") # TODO: how not to act
+                            name="transport_phone")
 
     # Demand fulfillment
 

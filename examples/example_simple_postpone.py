@@ -29,7 +29,7 @@ if __name__ == "__main__":
     ###########################################################################
 
     # Instantiate a simulation problem.
-    agency = GymProblem(allow_postpone=True)
+    agency = GymProblem(allow_postpone=False)
 
     # Define cases.
     arrival = agency.add_var("arrival", var_attributes=['task_type'])
@@ -56,9 +56,9 @@ if __name__ == "__main__":
         :return: a list of SimTokens representing the task and the resource that were assigned to them
         """
         if r['code_employee']==1:
-            return [SimToken((c, r), delay=1)]
+            return [SimToken((c, r), delay=20)]
         else:
-            return [SimToken((c, r), delay=1)]
+            return [SimToken((c, r), delay=0.5)]
 
 
     agency.add_action([waiting, employee], [busy], behavior=start, name="start")
@@ -77,7 +77,7 @@ if __name__ == "__main__":
         if x[1]['code_employee'] == 1:
             return 1
         else:
-            return -1
+            return 1
 
     agency.add_event([busy], [employee], complete, name='complete', reward_function=r_function)
 
