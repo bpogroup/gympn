@@ -185,16 +185,6 @@ class Agent:
             return_history = self.run_episodes(env, episodes=episodes, max_episode_length=max_episode_length,
                                                store=True)
 
-            if hasattr(env.problem, "token_history") and hasattr(env.problem, "causal_trace"):
-                # Extract reward-generating transitions and their rewards
-                reward_transitions = env.problem.causal_trace.get_reward_transitions()  # You may need to implement this
-
-                # Redistribute rewards
-                action_rewards = self.redistribute_rewards(env.problem.token_history, reward_transitions)
-
-                # Apply redistributed rewards to buffer
-                self.buffer.apply_action_rewards(action_rewards)
-
             dataloader = self.buffer.get(normalize_advantages=self.normalize_advantages, batch_size=batch_size,
                                          sort=sort_states)
 

@@ -36,13 +36,15 @@ def test_training():
     Test a training in the Gym Simulator.
     """
 
-    train = True  # if True, train a model, else test the trained model
-    test_episodes = 10
-    path_to_trained_model = "C:/Users/lobia/PycharmProjects/gympn/data/train/2025-10-28-18-07-02_run/best_policy.pth"
+    train = False  # if True, train a model, else test the trained model
+    test_episodes = 1000
+    #best model til now (no causal rl)
+    #path_to_trained_model = "C:/Users/lobia/PycharmProjects/gympn/data/train/2025-10-28-18-07-02_run/best_policy.pth"
 
+    path_to_trained_model = "C:/Users/lobia/PycharmProjects/gympn/data/train/2025-11-21-23-55-00_run/best_policy.pth"
 
     # Instantiate a simulation problem.
-    supply_chain = GymProblem(allow_postpone=True)
+    supply_chain = GymProblem(allow_postpone=True, causal_rl=False)
 
     # Define ordering variables
     supply_pool = supply_chain.add_var("supply_pool", var_attributes=['product_type'])
@@ -186,14 +188,14 @@ def test_training():
         "lam": 0.99,
         "eps": 0.2,
         "c": 0.2,
-        "ent_bonus": 0.1,
+        "ent_bonus": 0.05,
         "agent_seed": None,
 
         # Policy Model
         "policy_model": "gnn",
         "policy_kwargs": {"hidden_layers": [128, 64]},
-        "policy_lr": 3e-4,
-        "policy_updates": 4,
+        "policy_lr": 1e-4,
+        "policy_updates": 10,
         "policy_kld_limit": 0.5,
         "policy_weights": "",
         "policy_network": "",
@@ -203,13 +205,13 @@ def test_training():
         # Value Model
         "value_model": "gnn",
         "value_kwargs": {"hidden_layers": [128, 64]},
-        "value_lr": 3e-4,
-        "value_updates": 10,
+        "value_lr": 1e-3,
+        "value_updates": 20,
         "value_weights": "",
 
         # Training Parameters
         "episodes": 20,
-        "epochs": 100,
+        "epochs": 200,
         "max_episode_length": None,
         "batch_size": 64,
         "sort_states": False,

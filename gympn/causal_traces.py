@@ -1,3 +1,6 @@
+from torch.ao.quantization.utils import activation_is_dynamically_quantized
+
+
 class TransitionHistory:
     """
     Tracks the history of transitions fired in the Petri net simulation, together with the transition type (action or evolution), the tokens used to fire, the produced tokens, and the generated reward.
@@ -11,12 +14,18 @@ class TransitionHistory:
         self.transitions.append({
                 "transition": transition,
                 "is_action": is_action,
-                "input_tokens": [id(t) for t in input_tokens],
-                "output_tokens": [id(t) for t in output_tokens],
+                "input_tokens": [t._id for t in input_tokens],
+                "output_tokens": [t._id for t in output_tokens],
                 "created_by": created_by,
                 "reward": reward,
                 "time": time
             })
+
+    def get_action_transitions_len(self):
+        return len([t for t in self.transitions if t["is_action"]])
+
+    def get_action_transitions(self):
+        return [t for t in self.transitions if t["is_action"]]
 
     def flush(self):
         self.transitions = []
@@ -33,13 +42,16 @@ class TokenHistory:
         self.transition_to_tokens = {}  # transition_id -> list of token_ids
 
     def add_token(self, token, transition, parent_tokens, created_by=None, time=None):
-        tid = id(token)
-        parent_ids = [id(p) for p in parent_tokens]
+        tid = token._id
+        try:
+            parent_ids = [p._id for p in parent_tokens]
+        except AttributeError:
+            print("Error: One of the parent tokens does not have an _id attribute.")
         self.tokens[tid] = {
             "token": token,
             "parents": parent_ids,
             "event": transition._id,
-            "created_by": created_by,
+            #"created_by": created_by,
             "time": time
         }
 
@@ -62,25 +74,30 @@ class TokenHistory:
 
     def get_causal_chain(self, token_id):
         """
-        Recursively backtrack from a token to all contributing (action, transition) pairs.
+        Returns a list of lists; each list contains token ids at one 'generation' step
+        starting with the token itself, then its parents, then parents of those parents, etc.
         """
         chain = []
         visited = set()
 
-        def recurse(tid):
-            if tid in visited:
-                return
-            visited.add(tid)
-            token_info = self.tokens.get(tid)
-            if token_info:
-                #get the tokens that were used to fire the transition that created this token
-                parents = token_info.get("parents", [])
-                chain.append(parents)
+        def layer(current_ids):
+            next_ids = []
+            group = []
+            for tid in current_ids:
+                if tid in visited:
+                    continue
+                visited.add(tid)
+                group.append(tid)
+                token_info = self.tokens.get(tid)
+                if token_info:
+                    parents = token_info.get("parents", [])
+                    next_ids.extend(parents)
+            if group:
+                chain.append(group)
+            if next_ids:
+                layer(next_ids)
 
-                for parent in token_info.get("parents", []):
-                    recurse(parent)
-
-        recurse(token_id)
+        layer([token_id])
         return chain
 
 
@@ -108,29 +125,104 @@ class CausalTraces:
         """
         return self.transition_history.add_transition(transition, input_tokens, output_tokens, is_action, created_by, reward, time)
 
-    def redistribute_rewards(self):
+    def redistribute_rewards(self, gamma=1, scheme="exponential"):
         """
-        Redistributes rewards to action transitions based on causal chains of tokens used to fire them.
-        Non-action transitions do not receive rewards, but their tokens contribute to the causal chains and their rewards are redistributed to the actions that led to them.
-        Returns a list of reward assignments: (action_index, transition_id, reward).
-        -------
+        Redistribute rewards to action transitions based on causal chains.
+        Supports multiple weighting schemes:
+          - "exponential": weight = gamma ** delay
+          - "linear": weight = 1 / (1 + delay)
+          - "uniform": equal weights
+          - "depth": weight = 1 / depth
+          - "hybrid": weight = (gamma ** delay) / depth
+        :param gamma: Discount factor for exponential/hybrid schemes.
+        :param scheme: Weighting scheme ("exponential", "linear", "uniform", "hybrid").
+        :return: List of redistributed rewards aligned with action transitions.
         """
+        action_transitions = self.transition_history.get_action_transitions()
+        redistribution = [0.0] * len(action_transitions)
 
-        #rewards will be a list of float values with length equal to the number of actions taken
-        reward_assignments = []
+        # Map token -> (action_index, action_time)
+        token_to_action = {}
+        for idx, act in enumerate(action_transitions):
+            for tid in act.get("output_tokens", []):
+                token_to_action[tid] = (idx, act.get("time"))
 
-        for transition_record in self.transition_history.transitions:
-            transition = transition_record["transition"]
-            is_action = transition_record["is_action"]
-            reward = transition_record["reward"]
-            output_token_ids = transition_record["output_tokens"]
-            input_token_ids = transition_record["input_tokens"]
+        total_source_reward = 0.0
+        total_distributed_reward = 0.0
 
-            if reward:
-                # if the reward is different from 0, we need to propagate it back to the actions that created the tokens used to fire this transition
-                for token_id in input_token_ids:
-                    causal_chain = self.token_history.get_causal_chain(token_id)
-                    # every token in the causal chain contributes to the reward of the action that created it. we go through the chain, checking for transitions (actions or evolutions indifferently) that used the token or an ancestor to fire and translate their reward to the action that created them
-                    for action_index, transition_id in causal_chain:
-                        if action_index is not None:
-                            reward_assignments.append((action_index, transition_id, reward))
+        for tr in self.transition_history.transitions:
+            reward = tr.get("reward", 0.0)
+            if reward == 0.0:
+                continue
+            total_source_reward += reward
+
+            transition_time = tr.get("time")
+            if transition_time is None:
+                continue
+
+            output_token_ids = tr.get("output_tokens", [])
+            action_info_map = {}
+
+            for token_id in output_token_ids:
+                # Direct credit
+                if token_id in token_to_action:
+                    action_idx, action_time = token_to_action[token_id]
+                    if action_time is None:
+                        continue
+                    delay = max(0, transition_time - action_time)
+                    # Depth = 1 for direct token
+                    current_depth = 1
+                    prev_delay, prev_depth = action_info_map.get(action_idx, (delay, current_depth))
+                    # Keep min delay and min depth
+                    action_info_map[action_idx] = (min(prev_delay, delay), min(prev_depth, current_depth))
+
+                # Parents
+                causal_chain = self.token_history.get_causal_chain(token_id)
+                for depth, token_ids in enumerate(causal_chain, start=2):  # depth starts at 2 for parents (TODO: check, this does not seem right)
+                    for tid in token_ids:
+                        if tid in token_to_action:
+                            action_idx, action_time = token_to_action[tid]
+                            if action_time is None:
+                                continue
+                            delay = max(0, transition_time - action_time)
+                            prev_delay, prev_depth = action_info_map.get(action_idx, (delay, depth))
+                            action_info_map[action_idx] = (min(prev_delay, delay), min(prev_depth, depth))
+
+            if action_info_map:
+                # Compute weights
+                weights = []
+                for (delay, depth) in action_info_map.values():
+                    if scheme == "exponential":
+                        w = gamma ** delay
+                    elif scheme == "linear":
+                        w = 1 / (1 + delay)
+                    elif scheme == "uniform":
+                        w = 1.0
+                    elif scheme == "depth":
+                        w = 1 / depth
+                    elif scheme == "hybrid":
+                        w = (gamma ** delay) / depth
+                    else:
+                        raise ValueError(f"Unknown scheme: {scheme}")
+                    weights.append(w)
+
+                total = sum(weights)
+                if total > 0:
+                    for idx, w in zip(action_info_map.keys(), weights):
+                        delta = reward * (w / total)
+                        redistribution[idx] += delta
+                        total_distributed_reward += delta
+                else:
+                    # Fallback: uniform split
+                    print("Falling back to uniform split")
+                    n = len(action_info_map)
+                    for idx in action_info_map.keys():
+                        delta = reward / n
+                        redistribution[idx] += delta
+                        total_distributed_reward += delta
+
+            #print(f"Transition: {tr['transition']._id}, Reward: {reward}")
+            #print(f"Action delay map: {action_info_map}")
+
+        print("Conservation gap:", total_source_reward - total_distributed_reward)
+        return redistribution

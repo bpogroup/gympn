@@ -3,7 +3,7 @@ import os
 import itertools
 import random
 import inspect
-
+import uuid
 
 import numpy as np
 import torch
@@ -42,7 +42,7 @@ class GymProblem(SimProblem):
         :param debugging: if set to True, produces more information for debugging purposes (defaults to True).
     """
 
-    def __init__(self, debugging=True, binding_priority=lambda bindings: bindings[0], tag='e', has_var_attrs=True, solver=None, plot_observations=False, allow_postpone=True, causal_rl=True):
+    def __init__(self, debugging=True, binding_priority=lambda bindings: bindings[0], tag='e', has_var_attrs=True, solver=None, plot_observations=False, allow_postpone=False, causal_rl=False):
         super().__init__(debugging, binding_priority)
 
         self.network_tag = NetworkTag(tag)  # boolean to indicate if it is time to take action ('a') or evolutions (i.e. normal events, 'e')
@@ -85,7 +85,7 @@ class GymProblem(SimProblem):
         self.causal_rl = causal_rl  # whether to use causal traces for reward assignment
         if self.causal_rl:
             self.causal_trace = CausalTraces()  # tune gamma/lam if needed
-            self._action_index = 0  # will be set/incremented by AEPN_Env.step when actions originate from the agent
+
 
     def add_gym_var(self, name, attributes: dict, priority=lambda token: token.time):
         """
@@ -364,15 +364,15 @@ class GymProblem(SimProblem):
                 if reporter is not None:
                     # report changes in marking
                     self.print_report(reporter, timed_binding)
-                if timed_binding[-1]._id in self.reward_functions.keys():
-                    self.update_reward(timed_binding)
+                #if timed_binding[-1]._id in self.reward_functions.keys():
+                self.update_reward(timed_binding)
             elif len(bindings) > 0 and self.network_tag.is_action():
                 for a in self.actions:
                     timed_binding = a.execute(bindings, self)
                     #timed_binding = [el for el in bindings if el[0] == chosen_binding][0]
                     #result_tokens = self.fire(timed_binding)
-                    if timed_binding[-1]._id in self.reward_functions.keys():
-                        self.update_reward(timed_binding)
+                    #if timed_binding[-1]._id in self.reward_functions.keys():
+                    self.update_reward(timed_binding)
                     if reporter is not None:
                         #report changes in marking
                         self.print_report(reporter, timed_binding)
@@ -420,6 +420,7 @@ class GymProblem(SimProblem):
                             raise TypeError("Event " + str(event) + ": does not generate a numeric value for the time of variable " + str(event.outgoing[i]) + " for values " + str(variable_assignment) + ".")
                 i += 1
 
+        new_tokens = []
         for i in range(len(result)):
             if result[i] is not None:
                 if isinstance(event.outgoing[i], SimVarQueue):
@@ -428,9 +429,13 @@ class GymProblem(SimProblem):
                     if result[i].time > 0 and result[i].delay == 0:
                         raise TypeError("Deprecated functionality: Event " + str(event) + ": generates a token with a delay of 0, but a time > 0, for variable " + str(event.outgoing[i]) + " for values " + str(variable_assignment) + ". It seems you are using the time of the token to represent the delay.")
                     token = SimToken(result[i].value, time=self.clock + result[i].delay)
+                    if self.causal_rl:
+                        #tokens need to be marked with unique ids
+                        setattr(token, '_id', str(uuid.uuid4()))
                     event.outgoing[i].add_token(token)
+                    new_tokens.append(token)
 
-        return result
+        return new_tokens
 
 
     def print_report(self, reporter, timed_binding):
@@ -716,7 +721,8 @@ class GymProblem(SimProblem):
         if self.allow_postpone:
             # postpone is a new node type that allows to delay actions
             # it is connected to all nodes if not just_postponed, otherwise it is isolated
-            postpone_node_feature = torch.tensor([[1.0 if not self.just_postponed else 0.0]]).type(torch.float32)
+            #postpone_node_feature = torch.tensor([[1.0 if not self.just_postponed else 0.0]]).type(torch.float32)
+            postpone_node_feature = torch.tensor([[0.0]]).type(torch.float32)
             ret_graph['postpone'].x = postpone_node_feature
             #create special edges from all nodes to postpone
             for n_t in ret_graph.node_types:
@@ -802,6 +808,9 @@ class GymProblem(SimProblem):
                     new_place_id = f"{p._id}.{i}"
                     new_place = expanded_pn.add_var(name=new_place_id, var_attributes=self.var_attributes[p._id])
                     new_place.put(t.value, time=t.time)
+                    if hasattr(t, '_id'):
+                        #keep the same token id for causal rl
+                        setattr(new_place.marking[0], '_id', t._id)
             else:
                 new_place_id = f"{p._id}.0"
                 expanded_pn.add_var(name=new_place_id, var_attributes=self.var_attributes[p._id])
@@ -1222,7 +1231,7 @@ class GymProblem(SimProblem):
         else:
             r_f = 0
 
-        print(f"produced reward {r_f} with binding {binding}")
+        #print(f"produced reward {r_f} with binding {binding}")
         #update causal reward buffer if enabled
         if self.causal_rl:
             self.update_causal_trace(binding, result_tokens, r_f, transition)
@@ -1383,7 +1392,20 @@ class GymProblem(SimProblem):
             torch.cuda.manual_seed(args.agent_seed)
             # TODO: two more lines for cuda
 
+        #EXPERIMENTAL: if causal_rl, every token in the network is complemented with a unique identifier
+        if self.causal_rl:
+                new_unobservable_dict = {'places': [], }
+                #TODO: update the unobservable elements (probably not necessary cause it is not registered in the place's variables) AND check that no token had _id in its attributes
+                #self.set_unobservable(simvars=[], token_attrs={'EVERY_PLACE': ['_id']})
+                for place in self.places:
+                    #include _id in the set of unobservable features
+                    for token in place.marking:
+                        setattr(token, '_id', str(uuid.uuid4()))
+                        print(f"Assigned token id {token._id} to token in place {place._id}")
+                print("Causal RL enabled: each token has been assigned a unique identifier.")
+
         env = AEPN_Env(self)
+
         if args.test_in_train:
             test_env = copy.deepcopy(env)
             test_freq = args.test_freq
@@ -1444,7 +1466,7 @@ class GymProblem(SimProblem):
                 if reporter is not None:
                     # report changes in marking
                     self.print_report(reporter, timed_binding)
-                #print(f"Fired binding {timed_binding}")
+                print(f"Fired binding {timed_binding}")
                 return timed_binding, active_model
             elif len(bindings) > 0 and self.network_tag.is_action():
                 if type(self.solver) is GymSolver:
@@ -1454,10 +1476,10 @@ class GymProblem(SimProblem):
                     timed_binding = obs['actions_dict'][max_index]
                     if self.allow_postpone and timed_binding[0] == ['postpone']:
                         self.postpone()
-                        # print("Postponed!")
+                        print("Postponed!")
                     else:
-                        self.fire(timed_binding)
-                        # print(f"Fired binding {timed_binding}")
+                        output_tokens = self.fire(timed_binding)
+                        print(f"Fired binding {timed_binding}")
                         if timed_binding[-1]._id in self.reward_functions.keys():
                             self.update_reward(timed_binding)
                         if reporter is not None:
@@ -1465,11 +1487,10 @@ class GymProblem(SimProblem):
                             self.print_report(reporter, timed_binding)
                     return timed_binding, active_model
                 else:  # currently the other types are RandomSolver and HeuristicSolver
-                    # timed_binding = random.choice(bindings)
                     timed_binding = self.solver.solve(self.get_heuristic_observation(), bindings)
                     self.fire(timed_binding)
-                    if timed_binding[-1]._id in self.reward_functions.keys():
-                        self.update_reward(timed_binding)
+                    #if timed_binding[-1]._id in self.reward_functions.keys():
+                    self.update_reward(timed_binding)
                     if reporter is not None:
                         # report changes in marking
                         self.print_report(reporter, timed_binding)
@@ -1577,23 +1598,38 @@ class GymProblem(SimProblem):
         self.just_postponed = True
 
     def update_causal_trace_postpone(self, bindings):
-        # collect tokens from action-type bindings and register zero reward for eligibility tracking
-        reward_tokens = {}
+        if not self.causal_rl:
+            return
+
+        input_tokens = []
+        output_tokens = []
+
         for timed_binding in bindings:
             try:
                 binding, _, transition = timed_binding
             except Exception:
-                # defensive: if format differs, skip
                 continue
-            # only consider actions (postpone applies to skipping actions)
-            if isinstance(transition, SimAction):
-                for (place, token) in binding:
-                    reward_tokens[id(token)] = 0.0
 
-        if len(reward_tokens) > 0:
-            # update eligibility traces so these tokens are remembered as "available but postponed"
-            # the eligibility implementation can then decay or later attribute credit when those tokens are used
-            pass
+            if isinstance(transition, SimAction):
+                for place, token in binding:
+                    if token not in input_tokens:
+                        input_tokens.append(token)
+                        # Assign new ID directly to token in marking
+                        new_id = str(uuid.uuid4())
+                        if token in place.marking:
+                            idx = place.marking.index(token)
+                            place.marking[idx]._id = new_id
+                        # Add the same token (now updated) to output_tokens
+                        output_tokens.append(token)
+
+        self.causal_trace.register_transition(
+            transition=None,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            is_action=True,
+            reward=0.0,
+            time=self.clock
+        )
 
     def update_causal_trace(self, bindings, result_tokens, reward, transition):
         """
@@ -1615,12 +1651,11 @@ class GymProblem(SimProblem):
 
         for p_token in result_tokens:
             #add consumed tokens to the history of produced tokens
-            self.causal_trace.register_token(p_token, transition, consumed_tokens)
+            self.causal_trace.register_token(p_token, transition, consumed_tokens, time=self.clock)
 
         #update transition history with the reward obtained
-        self.causal_trace.register_transition(transition, consumed_tokens, result_tokens, is_action=(isinstance(transition, SimAction)), reward=reward)
+        self.causal_trace.register_transition(transition, consumed_tokens, result_tokens, is_action=(isinstance(transition, SimAction)), reward=reward, time=self.clock)
 
-        print("Registered")
 
 class SimAction(SimEvent):
     """
@@ -1734,3 +1769,4 @@ class SafeNormalizeFeatures(BaseTransform):
                 store['x'] = (x - min_val) / (max_val - min_val + self.eps)
         #print(data.node_stores)
         return data
+

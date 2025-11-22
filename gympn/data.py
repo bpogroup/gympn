@@ -281,7 +281,7 @@ class TrajectoryBuffer:
         # Create end_flag tensor: True for the last step of the trajectory
         end_flag = torch.zeros_like(self.rewards[tau], dtype=torch.bool)
         end_flag[-1] = True  # Mark the last step as terminal
-        values = compute_advantages(self.rewards[tau], self.values[tau], self.gam, self.lam, dones=end_flag)
+        values = compute_advantages(self.rewards[tau], self.values[tau], self.gam, self.lam, dones=end_flag) #TODO: check if this is in the right place
         if causal_trace is not None:
             rewards = apply_causal_credits(causal_trace)
         else:
