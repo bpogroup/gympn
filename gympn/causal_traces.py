@@ -113,6 +113,10 @@ class CausalTraces:
         self.token_history = TokenHistory()
         self.transition_history = TransitionHistory()
 
+    def flush(self):
+        self.token_history = TokenHistory()
+        self.transition_history = TransitionHistory()
+
     def register_token(self, token, transition, parent_tokens, created_by=None, time=None):
         """
         Adds a token to the history and returns its unique ID.
@@ -224,5 +228,16 @@ class CausalTraces:
             #print(f"Transition: {tr['transition']._id}, Reward: {reward}")
             #print(f"Action delay map: {action_info_map}")
 
-        print("Conservation gap:", total_source_reward - total_distributed_reward)
+        #print("Conservation gap:", total_source_reward - total_distributed_reward)
+
+        # Debug: show action-level redistribution
+        #print(f"\n[CAUSAL REDISTRIBUTION] Episode summary:")
+        #print(f"  Total source reward: {total_source_reward:.4f}")
+        #print(f"  Total distributed reward: {total_distributed_reward:.4f}")
+        #print(f"  Number of actions: {len(redistribution)}")
+        #print(f"  Per-action redistribution:")
+        #for idx, reward_credit in enumerate(redistribution):
+        #    print(f"    Action {idx}: {reward_credit:.4f}")
+        #print()
+
         return redistribution

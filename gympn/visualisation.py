@@ -27,7 +27,7 @@ class Visualisation(simpn.visualisation.Visualisation):
     __init__(sim_problem, layout_file=None)
         Initializes the visualization with the given Petri net simulation problem and optional layout file.
     """
-    def __init__(self, sim_problem, layout_file=None):
+    def __init__(self, sim_problem, layout_file=None, grid_spacing=50, node_spacing=100, layout_algorithm="sugiyama"):
         """
         Initialize the visualization with the given Petri net simulation problem.
 
@@ -44,15 +44,26 @@ class Visualisation(simpn.visualisation.Visualisation):
         pygame.init()
         pygame.font.init()
         pygame.display.set_caption('Petri Net Visualisation')
-        assets.create_assets(assets.images, "assets")
+        #assets.get_img_asset("assets")
         icon = pygame.image.load('./assets/logo.png')
         pygame.display.set_icon(icon)
 
+        self._grid_spacing = grid_spacing
+        self._node_spacing = node_spacing
+        self._layout_algorithm = layout_algorithm
+
+        self.__playing = False
         self.__running = False
+        self._play_step_delay = 500
         self._problem = sim_problem
         self._nodes = dict()
         self._edges = []
         self._selected_nodes = None
+        self._zoom_level = 1.0
+        self._size = MAX_SIZE
+        self.buttons = []
+
+        self.__create_buttons_closed_menu()
 
         # Add visualizations for prototypes, places, and transitions,
         # but not for places and transitions that are part of prototypes.
@@ -104,6 +115,8 @@ class Visualisation(simpn.visualisation.Visualisation):
                 if node_id in self._nodes:
                     other_viznode = self._nodes[node_id]
                     self._edges.append(Edge(start=(viznode, Hook.RIGHT), end=(other_viznode, Hook.LEFT)))
+
+
         layout_loaded = False
         if layout_file is not None:
             try:
@@ -115,6 +128,5 @@ class Visualisation(simpn.visualisation.Visualisation):
         if not layout_loaded:
             self.__layout()
 
-        self.__screen = pygame.display.set_mode(self._size, pygame.RESIZABLE)
-        self._buttons = self.__init_buttons()
+        self.__win = pygame.display.set_mode(self._size, pygame.RESIZABLE)  # the window
         

@@ -19,6 +19,9 @@ from gympn.simulator import GymProblem
 from simpn.reporters import SimpleReporter
 from gympn.solvers import HeuristicSolver, GymSolver, RandomSolver
 
+#visualization
+from gympn.visualisation import Visualisation
+
 
 def run_experiments(problem, solver, num_experiments, reporter=None, length=None):
     rewards = []
@@ -37,11 +40,11 @@ def test_training():
     """
 
     train = False  # if True, train a model, else test the trained model
-    test_episodes = 1000
+    test_episodes = 10
     #best model til now (no causal rl)
     #path_to_trained_model = "C:/Users/lobia/PycharmProjects/gympn/data/train/2025-10-28-18-07-02_run/best_policy.pth"
 
-    path_to_trained_model = "C:/Users/lobia/PycharmProjects/gympn/data/train/2025-11-21-23-55-00_run/best_policy.pth"
+    path_to_trained_model = "C:/Users/lobia/PycharmProjects/gympn/data/train//best_policy.pth"
 
     # Instantiate a simulation problem.
     supply_chain = GymProblem(allow_postpone=True, causal_rl=False)
@@ -255,6 +258,13 @@ def test_training():
     print(f'Heuristic policy: average {heuristic_average}, std {heuristic_std}')
     print(f'PPO policy: average {ppo_average}, std {ppo_std}')
     print("--------------------------------")
+
+    #visualize the ppo policy
+    frozen_supply_chain = copy.deepcopy(supply_chain)
+    frozen_supply_chain.set_solver(GymSolver(weights_path="C:/Users/lobia/PycharmProjects/gympn/data/train/2025-11-21-23-55-00_run/best_policy.pth", metadata=frozen_supply_chain.make_metadata()))
+    frozen_supply_chain.length = 10
+    visual = Visualisation(frozen_supply_chain)
+    visual.show()
 
 if __name__ == "__main__":
     test_training()

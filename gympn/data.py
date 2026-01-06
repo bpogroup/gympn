@@ -1,9 +1,18 @@
 from typing import Optional
 
-import torch
-from torch_geometric.data import Data, Batch
-from torch_geometric.loader import DataLoader
+
+from torch_geometric.data import Data
+
+
+from typing import Optional, List, Dict, Any, Sequence
+import copy
 import numpy as np
+import torch
+from torch_geometric.data import HeteroData
+from torch_geometric.loader import DataLoader
+
+Tensor = torch.Tensor
+
 
 
 class GraphDataLoader(torch.utils.data.Dataset):
@@ -47,12 +56,26 @@ class GraphDataLoader(torch.utils.data.Dataset):
         if data_type == 'hetero':
             self.data_list = []
             for index in range(len(states)):
+
                 temp_h_data = states[index]['graph']
                 temp_h_data.y = actions[index]
                 temp_h_data.advantage = advantages[index]
-                temp_h_data.logprobs = logprobs[index]
+                if logprobs.numel():
+                    temp_h_data.logprobs = logprobs[index]
+                else:
+                    temp_h_data.logprobs = None
                 temp_h_data.value = values[index]
-                temp_h_data.logpis = logpis[index].squeeze(-1)
+
+                if logpis[index] is not None:
+                    temp_h_data.logpis = logpis[index].squeeze(-1)
+                else:
+                    temp_h_data.logpis = None
+
+                if 'q_first' in states[index]:
+                    temp_h_data.q_first = states[index]['q_first']
+                if 'target_pi' in states[index]:
+                    temp_h_data.target_pi = states[index]['target_pi']
+
                 self.data_list.append(temp_h_data)
         elif data_type == 'homogeneous':
             self.data_list = [Data(x=torch.from_numpy(states[index]['graph'].nodes), edge_index=torch.from_numpy(states[index]['graph'].edge_links),
@@ -82,7 +105,9 @@ class GraphDataLoader(torch.utils.data.Dataset):
             advantage=self.advantages[index],
             logprobs=self.logprobs[index],
             value=self.values[index],
-            logpis=torch.tensor(self.logpis[index])
+            logpis=torch.tensor(self.logpis[index]),
+            target_p=torch.tensor(self.states[index]['target_pi']) if 'target_pi' in self.states[index] else None,
+            q_first=torch.tensor(self.states[index]['q_first']) if 'q_first' in self.states[index] else None
         )
         return data
 
@@ -172,77 +197,116 @@ def compute_advantages(
     return advantages
 
 
+def _to_1d_tensor(x) -> Tensor:
+    if isinstance(x, torch.Tensor):
+        return x.detach().flatten().to(torch.float32)
+    return torch.tensor([float(x)], dtype=torch.float32)
+
+
+def discount_returns(rewards: Tensor, gamma: float) -> Tensor:
+    out = torch.zeros_like(rewards, dtype=torch.float32)
+    g = 0.0
+    for t in range(rewards.numel() - 1, -1, -1):
+        g = float(rewards[t]) + gamma * g
+        out[t] = g
+    return out
+
+
+@torch.no_grad()
+def compute_gae(rewards: Tensor, values: Tensor, gamma: float, lam: float,
+                dones: Optional[Tensor] = None, last_value: float = 0.0) -> Tensor:
+    T = rewards.shape[0]
+    if dones is None:
+        dones = torch.zeros(T, dtype=torch.bool, device=rewards.device)
+    adv = torch.zeros(T, dtype=torch.float32, device=rewards.device)
+    gae = 0.0
+    for t in range(T - 1, -1, -1):
+        v_t = float(values[t])
+        v_tp1 = float(values[t + 1]) if values.shape[0] > t + 1 else float(last_value)
+        delta = float(rewards[t]) + gamma * v_tp1 * (1.0 - float(dones[t])) - v_t
+        gae = delta + gamma * lam * (1.0 - float(dones[t])) * gae
+        adv[t] = gae
+    return adv
+
+
 class TrajectoryBuffer:
-    """A buffer to store and compute with trajectories.
+    """
+    DCL-ready episodic buffer.
 
-    The buffer is used to store information from each step of interaction
-    between the agent and environment. When a trajectory is finished it
-    computes the discounted rewards and generalized advantage estimates. After
-    some number of trajectories are finished it can return a dataset of the
-    training data for policy gradient algorithms.
+    Stores per-step:
+      - state (dict with 'graph' -> HeteroData)
+      - action (int)
+      - reward_raw (float)
+      - logprob_sel (float)
+      - value_pred (float)
+      - logpis_nodes (Tensor): per-action-node log-probs from old policy
+      - token_ids (list[int]) optional
 
-    Parameters
-    ----------
-    :param gam : float, optional
-        Discount rate.
-    :param lam : float, optional
-        Parameter for generalized advantage estimation.
-
-    See Also
-    --------
-    discount_rewards : Discount the list or array of rewards by gamma in-place.
-    compute_advantages : Return generalized advantage estimates computed from inputs.
-
+      - target_pi (Tensor): per-action-node improved policy (zeros except enabled nodes)
+      - q_first (Tensor): rollout diagnostic targets (vector or scalar)
     """
 
-    def __init__(self, gam=1, lam=1, data_type = 'hetero', action_mode="node_selection"):
-        self.gam = gam
-        self.lam = lam
-        self.states = []
-        self.actions = []
-        self.rewards = torch.tensor([], dtype=torch.float32, requires_grad=True)
-        self.logprobs = torch.tensor([], dtype=torch.float32, requires_grad=True)
-        self.values =  torch.tensor([], dtype=torch.float32, requires_grad=True)
-        self.logpis = []
-        self.start = 0  # index to start of current episode
-        self.end = 0  # index to one past end of current episode
-        self.action_mode = action_mode # "node_selection" or "edge_selection"
-
+    def __init__(self, gam=1.0, lam=1.0, data_type='hetero', action_mode="node_selection"):
+        self.gam = float(gam)
+        self.lam = float(lam)
         self.data_type = data_type
+        self.action_mode = action_mode
 
-        #logging utilities
-        self.prev_policy_loss = 0
+        # rolling storage
+        self.states: List[Dict[str, Any]] = []
+        self.actions: List[int] = []
+        self.rewards_raw: Tensor = torch.empty(0, dtype=torch.float32)
+        self.logprobs_sel: Tensor = torch.empty(0, dtype=torch.float32)
+        self.values_pred: Tensor = torch.empty(0, dtype=torch.float32)
+        self.logpis_nodes: List[Tensor] = []
+        self.token_ids: List[List[int]] = []
 
+        # DCL fields (lists; must be aligned with states)
+        self.target_pi: List[Tensor] = []
+        self.q_first: List[Tensor] = []
 
-    def store(self, state, action, reward, logprob, value, logpis, token_ids: Optional[list] = None):
-        """Store the information from one interaction with the environment.
+        # computed targets for training
+        self.returns_: Tensor = torch.empty(0, dtype=torch.float32)
+        self.advantages_: Tensor = torch.empty(0, dtype=torch.float32)
 
-        Parameters
-        ----------
-        :param state : ndarray
-           Observation of the state.
-        :param action : int
-           Chosen action in this trajectory.
-        :param reward : float
-           Reward received in the next transition.
-        :param logprob : float
-           Agent's logged probability of picking the chosen action.
-        :param value : float
-           Agent's computed value of the state.
-        :param logpis : float
-              Agent's logged probabilities of picking any action.
+        # episode window
+        self.start = 0
+        self.end = 0
 
-        """
+    def __len__(self) -> int:
+        return len(self.states)
+
+    @torch.no_grad()
+    def store(self, state, action, reward, logprob, value, logpis,
+              token_ids: Optional[List[int]] = None,
+              target_pi: Optional[Tensor] = None,
+              q_first: Optional[Tensor] = None):
+        """Append one interaction; always append placeholders for DCL fields to keep alignment."""
         self.states.append(state)
-        self.actions.append(action)
-        self.rewards = torch.cat((self.rewards, torch.tensor([reward])))
-        self.logprobs = torch.cat((self.logprobs, torch.tensor([logprob])))
-        self.values = torch.cat((self.values, torch.tensor([value])))
-        self.logpis.append(logpis)
-        # keep parallel list for token ids that generated/are associated with this stored step
-        if not hasattr(self, 'token_ids'):
-            self.token_ids = []
-        self.token_ids.append(token_ids if token_ids is not None else [])
+        self.actions.append(int(action))
+        self.rewards_raw = torch.cat([self.rewards_raw, _to_1d_tensor(reward)], dim=0)
+        self.logprobs_sel = torch.cat([self.logprobs_sel, _to_1d_tensor(logprob)], dim=0)
+        self.values_pred = torch.cat([self.values_pred, _to_1d_tensor(value)], dim=0)
+        self.logpis_nodes.append(None if logpis is None else logpis.detach().flatten().to(torch.float32))
+        self.token_ids.append([] if token_ids is None else list(token_ids))
+
+        # --- DCL fields: build safe placeholders if missing ---
+        if target_pi is None:
+            n = 0
+            try:
+                g = state['graph']
+                if hasattr(g, 'node_types') and 'a_transition' in g.node_types:
+                    n = g['a_transition'].num_nodes
+            except Exception:
+                pass
+            target_pi = (torch.full((n,), 1.0 / max(n, 1), dtype=torch.float32) if n > 0
+                         else torch.tensor([], dtype=torch.float32))
+        if q_first is None:
+            q_first = torch.tensor([0.0], dtype=torch.float32)
+
+        self.target_pi.append(target_pi.detach().cpu())
+        self.q_first.append(q_first.detach().cpu())
+
         self.end += 1
 
     def apply_action_rewards(self, action_rewards: dict):
@@ -264,137 +328,261 @@ class TrajectoryBuffer:
                 if action_index is not None:
                     new_rewards.append(action_rewards[action_index])
                 else:
-                    new_rewards.append(self.rewards[i].item())  # fallback to original reward
+                    new_rewards.append(self.rewards_raw[i].item())  # fallback to original reward
             else:
-                new_rewards.append(self.rewards[i].item())  # no token info, keep original
+                new_rewards.append(self.rewards_raw[i].item())  # no token info, keep original
 
-        self.rewards = torch.tensor(new_rewards, dtype=torch.float32, requires_grad=True)
+        return torch.tensor(new_rewards, dtype=torch.float32, requires_grad=True)
 
-    def finish(self, causal_trace: Optional[object] = None):
+    @torch.no_grad()
+    def finish(self, credits: Optional[Any] = None, mode: str = "replace"):
         """
-        Finish an episode and compute advantages and discounted rewards.
-        Advantages are stored in place of `values` and discounted rewards are
-        stored in place of `rewards` for the current trajectory.
+        Close current episode [start:end). Compute returns and advantages for that slice.
+        credits:
+            - None                          -> use raw rewards
+            - Tensor/list length T          -> per-step redistributed rewards (aligned with this episode window)
+            - object with .redistribute_rewards() -> will be called to get length-T vector
+        mode:
+            - "replace": use credits as the rewards
+            - "add":     rewards_raw + credits
         """
         tau = slice(self.start, self.end)
+        rewards_ep = self.rewards_raw[tau]
+        values_ep = self.values_pred[tau]
+        dones_ep = torch.zeros_like(rewards_ep, dtype=torch.bool)
+        dones_ep[-1] = True
+
+        # --- Check if we're in causal_rl mode (step rewards are zero) ---
+        has_step_rewards = rewards_ep.sum().item() != 0.0
+
+        # --- Handle credits if provided ---
+        if credits is not None:
+            if hasattr(credits, "redistribute_rewards") and callable(credits.redistribute_rewards):
+                cr = credits.redistribute_rewards()
+                credits_vec = torch.as_tensor(cr, dtype=torch.float32)
+            else:
+                credits_vec = torch.as_tensor(credits, dtype=torch.float32)
+
+            if credits_vec.numel() != rewards_ep.numel():
+                raise ValueError(f"credits length {credits_vec.numel()} != episode length {rewards_ep.numel()}.")
+
+            if mode == "replace":
+                # Use redistributed rewards directly as returns (causal mode)
+                returns_ep = credits_vec
+            else:
+                # Add credits to original rewards, then discount
+                modified_rewards = rewards_ep + credits_vec
+                returns_ep = discount_returns(modified_rewards, self.gam)
+        else:
+            # No credits: discount original rewards
+            returns_ep = discount_returns(rewards_ep, self.gam)
+            credits_vec = None
+
+        # --- Compute advantages ---
+        if not has_step_rewards and credits_vec is not None:
+            # Causal RL mode with value function integration:
+            # In causal mode, step rewards are zero. The actual return signal comes from credits.
+            # We compute cumulative credits (which are the TRUE returns), then use standard GAE
+            # to compute advantages. This way:
+            # - Value network learns to predict cumulative credits (the true returns)
+            # - GAE provides variance reduction through temporal smoothing
+            # - Advantage signal is clean and properly bootstrapped
+
+            # Compute cumulative returns from credits (similar to discount_returns but no discounting needed
+            # since credits already account for timing through redistribution)
+            cumulative_credits = torch.zeros_like(credits_vec)
+            cumsum = 0.0
+            for t in range(len(credits_vec) - 1, -1, -1):
+                cumsum = float(credits_vec[t]) + self.gam * cumsum
+                cumulative_credits[t] = cumsum
+
+            # Now use standard GAE with cumulative credits as the return signal
+            # This treats cumulative_credits like "rewards" from causal system's perspective
+            # delta_t = cumulative_credits_t + gamma * V_{t+1} - V_t
+            adv_ep = torch.zeros(len(cumulative_credits), dtype=torch.float32)
+            gae = 0.0
+            for t in range(len(cumulative_credits) - 1, -1, -1):
+                next_value = float(values_ep[t + 1]) if t + 1 < len(values_ep) else 0.0
+                delta = float(cumulative_credits[t]) + self.gam * next_value - float(values_ep[t])
+                gae = delta + self.gam * self.lam * gae
+                adv_ep[t] = gae
+        else:
+            # Normal mode: use step rewards for advantages
+            adv_ep = compute_gae(rewards_ep, values_ep, self.gam, self.lam, dones=dones_ep)
+
+        if self.returns_.numel() == 0:
+            self.returns_ = returns_ep.clone()
+            self.advantages_ = adv_ep.clone()
+        else:
+            self.returns_ = torch.cat([self.returns_, returns_ep], dim=0)
+            self.advantages_ = torch.cat([self.advantages_, adv_ep], dim=0)
+
+        self.start = self.end
+
+
+    def finish_wip(self, causal_trace: Optional[Sequence[float]] = None):
+        """
+        Close current episode [start:end). Compute returns and advantages for that slice.
+        If 'credits' is a stepwise vector (same length as episode), we add it to rewards before discounting.
+        """
+        tau = slice(self.start, self.end)
+        rewards_ep = self.rewards_raw[tau]
+        values_ep = self.values_pred[tau]
+        dones_ep = torch.zeros_like(rewards_ep, dtype=torch.bool)
+        dones_ep[-1] = True
 
         # Create end_flag tensor: True for the last step of the trajectory
-        end_flag = torch.zeros_like(self.rewards[tau], dtype=torch.bool)
+        end_flag = torch.zeros_like(self.rewards_raw[tau], dtype=torch.bool)
         end_flag[-1] = True  # Mark the last step as terminal
-        values = compute_advantages(self.rewards[tau], self.values[tau], self.gam, self.lam, dones=end_flag) #TODO: check if this is in the right place
+
         if causal_trace is not None:
-            rewards = apply_causal_credits(causal_trace)
+            rewards_ep = self.apply_causal_credits(causal_trace)
+
+        # values = compute_advantages(rewards_ep, values_ep, self.gam, self.lam,
+        #                            dones=end_flag)  # TODO: check if this is in the right place
+
+        returns_ep = discount_rewards(rewards_ep, self.gam)
+        # self.rewards[tau] = rewards
+        # self.values[tau] = values
+
+        adv_ep = compute_gae(rewards_ep, values_ep, self.gam, self.lam, dones=dones_ep)
+
+        if self.returns_.numel() == 0:
+            self.returns_ = returns_ep.clone()
+            self.advantages_ = adv_ep.clone()
         else:
-            rewards = discount_rewards(self.rewards[tau], self.gam)
-        self.rewards[tau] = rewards
-        self.values[tau] = values
+            self.returns_ = torch.cat([self.returns_, returns_ep], dim=0)
+            self.advantages_ = torch.cat([self.advantages_, adv_ep], dim=0)
+
         self.start = self.end
 
     def clear(self):
         """Reset the buffer."""
         self.states.clear()
         self.actions.clear()
-        self.rewards = torch.tensor([], dtype=torch.float32, requires_grad=True)
-        self.logprobs = torch.tensor([], dtype=torch.float32, requires_grad=True)
-        self.values = torch.tensor([], dtype=torch.float32, requires_grad=True)
-        self.logpis = []
+        self.token_ids.clear()
+        self.logpis_nodes.clear()
+        self.target_pi.clear()
+        self.q_first.clear()
+
+        self.rewards_raw = torch.empty(0, dtype=torch.float32)
+        self.logprobs_sel = torch.empty(0, dtype=torch.float32)
+        self.values_pred = torch.empty(0, dtype=torch.float32)
+        self.returns_ = torch.empty(0, dtype=torch.float32)
+        self.advantages_ = torch.empty(0, dtype=torch.float32)
         self.start = 0
         self.end = 0
 
-    def get(self, batch_size=64, normalize_advantages=True, sort=False, shuffle=True, drop_remainder=False):
-        """Return a tf.Dataset of training data from this TrajectoryBuffer, along with the desired batch size.
-
-        Parameters
-        ----------
-        :param batch_size : int, optional
-            Batch size in the returned tf.Dataset.
-        :param normalize_advantages : bool, optional
-            Whether to normalize the returned advantages.
-        :param sort : bool, optional
-            Whether to sort by state shape before batching to minimize padding.
-        :param drop_remainder : bool, optional
-            Whether to drop the last batch if it has fewer than batch_size elements.
-
-        Returns
-        -------
-        DataLoader
-        A PyTorch Geometric DataLoader containing the batched trajectory data.
+    @torch.no_grad()
+    def _normalize_advantages(self, adv: Tensor) -> Tensor:
+        std = adv.std()
+        mean = adv.mean()
+        return (adv - mean) / (std + 1e-8)
 
 
+    @torch.no_grad()
+    def get(self, batch_size=64, normalize_advantages=True,
+            sort=True, drop_remainder=False):
         """
+        Build a PyG DataLoader. Each HeteroData sample contains:
+          - y (action), advantage, value (discounted return), logprobs (scalar)
+          - logpis split per node type (old policy over action nodes, incl. postpone)
+          - target_pi split per node type (optional)
+          - q_first (per-sample rollout scores)
+        """
+        N = len(self.states)
+        if N == 0:
+            raise ValueError("Buffer is empty; store()/finish() before get().")
+        if self.returns_.numel() != N or self.advantages_.numel() != N:
+            raise RuntimeError("Not all steps finalized; call finish() after each episode.")
 
-        if shuffle:
-            indices = np.random.permutation(len(self.states[:self.start]))
-            self.states = [self.states[i] for i in indices]
-            self.actions = list(np.array(self.actions)[indices])  # Convert to NumPy array for indexing
-            self.logprobs = self.logprobs[indices]
-            self.values = self.values[indices]
-            self.rewards = self.rewards[indices]
-            self.logpis = [self.logpis[i] for i in indices]
+        idx = np.arange(N)
+        if sort:
+            np.random.shuffle(idx)
 
+        # Convert to torch tensor for consistent indexing behavior
+        idx_tensor = torch.from_numpy(idx).long()
 
-        actions = np.array(self.actions[:self.start], dtype=np.int32)
-        logprobs = self.logprobs[:self.start]
-        advantages = self.values[:self.start]
-        values = self.rewards[:self.start]
-        logpis = self.logpis[:self.start]
+        # reorder everything consistently
+        states = [self.states[i] for i in idx]
+        actions = np.asarray([self.actions[i] for i in idx], dtype=np.int64)
+        returns = self.returns_[idx_tensor]
+        adv = self.advantages_[idx_tensor]
+        logprob_s = self.logprobs_sel[idx_tensor]
+        logpis = [self.logpis_nodes[i] for i in idx]  # per-step old-policy vector
+        target_pi = [self.target_pi[i] for i in idx]
+        q_first = [self.q_first[i] for i in idx]
 
+        if normalize_advantages:
+            adv = self._normalize_advantages(adv)
 
+        # build HeteroData list
+        data_list: List[HeteroData] = []
+        for i, s in enumerate(states):
+            g: HeteroData = copy.deepcopy(s['graph'])
+            g.y = torch.tensor(actions[i], dtype=torch.long)
+            # Ensure scalar shapes for value and advantage
+            g.advantage = adv[i].reshape(()).detach()
+            g.value = returns[i].reshape(()).detach()
+            g.logprobs = logprob_s[i].reshape(()).detach()
 
-        if self.states: #and self.states[0].ndim == 2:
+            # --- Standardize lp to 1-D
+            lp = logpis[i] if isinstance(logpis[i], torch.Tensor) else torch.tensor([], dtype=torch.float32)
+            if lp.dim() == 2 and lp.size(-1) == 1:
+                lp = lp.squeeze(-1)
+            g.logpis = lp  # optional: whole-step old policy for debugging
 
-            # filter out any states with only one action available
-            if self.action_mode == "node_selection":
-                if self.data_type == 'hetero':
-                    #no need to filter anything
-                    states = self.states[:self.start]
-                    pass
+            # --- Split lp per node type by actual counts in THIS sample
+            nA = g['a_transition'].x.size(0) if 'a_transition' in g.node_types else 0
+            nP = g['postpone'].x.size(0) if 'postpone' in g.node_types else 0
+            total_expected = nA + nP
 
-                elif self.data_type == 'homogeneous':
-                    indices = [i for i in range(len(self.states[:self.start])) if len(self.states[i]['graph'].nodes) != 1]
-                    states = [self.states[i] for i in indices]
-                    actions = actions[indices]
-                    logprobs = logprobs[indices]
-                    advantages = advantages[indices]
-                    values = values[indices]
+            if total_expected > 0:
+                if lp.numel() != total_expected:
+                    # Try to recover: if we only have a_transition and lp is longer, truncate; if shorter, pad zeros.
+                    # Warn once so you can inspect upstream ordering/length.
+                    print(f"[WARN:get] old logpis length {lp.numel()} != nA+nP {total_expected} (sample {i}). "
+                          f"{'Truncating' if lp.numel() > total_expected else 'Padding with zeros'}.")
 
-                    if sort:
-                        indices = np.argsort([s.shape[0] for s in states])
-                        states = [states[i] for i in indices]
-                        actions = actions[indices]
-                        logprobs = logprobs[indices]
-                        advantages = advantages[indices]
-                        values = values[indices]
+                    if lp.numel() > total_expected:
+                        lp = lp[:total_expected]
+                    else:
+                        lp = torch.cat([lp, torch.zeros(total_expected - lp.numel(), dtype=torch.float32)], dim=0)
 
-            elif self.action_mode == "edge_selection":
-                indices = [i for i in range(len(self.states[:self.start])) if len(self.states[0]['graph'].edge_links) != 1]
-            else:
-                raise ValueError("Action_mode must be either 'node_selection' or 'edge_selection'")
+            # Attach per-type old policy in the SAME order as actions_dict: [a_transition][postpone]
+            if 'a_transition' in g.node_types:
+                g['a_transition'].logpis = lp[:nA] if total_expected else torch.tensor([], dtype=torch.float32)
+            if 'postpone' in g.node_types:
+                g['postpone'].logpis = lp[nA:nA + nP] if total_expected else torch.tensor([], dtype=torch.float32)
 
-            dataloader = GraphDataLoader(batch_size, states, actions, logprobs, advantages, logpis, values).loader
+            # --- DCL / targets (optional): split target_pi with same ordering
+            tpi = target_pi[i] if isinstance(target_pi[i], torch.Tensor) else torch.tensor([], dtype=torch.float32)
+            if tpi.dim() == 2 and tpi.size(-1) == 1:
+                tpi = tpi.squeeze(-1)
+            g.target_pi = tpi
 
-            #if normalize_advantages:
-            #    for batch in dataloader:
-            #        batch_advantages = batch['advantage']
-            #        batch['advantage'] = (batch_advantages - batch_advantages.mean()) / (batch_advantages.std() + 1e-8)
-            if normalize_advantages:
-                # Compute global mean and std of advantages
-                all_advantages = torch.cat([batch['advantage'] for batch in dataloader])
-                global_mean = all_advantages.mean()
-                global_std = all_advantages.std() + 1e-8
+            qf = q_first[i] if isinstance(q_first[i], torch.Tensor) else torch.tensor([0.0], dtype=torch.float32)
+            g.q_first = qf
 
-                # Normalize advantages for each batch
-                for batch in dataloader:
-                    batch['advantage'] = (batch['advantage'] - global_mean) / global_std
+            if 'a_transition' in g.node_types:
+                g['a_transition'].target_pi = (
+                    tpi[:nA] if tpi.numel() >= nA else torch.tensor([], dtype=torch.float32)
+                )
+            if 'postpone' in g.node_types:
+                g['postpone'].target_pi = (
+                    tpi[nA:nA + nP] if tpi.numel() >= (nA + nP) else torch.tensor([], dtype=torch.float32)
+                )
 
+            data_list.append(g)
 
-        else:
-            raise ValueError("States must be non-empty.")
+        if drop_remainder and (len(data_list) % batch_size != 0):
 
-        return dataloader
+            keep = len(data_list) - (len(data_list) % batch_size)
+            data_list = data_list[:keep]
 
-    def __len__(self):
-        return len(self.states)
+        loader = DataLoader(data_list, batch_size=batch_size, shuffle=False)
+
+        return loader
 
 
 def print_status_bar(i, epochs, history, verbose=1):

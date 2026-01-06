@@ -45,7 +45,7 @@ class HeteroActor(ActorCritic):
                 index_postpone = data['postpone']['batch']
                 index = torch.cat((index, index_postpone), dim=0)
 
-            print(f"Index unique values {len(set(index.tolist()))}")
+            #print(f"Index unique values {len(set(index.tolist()))}")
 
         x_dict = graph.x_dict
 

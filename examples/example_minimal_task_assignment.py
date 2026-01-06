@@ -29,7 +29,7 @@ if __name__ == "__main__":
     ###########################################################################
 
     # Instantiate a simulation problem.
-    agency = GymProblem(causal_rl=False)
+    agency = GymProblem(causal_rl=True)
 
     # Define cases.
     arrival = agency.add_var("arrival", var_attributes=['task_type'])

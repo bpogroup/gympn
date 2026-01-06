@@ -21,8 +21,8 @@ if __name__ == "__main__":
 
     ###########################################################################
     # Run configurations
-    train = False #set to False to test a trained model
-    run_name = '2025-10-02-11-14-25_run' #specify the run name to load the weights from
+    train = True #set to False to test a trained model
+    run_name = '2025-12-11-11-38-11_run'#'2025-10-02-11-14-25_run' #specify the run name to load the weights from
     num_experiments = 1000 #number of test experiments to run (if train=False)
     visualize_random = False  # Set to True to visualize the random solver
     visualize_ppo = False  # Set to True to visualize the PPO solver
@@ -32,7 +32,7 @@ if __name__ == "__main__":
     ###########################################################################
 
     # Instantiate a simulation problem.
-    agency = GymProblem()
+    agency = GymProblem(causal_rl=train, allow_postpone=True)
 
     # Define cases.
     arrival = agency.add_var("arrival", var_attributes=['task_type'])
@@ -60,12 +60,12 @@ if __name__ == "__main__":
 
     senior_employee = agency.add_var("senior_employee", var_attributes=['code_employee'])
     senior_employee.put({'code_employee': 0})
-    senior_employee.put({'code_employee': 0})
+    #senior_employee.put({'code_employee': 0})
 
 
     # Define events.
     def arrive(a):
-        return [SimToken(a, delay=random.expovariate(3)), SimToken(a)]
+        return [SimToken(a, delay=random.expovariate(10)), SimToken(a)]
 
 
     agency.add_event([arrival], [arrival, waiting], arrive)
@@ -96,7 +96,7 @@ if __name__ == "__main__":
 
 
     agency.add_event([busy_register_application], [junior_employee, waiting_choice], complete_register_application,
-                     name='complete', reward_function=lambda x: 1)
+                     name='complete')#, reward_function=lambda x: 1)
 
 
     # The decision point - choice of the next task and which resource pool to use
@@ -143,7 +143,7 @@ if __name__ == "__main__":
 
     def rework_senior(b):
         prob = random.uniform(0, 1)
-        if prob > 0.9:
+        if prob > 0.95:
             return [SimToken(b), None]
         else:
             return [None, SimToken(b)]
@@ -177,15 +177,15 @@ if __name__ == "__main__":
         "lam": 0.99,
         "eps": 0.2,
         "c": 0.2,
-        "ent_bonus": 0.0,
+        "ent_bonus": 0.05,
         "agent_seed": None,
 
         # Policy Model
         "policy_model": "gnn",
-        "policy_kwargs": {"hidden_layers": [64]},
+        "policy_kwargs": {"hidden_layers": [128, 64]},
         "policy_lr": 3e-4,
-        "policy_updates": 2,
-        "policy_kld_limit": 0.01,
+        "policy_updates": 10,
+        "policy_kld_limit": 1,
         "policy_weights": "",
         "policy_network": "",
         "score": False,
@@ -193,18 +193,18 @@ if __name__ == "__main__":
 
         # Value Model
         "value_model": "gnn",
-        "value_kwargs": {"hidden_layers": [64]},
-        "value_lr": 3e-4,
+        "value_kwargs": {"hidden_layers": [128, 64]},
+        "value_lr": 1e-3,
         "value_updates": 10,
         "value_weights": "",
 
         # Training Parameters
-        "episodes": 100, #TODO: add a warning to the batch collection to hint if no complete batch is available
+        "episodes": 20, #TODO: add a warning to the batch collection to hint if no complete batch is available
         "epochs": 200,
         "max_episode_length": None,
         "batch_size": 64,
         "sort_states": False,
-        "use_gpu": False,
+        "use_gpu": True,
         "load_policy_network": False,
         "verbose": 0,
 

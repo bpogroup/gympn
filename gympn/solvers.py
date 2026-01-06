@@ -52,25 +52,101 @@ class GymSolver(BaseSolver):
     def solve(self, obs) -> Any:
         return self.policy_model.forward(obs)
 
+
 class HeuristicSolver(BaseSolver):
     """
-    Heuristic solvers are used to select a binding from a list of bindings according to a heuristic function.
-    The heuristic function should take a list of bindings as input and return a single binding (the selected action) as output.
+    Heuristic solver that can choose among REAL action bindings and,
+    when exposed, a postpone pseudo-binding.
 
-    Attributes
-    ----------
-    heuristic_function : Any
-        The heuristic function to be used by the solver.
+    Heuristic return formats supported:
+      - 'postpone'
+      - int (index into the provided 'bindings' list)
+      - tuple (a binding tuple that must be present in 'bindings')
+      - dict  {action_id: token_values} -> mapped to a timed binding
     """
+
     def __init__(self, heuristic_function: Any):
         self.heuristic_function = heuristic_function
 
     def solve(self, observable_net, bindings: List) -> Any:
+        """
+        Parameters
+        ----------
+        observable_net : GymProblem or observation-like object
+            Used by the heuristic to inspect places/actions and flags.
+        bindings : List
+            List of candidates to choose from. Items are either:
+              - REAL action timed bindings: ([ (place, token), ... ], time, transition)
+              - postpone pseudo-binding:   (['postpone'], current_clock, None)
+
+        Returns
+        -------
+        Either:
+          - 'postpone'
+          - a REAL timed binding (from 'bindings')
+        """
         self.bindings = bindings
-        tokens_comb = sim_tokens_values_from_bindings(bindings)
-        ret_val = self.heuristic_function(observable_net, tokens_comb)
-        untimed_binding = (observable_net.id2node[list(ret_val.keys())[0]], list(ret_val.values())[0])
-        return binding_from_tokens_values(untimed_binding, bindings)
+
+        # Identify real bindings vs. pseudo postpone entry
+        def _is_real_binding(b) -> bool:
+            return (
+                isinstance(b, tuple) and len(b) >= 2 and
+                isinstance(b[0], list) and len(b[0]) > 0 and isinstance(b[0][0], tuple)
+            )
+
+        real_bindings = [b for b in bindings if _is_real_binding(b)]
+        postpone_present = any(isinstance(b, tuple) and b and b[0] == ['postpone'] for b in bindings)
+
+        # Build token-combinations only for REAL bindings
+        tokens_comb = sim_tokens_values_from_bindings(real_bindings)
+
+        # Call heuristic, supporting both (obs, tokens) and (obs, tokens, bindings)
+        try:
+            selection = self.heuristic_function(observable_net, tokens_comb, bindings)
+        except TypeError:
+            selection = self.heuristic_function(observable_net, tokens_comb)
+
+        # ---- Case A: explicit 'postpone'
+        if selection == 'postpone':
+            allow = getattr(observable_net, 'allow_postpone', False)
+            just_postponed = getattr(observable_net, 'just_postponed', False)
+            is_action_tag = getattr(observable_net, 'network_tag', None) and observable_net.network_tag.is_action()
+            if allow and not just_postponed and is_action_tag:
+                return 'postpone'
+            # Illegal postpone -> fall back to a safe real binding if available
+            return real_bindings[0] if real_bindings else bindings[0]
+
+        # ---- Case B: integer index into 'bindings'
+        if isinstance(selection, int):
+            if selection < 0 or selection >= len(bindings):
+                raise IndexError(f"Heuristic index {selection} out of range [0, {len(bindings)-1}]")
+            chosen = bindings[selection]
+            if isinstance(chosen, tuple) and chosen and chosen[0] == ['postpone']:
+                return 'postpone'
+            return chosen
+
+        # ---- Case C: binding tuple
+        if isinstance(selection, tuple):
+            if selection and selection[0] == ['postpone']:
+                return 'postpone'
+            if selection in bindings:
+                return selection
+            raise ValueError("Heuristic returned a binding tuple not present in 'bindings'.")
+
+        # ---- Case D: {action_id: token_values}
+        if isinstance(selection, dict):
+            if len(selection) != 1:
+                raise ValueError("Heuristic must return exactly one {action_id: token_values}.")
+            action_id, token_values = next(iter(selection.items()))
+            try:
+                action_node = observable_net.id2node[action_id]
+            except Exception:
+                raise KeyError(f"Action id '{action_id}' not found in observable_net.id2node.")
+            untimed = (action_node, token_values)
+            return binding_from_tokens_values(untimed, real_bindings)
+
+        raise TypeError("Heuristic must return one of: 'postpone' | int | binding tuple | {action_id: token_values}")
+
 
     def set_heuristic_function(self, heuristic_function: Any):
         """

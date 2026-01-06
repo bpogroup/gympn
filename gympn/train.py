@@ -12,6 +12,11 @@ import torch
 from gympn.environment import AEPN_Env
 from gympn.networks import HeteroActor, HeteroCritic
 from gympn.agents import PGAgent, PPOAgent
+from gympn.rollouts import RolloutConfig, RealRolloutPlanner
+from gympn.agents_rollouts import RolloutPIAgent
+
+from gympn.dcl_planner import PlannerConfig
+from gympn.agents_dcl import DCLAgent
 
 
 #train = True
@@ -32,10 +37,12 @@ def make_parser():
                      help='seed for the environment')
 
     alg = parser.add_argument_group('algorithm', 'algorithm parameters')
+
     alg.add_argument('--algorithm',
-                     choices=['ppo-clip', 'ppo-penalty', 'pg'],
+                     choices=['ppo-clip', 'ppo-penalty', 'pg', 'rollout-pi', 'mbpo', 'dcl'],
                      default='ppo-clip',
                      help='training algorithm')
+
     alg.add_argument('--gam',
                      type=float,
                      default=1,
@@ -162,6 +169,16 @@ def make_parser():
                        type=int,
                        default=0,
                        help='how much information to print')
+
+    roll = parser.add_argument_group('rollouts', 'rollout-based planning')
+    roll.add_argument('--rollout_horizon', type=int, default=5)
+    roll.add_argument('--rollout_trajs', type=int, default=64)
+    roll.add_argument('--rollout_temp', type=float, default=1.0)
+
+    roll = parser.add_argument_group('dcl', 'DCL planner parameters')
+    roll.add_argument('--dcl_horizon', type=int, default=5)
+    roll.add_argument('--dcl_rollouts', type=int, default=32)
+    roll.add_argument('--dcl_temp', type=float, default=1.0)
 
     save = parser.add_argument_group('saving')
     save.add_argument('--name',
@@ -314,6 +331,46 @@ def make_agent(args, metadata=None):
                          policy_lr=args.policy_lr, policy_updates=args.policy_updates,
                          value_network=value_network, value_lr=args.value_lr, value_updates=args.value_updates,
                          gam=args.gam, lam=args.lam, kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus)
+
+
+    elif args.algorithm == 'rollout-pi':
+        planner = RealRolloutPlanner(RolloutConfig(
+            horizon=args.rollout_horizon,
+            num_trajs=args.rollout_trajs,
+            temperature=args.rollout_temp,
+            gamma=args.gam))
+        agent = RolloutPIAgent(
+            policy_network=policy_network,
+            value_network=value_network,
+            planner=planner,
+            policy_lr=args.policy_lr, policy_updates=args.policy_updates,
+            value_lr=args.value_lr, value_updates=args.value_updates,
+            gam=args.gam, lam=args.lam,
+            kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus
+        )
+
+
+    elif args.algorithm == 'dcl':
+        planner_cfg = PlannerConfig(
+            horizon=args.dcl_horizon,
+            rollouts_per_action=args.dcl_rollouts,
+            gamma=args.gam,
+            temperature=args.dcl_temp,
+            use_crn=True,
+            use_lineage=True
+        )
+
+        agent = DCLAgent(
+            policy_network=policy_network,
+            value_network=value_network,
+            planner_cfg=planner_cfg,
+            policy_lr=args.policy_lr,
+            policy_updates=args.policy_updates,
+            value_lr=args.value_lr,
+            value_updates=args.value_updates,
+            gam=args.gam, lam=args.lam,
+            kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus)
+
     else:
         raise Exception("Unknown algorithm! Are you sure it is spelled correctly?")
     return agent

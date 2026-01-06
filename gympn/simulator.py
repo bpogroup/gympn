@@ -20,6 +20,15 @@ from gympn.plotter import GraphPlotter
 from gympn.visualisation import Visualisation
 
 
+from typing import List, Tuple
+
+def _is_real_binding_tuple(b) -> bool:
+    return (
+        isinstance(b, tuple) and len(b) >= 2 and
+        isinstance(b[0], list) and len(b[0]) > 0 and isinstance(b[0][0], tuple)
+    )
+
+
 class GymProblem(SimProblem):
     """
         A decision problem GymProblem, which consists of a collection of simulation variables SimVar, a collection of simulation events SimEvent, and a collection of actions SimAction.
@@ -453,34 +462,47 @@ class GymProblem(SimProblem):
 
     def get_heuristic_observation(self):
         """
-        Creates a heuristic observation of the problem.
-
-        The heuristic observation includes only observable places and token attributes, excluding unobservable ones.
-
-        :return: A new `GymProblem` instance containing only observable places and token attributes.
+        Creates a lean observation for heuristic solvers:
+          - Includes only observable places and any transitions fully connected to those places.
+          - Does NOT add a 'postpone' node (postpone is exposed via the pseudo-binding).
+          - Propagates postpone-related flags for consistent logic in heuristics.
         """
-        ret = GymProblem()
+        ret = GymProblem(debugging=self._debugging,
+                         binding_priority=self.binding_priority,
+                         tag='e',  # the tag value is not used by the heuristic itself
+                         has_var_attrs=self.has_var_attrs,
+                         solver=None,
+                         plot_observations=False,
+                         allow_postpone=self.allow_postpone,  # propagate flags
+                         causal_rl=self.causal_rl)
 
+        # carry flags explicitly (in case constructor defaults differ)
+        ret.allow_postpone = self.allow_postpone
+        ret.just_postponed = self.just_postponed
+
+        # copy places (excluding unobservable)
         ret.places = [p for p in self.places if p._id not in self.unobservable_simvars]
         for p in ret.places:
             ret.id2node[p._id] = p
 
+        # events fully within observed places
         for e in self.events:
             if set(e.incoming) <= set(ret.places) and set(e.outgoing) <= set(ret.places):
                 ret.events.append(e)
                 ret.id2node[e._id] = e
 
+        # actions fully within observed places (FIX: append to ret.actions)
         for a in self.actions:
             if set(a.incoming) <= set(ret.places) and set(a.outgoing) <= set(ret.places):
-                ret.events.append(a)
+                ret.actions.append(a)
                 ret.id2node[a._id] = a
 
-        #remove unobservable token attrs if any
+        # remove unobservable token attrs (if any)
         if self.unobservable_token_attrs:
             for p in ret.places:
-                if p._id in self.unobservable_token_attrs.keys():
-                    for key in self.unobservable_token_attrs[p._id]:
-                        if key in p.tokens_attributes.keys():
+                if p._id in self.unobservable_token_attrs:
+                    for key in list(self.unobservable_token_attrs[p._id]):
+                        if key in p.tokens_attributes:
                             del p.tokens_attributes[key]
 
         return ret
@@ -1207,7 +1229,7 @@ class GymProblem(SimProblem):
             else:
                 active_model = False
 
-        return self.get_graph_observation(), self.clock > self.length or not active_model, i
+        return self.get_graph_observation(), self.clock >= self.length or not active_model, i
 
     def update_reward(self, timed_binding, result_tokens=None):
         binding, time, transition = timed_binding
@@ -1417,64 +1439,99 @@ class GymProblem(SimProblem):
         metadata = self.make_metadata()
 
         agent = make_agent(args, metadata=metadata)
+
+
         # Logging to tensorboard. To access tensorboard, open a bash terminal in the projects directory, activate the environment (where tensorflow should be installed) and run the command in the following line
         # tensorboard --logdir .
         # then, in a browser page, access localhost:6006 to see the board
         logdir = make_logdir(args)
-        print("Saving run in", logdir)
+
+        # Import logger for training output
+        from gympn.logging_utils import get_logger
+        logger = get_logger(verbose=args.verbose)
+
+        logger.debug(f"Saving run in {logdir}")
 
         if args.open_tensorboard:
-            print("Opening tensorboard...")
+            logger.debug("Opening tensorboard...")
             tb_process = launch_tensorboard(logdir)
 
-        print("Training...")
+        logger.training_start(agent.__class__.__name__, args.epochs, args.episodes)
+
+        # Log if causal RL is enabled
+        if hasattr(env, 'causal_rl') and env.causal_rl:
+            logger.causal_rl_enabled()
+
         agent.train(env, episodes=args.episodes, epochs=args.epochs,
                     save_freq=args.save_freq, logdir=logdir, verbose=args.verbose,
                     max_episode_length=args.max_episode_length, batch_size=args.batch_size, test_env=test_env, test_freq=test_freq)
 
-        print("Finished training")
+        logger.training_end(agent.best_test_metric if hasattr(agent, 'best_test_metric') else 0.0)
         if args.open_tensorboard:
             tb_process.terminate()
             tb_process.wait()  # Wait for the process to terminate
 
+    def _augment_bindings_with_postpone(self, bindings: List) -> List:
+        """
+        If postpone is allowed, we are in action phase, and we didn't just postpone,
+        expose postpone as a pseudo-binding option:
+            (['postpone'], current_clock, None)
 
+        Ensures we don't add duplicates.
+        """
+        if not self.allow_postpone or self.just_postponed or not self.network_tag.is_action():
+            return bindings
+
+        already_present = any(isinstance(b, tuple) and b and b[0] == ['postpone'] for b in bindings)
+        if already_present:
+            return bindings
+
+        augmented = list(bindings)
+        augmented.append((['postpone'], self.clock, None))
+        return augmented
 
     def step(self, reporter=None, length=None):
         """
-        Executes a single step of the simulation.
+        Executes one simulation step.
 
-        If multiple events or actions can occur, one is selected based on the network tag and solver.
-        The method returns the binding that occurred or None if no event could happen.
+        Evolution phase:
+            - Fire one evolution binding (as before).
 
-        :param reporter: A reporter to log simulation events.
-        :return: A tuple containing:
-            - The binding that occurred, or None if no event could happen.
-            - A boolean indicating whether the model is still active.
+        Action phase:
+            - GymSolver: use policy over graph observation (postpone already included).
+            - Other solvers: expose 'postpone' via a pseudo-binding and pass the augmented list to the solver.
+              Solver may return:
+                * 'postpone' (string)
+                * the postpone pseudo-binding tuple
+                * a real timed binding from the augmented list
         """
-
         if self.solver is None:
-            print("Warning: no solver was provided. Set a valid solver via the set_solver method. If you wish to do simple simulation, use RandomSolver.")
+            print("Warning: no solver was provided. Use set_solver(...) or RandomSolver for simple simulation.")
 
         bindings, active_model = self.bindings()
 
         if self.clock <= self.length:
+            # -------- EVOLUTIONS --------
             if len(bindings) > 0 and self.network_tag.is_evolution():
                 timed_binding = bindings[0]
                 output_tokens = self.fire(timed_binding)
                 if timed_binding[-1]._id in self.reward_functions.keys():
                     self.update_reward(timed_binding)
                 if reporter is not None:
-                    # report changes in marking
                     self.print_report(reporter, timed_binding)
                 print(f"Fired binding {timed_binding}")
                 return timed_binding, active_model
+
+            # -------- ACTIONS --------
             elif len(bindings) > 0 and self.network_tag.is_action():
-                if type(self.solver) is GymSolver:
+                # --- Gym branch ---
+                if isinstance(self.solver, GymSolver):
                     obs = self.get_graph_observation()
                     act_probs = self.solver.solve(obs)
                     max_index = torch.argmax(act_probs).item()
                     timed_binding = obs['actions_dict'][max_index]
-                    if self.allow_postpone and timed_binding[0] == ['postpone']:
+
+                    if self.allow_postpone and isinstance(timed_binding, tuple) and timed_binding[0] == ['postpone']:
                         self.postpone()
                         print("Postponed!")
                     else:
@@ -1483,18 +1540,29 @@ class GymProblem(SimProblem):
                         if timed_binding[-1]._id in self.reward_functions.keys():
                             self.update_reward(timed_binding)
                         if reporter is not None:
-                            # report changes in marking
                             self.print_report(reporter, timed_binding)
                     return timed_binding, active_model
-                else:  # currently the other types are RandomSolver and HeuristicSolver
-                    timed_binding = self.solver.solve(self.get_heuristic_observation(), bindings)
+
+                # --- Heuristic / Random branch ---
+                else:
+                    obs = self.get_heuristic_observation()
+                    aug_bindings = self._augment_bindings_with_postpone(bindings)
+                    timed_binding = self.solver.solve(obs, aug_bindings)
+
+                    is_postpone_tuple = isinstance(timed_binding, tuple) and timed_binding and timed_binding[0] == [
+                        'postpone']
+                    if timed_binding == 'postpone' or is_postpone_tuple:
+                        self.postpone()
+                        print("Postponed!")
+                        return timed_binding, active_model
+
+                    # Fire selected binding
                     self.fire(timed_binding)
-                    #if timed_binding[-1]._id in self.reward_functions.keys():
-                    self.update_reward(timed_binding)
+                    if timed_binding[-1]._id in self.reward_functions.keys():
+                        self.update_reward(timed_binding)
                     if reporter is not None:
-                        # report changes in marking
                         self.print_report(reporter, timed_binding)
-                    #print(f"Fired binding {timed_binding}")
+                    # print(f"Fired binding {timed_binding}")
                     return timed_binding, active_model
 
         return None, active_model
