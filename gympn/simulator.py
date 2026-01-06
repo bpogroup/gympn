@@ -396,6 +396,9 @@ class GymProblem(SimProblem):
         except:
             raise TypeError("Binding " + str(timed_binding) + ": is not a valid timed binding.")
 
+        if isinstance(event, SimEvent) and not isinstance(event, SimAction):
+            self.just_postponed = False
+
         # process incoming places:
         variable_assignment = []
         for (place, token) in binding:
@@ -469,7 +472,7 @@ class GymProblem(SimProblem):
         """
         ret = GymProblem(debugging=self._debugging,
                          binding_priority=self.binding_priority,
-                         tag='e',  # the tag value is not used by the heuristic itself
+                         tag=self.network_tag.tag,  # the tag value is not used by the heuristic itself
                          has_var_attrs=self.has_var_attrs,
                          solver=None,
                          plot_observations=False,
@@ -765,7 +768,7 @@ class GymProblem(SimProblem):
                                                                     dim=1)
 
             #also include postpone in self.pn_actions with special binding
-            transition_binding_map.append((['postpone'], self.clock)) #no binding, time is current clock
+            transition_binding_map.append((['postpone'], self.clock, None)) #no binding, time is current clock
 
 
         if self.metadata is None: #TODO: handle case where postpone is initially not available
@@ -1479,7 +1482,7 @@ class GymProblem(SimProblem):
 
         Ensures we don't add duplicates.
         """
-        if not self.allow_postpone or self.just_postponed or not self.network_tag.is_action():
+        if not self.allow_postpone or not self.network_tag.is_action():
             return bindings
 
         already_present = any(isinstance(b, tuple) and b and b[0] == ['postpone'] for b in bindings)
@@ -1549,20 +1552,23 @@ class GymProblem(SimProblem):
                     aug_bindings = self._augment_bindings_with_postpone(bindings)
                     timed_binding = self.solver.solve(obs, aug_bindings)
 
-                    is_postpone_tuple = isinstance(timed_binding, tuple) and timed_binding and timed_binding[0] == [
-                        'postpone']
-                    if timed_binding == 'postpone' or is_postpone_tuple:
+                    postponed = False
+                    if timed_binding == 'postpone' or (isinstance(timed_binding, tuple) and timed_binding[0] == ['postpone']):
+                        postponed = True
+                        timed_binding = (['postpone'], self.clock, None)
+
+                    if postponed:
                         self.postpone()
                         print("Postponed!")
-                        return timed_binding, active_model
-
-                    # Fire selected binding
-                    self.fire(timed_binding)
-                    if timed_binding[-1]._id in self.reward_functions.keys():
-                        self.update_reward(timed_binding)
-                    if reporter is not None:
-                        self.print_report(reporter, timed_binding)
-                    # print(f"Fired binding {timed_binding}")
+                        #return timed_binding, active_model
+                    else:
+                        # Fire selected binding
+                        self.fire(timed_binding)
+                        if timed_binding[-1]._id in self.reward_functions.keys():
+                            self.update_reward(timed_binding)
+                        if reporter is not None:
+                            self.print_report(reporter, timed_binding)
+                        print(f"Fired binding {timed_binding}")
                     return timed_binding, active_model
 
         return None, active_model
@@ -1604,7 +1610,8 @@ class GymProblem(SimProblem):
         else:
             while self.clock <= self.length and active_model:
                 binding, active_model = self.step(reporter, length)
-                #print(f"Binding: {binding}")
+                if self._debugging:
+                    print(f"Binding: {binding}")
 
         #print(f'Final reward: {self.reward}')
         return self.reward

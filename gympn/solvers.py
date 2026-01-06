@@ -3,6 +3,7 @@ from typing import Any, List, Dict
 import torch
 from gympn.utils import sim_tokens_values_from_bindings, binding_from_tokens_values
 import random
+import warnings
 
 
 class BaseSolver(ABC):
@@ -109,12 +110,26 @@ class HeuristicSolver(BaseSolver):
         # ---- Case A: explicit 'postpone'
         if selection == 'postpone':
             allow = getattr(observable_net, 'allow_postpone', False)
-            just_postponed = getattr(observable_net, 'just_postponed', False)
-            is_action_tag = getattr(observable_net, 'network_tag', None) and observable_net.network_tag.is_action()
-            if allow and not just_postponed and is_action_tag:
+            # Only accept postpone if the environment currently allows postpone AND a postpone entry is present in 'bindings'
+            if allow and postpone_present:
                 return 'postpone'
-            # Illegal postpone -> fall back to a safe real binding if available
-            return real_bindings[0] if real_bindings else bindings[0]
+
+            # Otherwise, gracefully fallback to a real binding when possible.
+            # If a postpone entry exists but postpone is not allowed, prefer to fall back and warn the user.
+            if postpone_present and not allow:
+                warnings.warn("Heuristic requested 'postpone' but postpone is currently not allowed by the environment. Falling back to the first real binding.")
+                if real_bindings:
+                    return real_bindings[0]
+                # No real bindings but postpone was present -> inconsistent state: raise informative error
+                raise ValueError("Heuristic returned 'postpone' but postpone is not allowed and no real bindings are available.")
+
+            # No postpone entry in bindings: fall back to first real binding if any, otherwise return the first binding available
+            if real_bindings:
+                return real_bindings[0]
+            if bindings:
+                # last resort: return whatever is present
+                return bindings[0]
+            raise ValueError("Heuristic returned 'postpone' but no bindings were provided.")
 
         # ---- Case B: integer index into 'bindings'
         if isinstance(selection, int):
@@ -122,13 +137,23 @@ class HeuristicSolver(BaseSolver):
                 raise IndexError(f"Heuristic index {selection} out of range [0, {len(bindings)-1}]")
             chosen = bindings[selection]
             if isinstance(chosen, tuple) and chosen and chosen[0] == ['postpone']:
-                return 'postpone'
+                # If heuristic returned the index of the postpone pseudo-binding, translate to 'postpone' iff allowed
+                allow = getattr(observable_net, 'allow_postpone', False)
+                if allow:
+                    return 'postpone'
+                # otherwise fall back to first real binding
+                warnings.warn("Heuristic selected the postpone index but postpone is not allowed. Falling back to first real binding.")
+                return real_bindings[0] if real_bindings else bindings[0]
             return chosen
 
         # ---- Case C: binding tuple
         if isinstance(selection, tuple):
             if selection and selection[0] == ['postpone']:
-                return 'postpone'
+                allow = getattr(observable_net, 'allow_postpone', False)
+                if allow and postpone_present:
+                    return 'postpone'
+                warnings.warn("Heuristic returned a postpone tuple but postpone is not allowed or not present. Falling back to first real binding.")
+                return real_bindings[0] if real_bindings else bindings[0]
             if selection in bindings:
                 return selection
             raise ValueError("Heuristic returned a binding tuple not present in 'bindings'.")

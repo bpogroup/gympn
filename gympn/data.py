@@ -479,9 +479,19 @@ class TrajectoryBuffer:
         mean = adv.mean()
         return (adv - mean) / (std + 1e-8)
 
+    @torch.no_grad()
+    def _normalize_returns(self, returns: Tensor) -> Tensor:
+        """Normalize returns to zero mean, unit variance for value training.
+
+        This helps the value network learn better targets by normalizing
+        the scale of returns. Important for causal RL with credit redistribution.
+        """
+        std = returns.std()
+        mean = returns.mean()
+        return (returns - mean) / (std + 1e-8)
 
     @torch.no_grad()
-    def get(self, batch_size=64, normalize_advantages=True,
+    def get(self, batch_size=64, normalize_advantages=True, normalize_returns=True,
             sort=True, drop_remainder=False):
         """
         Build a PyG DataLoader. Each HeteroData sample contains:
@@ -515,6 +525,9 @@ class TrajectoryBuffer:
 
         if normalize_advantages:
             adv = self._normalize_advantages(adv)
+
+        if normalize_returns:
+            returns = self._normalize_returns(returns)
 
         # build HeteroData list
         data_list: List[HeteroData] = []

@@ -22,7 +22,7 @@ if __name__ == "__main__":
 
     ###########################################################################
     # Run configurations
-    train = True #set to False to test a trained model
+    train = False #set to False to test a trained model
     run_name = '2025-12-17-09-40-01_run'
     visualize_random = False  # Set to True to visualize the random solver
     visualize_heuristic = False # Set to True to visualize the heuristic solver
@@ -33,7 +33,7 @@ if __name__ == "__main__":
     ###########################################################################
 
     # Instantiate a simulation problem.
-    agency = GymProblem(allow_postpone=True, causal_rl=True)
+    agency = GymProblem(allow_postpone=True, causal_rl=train)
 
     # Define cases.
     arrival = agency.add_var("arrival", var_attributes=['task_type'])
@@ -92,7 +92,7 @@ if __name__ == "__main__":
     ###########################################################################
     # Choose which algorithm to use: "ppo-clip" (fast) or "dcl" (better planning)
     #ALGORITHM = "dcl"
-    ALGORITHM = "dcl"
+    ALGORITHM = "ppo-clip"
 
 
     ###########################################################################
@@ -137,6 +137,10 @@ if __name__ == "__main__":
         "use_gpu": False,
         "load_policy_network": False,
         "verbose": 1,
+
+        # Normalization Parameters (optional, defaults to True)
+        "normalize_returns": True,  # Normalize value targets to improve value learning
+        "lr_schedule": True,        # Use cosine annealing learning rate scheduling
 
         # Saving Parameters
         "name": "run",
@@ -184,6 +188,10 @@ if __name__ == "__main__":
         "use_gpu": False,
         "load_policy_network": False,
         "verbose": 1,
+
+        # Normalization Parameters (optional, defaults to True)
+        "normalize_returns": True,  # Normalize value targets to improve value learning
+        "lr_schedule": True,        # Use cosine annealing learning rate scheduling
 
         # Saving Parameters
         "name": "run",

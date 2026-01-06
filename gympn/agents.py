@@ -7,6 +7,7 @@ agent.
 import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from gympn.data import TrajectoryBuffer, print_status_bar
 from gympn.logging_utils import Logger, TrainingMetrics, TestMetrics, get_logger
@@ -54,7 +55,8 @@ class Agent:
                  policy_network, value_network, policy_lr=1e-4, policy_updates=1,
                  value_lr=1e-3, value_updates=25,
                  gam=0.99, lam=0.97, normalize_advantages=True, eps=0.2,
-                 kld_limit=0.01, ent_bonus=0.01, test_in_train=True, vf_coeff=0.5):
+                 kld_limit=0.01, ent_bonus=0.01, test_in_train=True, vf_coeff=0.5,
+                 normalize_returns=True, lr_schedule=True):
         self.policy_model = policy_network
         self.policy_loss = NotImplementedError
         self.policy_optimizer = torch.optim.Adam(params=list(policy_network.parameters()),
@@ -70,6 +72,8 @@ class Agent:
         self.gam = gam
         self.buffer = TrajectoryBuffer(gam=gam, lam=lam)
         self.normalize_advantages = normalize_advantages
+        self.normalize_returns = normalize_returns  # New parameter
+        self.lr_schedule = lr_schedule  # New parameter
         self.kld_limit = kld_limit
         self.ent_bonus = ent_bonus
 
@@ -162,6 +166,23 @@ class Agent:
             Dictionary with statistics from training and testing.
         """
         tb_writer = None if logdir is None else SummaryWriter(log_dir=logdir)
+
+        # Initialize learning rate schedulers if enabled
+        # Cosine annealing helps convergence by gradually reducing LR over training
+        policy_scheduler = None
+        value_scheduler = None
+        if self.lr_schedule:
+            policy_scheduler = CosineAnnealingLR(
+                self.policy_optimizer,
+                T_max=epochs,
+                eta_min=1e-6
+            )
+            value_scheduler = CosineAnnealingLR(
+                self.value_optimizer,
+                T_max=epochs,
+                eta_min=1e-6
+            )
+
         history = {'mean_returns': np.zeros(epochs),
                    'min_returns': np.zeros(epochs),
                    'max_returns': np.zeros(epochs),
@@ -186,7 +207,9 @@ class Agent:
             return_history = self.run_episodes(env, episodes=episodes, max_episode_length=max_episode_length,
                                                store=True)
 
-            dataloader = self.buffer.get(normalize_advantages=self.normalize_advantages, batch_size=batch_size,
+            dataloader = self.buffer.get(normalize_advantages=self.normalize_advantages,
+                                         normalize_returns=self.normalize_returns,
+                                         batch_size=batch_size,
                                          sort=sort_states, drop_remainder=True)
 
             #logpis = self.buffer.logpis
@@ -259,6 +282,11 @@ class Agent:
                 tb_writer.flush()
             if verbose > 0:
                 print_status_bar(i, epochs, history, verbose=verbose)
+
+            # Step learning rate schedulers if enabled
+            if self.lr_schedule:
+                policy_scheduler.step()
+                value_scheduler.step()
 
         return history
 
