@@ -67,6 +67,11 @@ def make_parser():
                      type=lambda x: int(x) if x.lower() != 'none' else None,
                      default=None,
                      help='seed for the agent')
+    alg.add_argument('--causal_rl',
+                     type=lambda x: str(x).lower() == 'true',
+                     default=False,
+                     help='whether to use causal RL (credit redistribution via causal traces)')
+
 
     policy = parser.add_argument_group('policy model')
     policy.add_argument('--policy_model',
