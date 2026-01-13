@@ -95,6 +95,7 @@ class GymProblem(SimProblem):
         if self.causal_rl:
             self.causal_trace = CausalTraces()  # tune gamma/lam if needed
 
+        self._debugging = True
 
     def add_gym_var(self, name, attributes: dict, priority=lambda token: token.time):
         """
@@ -1357,6 +1358,7 @@ class GymProblem(SimProblem):
         - `eps` (float): Clip ratio for clipped PPO. Default: `0.2`.
         - `c` (float): KLD weight for penalty PPO. Default: `0.2`.
         - `ent_bonus` (float): Bonus factor for sampled policy entropy. Default: `0.0`.
+        - `vf_coeff` (float): Value function loss coefficient in total loss. Default: `0.5`.
         - `agent_seed` (int or None): Seed for the agent. Default: `None`.
 
         Policy Model:

@@ -177,14 +177,14 @@ if __name__ == "__main__":
         "lam": 0.99,
         "eps": 0.2,
         "c": 0.2,
-        "ent_bonus": 0.05,
+        "ent_bonus": 0.001,
         "agent_seed": None,
 
         # Policy Model
         "policy_model": "gnn",
         "policy_kwargs": {"hidden_layers": [128, 64]},
         "policy_lr": 3e-4,
-        "policy_updates": 10,
+        "policy_updates": 4,
         "policy_kld_limit": 1,
         "policy_weights": "",
         "policy_network": "",
@@ -195,7 +195,7 @@ if __name__ == "__main__":
         "value_model": "gnn",
         "value_kwargs": {"hidden_layers": [128, 64]},
         "value_lr": 1e-3,
-        "value_updates": 10,
+        "value_updates": 5,
         "value_weights": "",
 
         # Training Parameters

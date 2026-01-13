@@ -60,13 +60,11 @@ class AEPN_Env(Env):
 
         observation, terminated, self.i = self.pn.run_evolutions(self.run, self.i, self.active_model)
 
-        if terminated:
-            if self.debug:
-                print(f'Terminated at time {self.pn.clock}')
-            if self.pn.causal_rl:
-                info = {'pn_reward': self.pn.reward, 'eligibility_credits': self.pn.causal_trace}
-            else:
-                info = {'pn_reward': self.pn.reward}
+        # Prepare info dict
+        if self.pn.causal_rl:
+            # Always include causal trace when causal_rl is enabled
+            # It accumulates throughout the episode and is needed at episode end
+            info = {'pn_reward': self.pn.reward, 'eligibility_credits': self.pn.causal_trace}
         else:
             info = {'pn_reward': self.pn.reward}
 

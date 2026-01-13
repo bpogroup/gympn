@@ -23,7 +23,7 @@ if __name__ == "__main__":
     ###########################################################################
     # Run configurations
     train = True #set to False to test a trained model
-    run_name = '2025-12-17-09-40-01_run'
+    run_name = '2026-01-06-15-14-14_run'
     visualize_random = False  # Set to True to visualize the random solver
     visualize_heuristic = False # Set to True to visualize the heuristic solver
     visualize_ppo = False  # Set to True to visualize the PPO solver
@@ -106,6 +106,7 @@ if __name__ == "__main__":
         "lam": 0.99,
         "eps": 0.15,             # Tighter PPO clipping for stability
         "c": 0.2,
+        "vf_coeff": 0.1,         # Lower value function loss weight (default: 0.5)
         "ent_bonus": 0.005,      # Lower entropy to reduce exploration noise
         "agent_seed": None,
 
@@ -139,8 +140,15 @@ if __name__ == "__main__":
         "verbose": 1,
 
         # Normalization Parameters (optional, defaults to True) CURRENTLY IMPLEMENTED INTERNALLY
-        #"normalize_returns": True,  # Normalize value targets to improve value learning
-        #"lr_schedule": True,        # Use cosine annealing learning rate scheduling
+        # NOTE: normalize_returns=False is critical for correctness. When False:
+        #   - Value network is trained on raw discounted returns
+        #   - Value predictions at rollout time are in the same scale
+        #   - GAE computation is consistent: delta = reward + gamma * v_{t+1} - v_t
+        # If you set normalize_returns=True, you create a scale mismatch that can
+        # cause learning to stall or diverge.
+        "normalize_advantages": True,   # Safe and recommended for stable learning
+        "normalize_returns": False,     # IMPORTANT: Keep False to avoid scale mismatch
+        "lr_schedule": True,            # Use cosine annealing learning rate scheduling
 
         # Saving Parameters
         "name": "run",
@@ -157,6 +165,7 @@ if __name__ == "__main__":
         "lam": 0.99,
         "eps": 0.15,             # Tighter clipping
         "c": 0.2,
+        "vf_coeff": 0.1,         # Lower value function loss weight (default: 0.5)
         "ent_bonus": 0.005,      # Lower entropy to reduce exploration noise
         "agent_seed": None,
 
@@ -190,8 +199,10 @@ if __name__ == "__main__":
         "verbose": 1,
 
         # Normalization Parameters (optional, defaults to True)
-        "normalize_returns": True,  # Normalize value targets to improve value learning
-        "lr_schedule": True,        # Use cosine annealing learning rate scheduling
+        # NOTE: normalize_returns=False is critical for correctness (see PPO config comment)
+        "normalize_advantages": True,   # Safe and recommended for stable learning
+        "normalize_returns": False,     # IMPORTANT: Keep False to avoid scale mismatch
+        "lr_schedule": True,            # Use cosine annealing learning rate scheduling
 
         # Saving Parameters
         "name": "run",

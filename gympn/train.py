@@ -63,6 +63,10 @@ def make_parser():
                      type=float,
                      default=0.0,
                      help='bonus factor for sampled policy entropy')
+    alg.add_argument('--vf_coeff',
+                     type=float,
+                     default=0.5,
+                     help='value function loss coefficient in total loss')
     alg.add_argument('--agent_seed',
                      type=lambda x: int(x) if x.lower() != 'none' else None,
                      default=None,

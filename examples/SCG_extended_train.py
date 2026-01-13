@@ -44,10 +44,11 @@ def test_training():
     #best model til now (no causal rl)
     #path_to_trained_model = "C:/Users/lobia/PycharmProjects/gympn/data/train/2025-10-28-18-07-02_run/best_policy.pth"
 
-    path_to_trained_model = "C:/Users/lobia/PycharmProjects/gympn/data/train//best_policy.pth"
+    #best model with causal rl (seems the same performance as without causal rl?)
+    path_to_trained_model = "C:/Users/lobia/PycharmProjects/gympn/data/train/2026-01-13-18-39-10_run/best_policy.pth"
 
     # Instantiate a simulation problem.
-    supply_chain = GymProblem(allow_postpone=True, causal_rl=False)
+    supply_chain = GymProblem(allow_postpone=True, causal_rl=train)
 
     # Define ordering variables
     supply_pool = supply_chain.add_var("supply_pool", var_attributes=['product_type'])
@@ -183,7 +184,7 @@ def test_training():
         for k, v in actions_dict.items():
             return {k: v[0]}
 
-    # Default training arguments (change them as needed)
+    # Default training arguments (optimized for stability and learning)
     default_args = {
         # Algorithm Parameters
         "algorithm": "ppo-clip",
@@ -191,15 +192,16 @@ def test_training():
         "lam": 0.99,
         "eps": 0.2,
         "c": 0.2,
-        "ent_bonus": 0.05,
+        "ent_bonus": 0.01,          # Encourages exploration
         "agent_seed": None,
+        "vf_coeff": 0.05,           # Lower coefficient (returns are unnormalized)
 
         # Policy Model
         "policy_model": "gnn",
         "policy_kwargs": {"hidden_layers": [128, 64]},
-        "policy_lr": 1e-4,
-        "policy_updates": 10,
-        "policy_kld_limit": 0.5,
+        "policy_lr": 1e-4,          # Moderate learning rate (between 1e-4 and 3e-5)
+        "policy_updates": 5,        # More than 3, but not too many
+        "policy_kld_limit": 0.01,   # Strict divergence control
         "policy_weights": "",
         "policy_network": "",
         "score": False,
@@ -208,26 +210,26 @@ def test_training():
         # Value Model
         "value_model": "gnn",
         "value_kwargs": {"hidden_layers": [128, 64]},
-        "value_lr": 1e-3,
-        "value_updates": 20,
+        "value_lr": 5e-5,           # Match policy learning rate
+        "value_updates": 10,        # More value training
         "value_weights": "",
 
         # Training Parameters
-        "episodes": 20,
+        "episodes": 20,             # Keep at 20 for now (you had partial success)
         "epochs": 200,
         "max_episode_length": None,
         "batch_size": 64,
         "sort_states": False,
         "use_gpu": False,
         "load_policy_network": False,
-        "verbose": 0,
+        "verbose": 1,
 
         # Saving Parameters
         "name": "run",
         "datetag": True,
         "logdir": "data/train",
         "save_freq": 1,
-        "open_tensorboard": False, # Open TensorBoard during training (defaults to False)
+        "open_tensorboard": False,
     }
 
 
