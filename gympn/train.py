@@ -1,6 +1,43 @@
 #!/usr/bin/env python
 """Entry point for all training runs."""
 
+# Python 3.13+ compatibility: imghdr was removed from stdlib
+import sys
+if sys.version_info >= (3, 13):
+    try:
+        import imghdr
+        # Check if imghdr has the 'tests' attribute (for TensorBoard)
+        if not hasattr(imghdr, 'tests'):
+            # Need to patch it
+            raise AttributeError("imghdr missing 'tests' attribute")
+    except (ModuleNotFoundError, AttributeError):
+        # Inject imghdr compatibility module
+        import types
+        try:
+            from PIL import Image
+            def what(file, h=None):
+                """Identify image file type using PIL."""
+                if h is None and isinstance(file, str):
+                    try:
+                        return Image.open(file).format.lower() if Image.open(file).format else None
+                    except:
+                        return None
+                elif h is not None:
+                    try:
+                        from io import BytesIO
+                        return Image.open(BytesIO(h)).format.lower() if Image.open(BytesIO(h)).format else None
+                    except:
+                        return None
+                return None
+        except ImportError:
+            def what(file, h=None):
+                return None
+
+        imghdr_module = types.ModuleType('imghdr')
+        imghdr_module.what = what
+        imghdr_module.tests = []  # TensorBoard appends to this list
+        sys.modules['imghdr'] = imghdr_module
+
 import argparse
 import datetime
 import json
@@ -179,6 +216,29 @@ def make_parser():
                        default=0,
                        help='how much information to print')
 
+    logging = parser.add_argument_group('logging', 'Weights & Biases logging')
+    logging.add_argument('--use_wandb',
+                         type=lambda x: str(x).lower() == 'true',
+                         default=True,
+                         help='whether to use Weights & Biases for logging')
+    logging.add_argument('--wandb_mode',
+                         type=str,
+                         choices=['online', 'offline', 'disabled'],
+                         default='offline',
+                         help='W&B mode: online (cloud sync), offline (local only), or disabled')
+    logging.add_argument('--wandb_project',
+                         type=str,
+                         default='gympn-training',
+                         help='W&B project name')
+    logging.add_argument('--wandb_entity',
+                         type=lambda x: x if x.lower() != 'none' else None,
+                         default=None,
+                         help='W&B entity (username/team)')
+    logging.add_argument('--open_wandb',
+                         type=lambda x: str(x).lower() == 'true',
+                         default=True,
+                         help='whether to automatically open W&B dashboard')
+
     roll = parser.add_argument_group('rollouts', 'rollout-based planning')
     roll.add_argument('--rollout_horizon', type=int, default=5)
     roll.add_argument('--rollout_trajs', type=int, default=64)
@@ -210,6 +270,8 @@ def make_parser():
                       type=lambda x: str(x).lower() == 'true',
                       default=False,
                       help='whether to open tensorboard for this run')
+
+
     return parser
 
 
@@ -433,25 +495,90 @@ def launch_tensorboard(logdir, port=6006, wait_time=5, reload_interval=30):
 
     Returns
     -------
-    tensorboard_process : subprocess.Popen
-        The TensorBoard process running in the background.
+    tensorboard_process : subprocess.Popen or None
+        The TensorBoard process running in the background, or None if launch failed.
     """
-    # Start TensorBoard as a subprocess
-    tensorboard_process = subprocess.Popen(
-        [
-            "tensorboard",
-            "--logdir", logdir,
-            "--port", str(port),
-            "--reload_interval", str(reload_interval)
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
-    )
+    import socket
 
-    # Wait for TensorBoard to start
-    time.sleep(wait_time)
+    def is_port_available(p):
+        """Check if a port is available."""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1)
+            result = sock.connect_ex(('localhost', p))
+            sock.close()
+            return result != 0
+        except:
+            return True
 
-    # Open TensorBoard in the default web browser
-    webbrowser.open(f"http://localhost:{port}")
+    # Find an available port if the default one is busy
+    original_port = port
+    while not is_port_available(port) and port < original_port + 100:
+        print(f"⚠ Port {port} is in use, trying {port + 1}...")
+        port += 1
 
-    return tensorboard_process
+    if not is_port_available(port):
+        print(f"✗ Could not find available port starting from {original_port}")
+        return None
+
+    try:
+        import requests
+
+        # Start TensorBoard as a subprocess
+        print(f"ℹ Starting TensorBoard on port {port}...")
+        tensorboard_process = subprocess.Popen(
+            [
+                "tensorboard",
+                "--logdir", logdir,
+                "--port", str(port),
+                "--reload_interval", str(reload_interval),
+                "--bind_all"  # Listen on all interfaces
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True
+        )
+
+        # Wait for TensorBoard to start
+        print(f"ℹ Waiting {wait_time}s for TensorBoard to start...")
+        time.sleep(wait_time)
+
+        # Check if process is still running
+        if tensorboard_process.poll() is not None:
+            # Process exited, get error output
+            _, stderr = tensorboard_process.communicate()
+            print(f"✗ TensorBoard failed to start!")
+            print(f"Error: {stderr}")
+            return None
+
+        # Verify TensorBoard is actually listening on the port
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                response = requests.get(f"http://localhost:{port}", timeout=2)
+                if response.status_code == 200:
+                    print(f"✓ TensorBoard is running on http://localhost:{port}")
+                    break
+            except requests.exceptions.RequestException:
+                if attempt < max_retries - 1:
+                    print(f"ℹ Checking TensorBoard... (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(1)
+                else:
+                    print(f"⚠ Could not verify TensorBoard started after {max_retries} attempts")
+                    print(f"  Trying anyway: http://localhost:{port}")
+
+        # Open TensorBoard in the default web browser
+        try:
+            webbrowser.open(f"http://localhost:{port}", new=0, autoraise=False)
+            print(f"✓ Browser opened: http://localhost:{port}")
+        except Exception as e:
+            print(f"⚠ Could not open browser: {e}")
+            print(f"  Open manually: http://localhost:{port}")
+
+        return tensorboard_process
+
+    except Exception as e:
+        print(f"✗ Failed to launch TensorBoard: {e}")
+        import traceback
+        traceback.print_exc()
+        return None

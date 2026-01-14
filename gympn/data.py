@@ -414,13 +414,13 @@ class TrajectoryBuffer:
                 credits_vec = torch.as_tensor(credits, dtype=torch.float32)
 
             # DEBUG: Check length matching
-            import sys
-            if credits_vec.numel() != rewards_ep.numel():
-                print(f"[CAUSAL-WARNING] Credits length {credits_vec.numel()} != episode length {rewards_ep.numel()}", file=sys.stderr)
-                print(f"  Credits: {credits_vec}", file=sys.stderr)
-            else:
-                if credits_vec.sum() > 0:
-                    print(f"[CAUSAL-OK] Episode {rewards_ep.numel()} steps, credits sum={credits_vec.sum():.4f}", file=sys.stderr)
+            #import sys
+            #if credits_vec.numel() != rewards_ep.numel():
+            #    print(f"[CAUSAL-WARNING] Credits length {credits_vec.numel()} != episode length {rewards_ep.numel()}", file=sys.stderr)
+            #    print(f"  Credits: {credits_vec}", file=sys.stderr)
+            #else:
+            #    if credits_vec.sum() > 0:
+            #        print(f"[CAUSAL-OK] Episode {rewards_ep.numel()} steps, credits sum={credits_vec.sum():.4f}", file=sys.stderr)
 
             if mode == "replace":
                 # Use redistributed rewards directly as returns (causal mode)
@@ -471,13 +471,13 @@ class TrajectoryBuffer:
         self.start = self.end
 
         # DEBUG: Log advantage statistics for causal RL
-        import sys
-        if not has_step_rewards and credits_vec is not None:
-            mean_adv = adv_ep.mean().item()
-            std_adv = adv_ep.std().item() if len(adv_ep) > 1 else 0.0
-            print(f"[ADV-STATS] Ep len={len(adv_ep)}, credits_sum={credits_vec.sum():.2f}, "
-                  f"mean={mean_adv:.6f}, std={std_adv:.6f}, min={adv_ep.min():.6f}, max={adv_ep.max():.6f}",
-                  file=sys.stderr)
+        #import sys
+        #if not has_step_rewards and credits_vec is not None:
+        #    mean_adv = adv_ep.mean().item()
+        #    std_adv = adv_ep.std().item() if len(adv_ep) > 1 else 0.0
+        #    print(f"[ADV-STATS] Ep len={len(adv_ep)}, credits_sum={credits_vec.sum():.2f}, "
+        #          f"mean={mean_adv:.6f}, std={std_adv:.6f}, min={adv_ep.min():.6f}, max={adv_ep.max():.6f}",
+        #          file=sys.stderr)
 
 
     def finish_wip(self, causal_trace: Optional[Sequence[float]] = None):

@@ -146,16 +146,21 @@ if __name__ == "__main__":
         #   - GAE computation is consistent: delta = reward + gamma * v_{t+1} - v_t
         # If you set normalize_returns=True, you create a scale mismatch that can
         # cause learning to stall or diverge.
-        "normalize_advantages": True,   # Safe and recommended for stable learning
-        "normalize_returns": False,     # IMPORTANT: Keep False to avoid scale mismatch
-        "lr_schedule": True,            # Use cosine annealing learning rate scheduling
+        #"normalize_advantages": True,   # Safe and recommended for stable learning
+        #"normalize_returns": False,     # IMPORTANT: Keep False to avoid scale mismatch
+        #"lr_schedule": True,            # Use cosine annealing learning rate scheduling
 
         # Saving Parameters
         "name": "run",
         "datetag": True,
         "logdir": "data/train",
         "save_freq": 1,
-        "open_tensorboard": False,
+        "open_tensorboard": True,
+
+        # W&B Settings
+        "open_wandb": False,
+        "wandb_mode": "online",
+        "use_wandb": False,
     }
 
     # DCL configuration: Slower training, but uses planning for better action selection
@@ -198,18 +203,17 @@ if __name__ == "__main__":
         "load_policy_network": False,
         "verbose": 1,
 
-        # Normalization Parameters (optional, defaults to True)
-        # NOTE: normalize_returns=False is critical for correctness (see PPO config comment)
-        "normalize_advantages": True,   # Safe and recommended for stable learning
-        "normalize_returns": False,     # IMPORTANT: Keep False to avoid scale mismatch
-        "lr_schedule": True,            # Use cosine annealing learning rate scheduling
-
         # Saving Parameters
         "name": "run",
         "datetag": True,
         "logdir": "data/train",
         "save_freq": 1,
         "open_tensorboard": False,
+
+        # W&B Settings
+        "open_wandb": True,
+        "wandb_mode": "online",
+        "use_wandb": True,
     }
 
     # Select configuration based on algorithm choice

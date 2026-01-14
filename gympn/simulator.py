@@ -4,6 +4,8 @@ import itertools
 import random
 import inspect
 import uuid
+import copy
+import subprocess
 
 import numpy as np
 import torch
@@ -18,6 +20,7 @@ from gympn.solvers import BaseSolver, GymSolver
 from gympn.train import make_agent, make_parser, make_logdir, launch_tensorboard
 from gympn.plotter import GraphPlotter
 from gympn.visualisation import Visualisation
+from gympn.wandb_integration import init_wandb
 
 
 from typing import List, Tuple
@@ -122,8 +125,8 @@ class GymProblem(SimProblem):
 
         :param name: the identifier of the SimVar.
         :param initial: the initial value of the SimVar.
-        :var\_attributes: the set of attributes that characterize the tokens in the Simvar
-        :categorical: a dictionary containing var attributes as names and a list [min, max, step] specifying the range and step (necessary for one-hot-encoding)
+        :param var_attributes: the set of attributes that characterize the tokens in the Simvar
+        :param categorical_values: a dictionary containing var attributes as names and a list [min, max, step] specifying the range and step (necessary for one-hot-encoding)
         :return: a SimVar with the specified parameters.
         """
 
@@ -1394,11 +1397,11 @@ class GymProblem(SimProblem):
         - `datetag` (bool): Whether to append the current time to the run name. Default: `False`.
         - `logdir` (str): Base directory for training runs. Default: `'data/train'`.
         - `save_freq` (int): How often to save the models. Default: `1`.
-        - 'open_tensorboard' (bool): Whether to open TensorBoard after training. Default: `False`.
+        - 'use_wandb' (bool): Whether to use Weights & Biases for logging. Default: `True`.
+        - 'wandb_mode' (str): W&B mode: 'online' (cloud), 'offline' (local), or 'disabled'. Default: `'offline'`.
         """
         self.length = length
         args = make_parser().parse_args()
-        tb_process = None
 
         if args_dict is not None:
             try:
@@ -1445,10 +1448,6 @@ class GymProblem(SimProblem):
 
         agent = make_agent(args, metadata=metadata)
 
-
-        # Logging to tensorboard. To access tensorboard, open a bash terminal in the projects directory, activate the environment (where tensorflow should be installed) and run the command in the following line
-        # tensorboard --logdir .
-        # then, in a browser page, access localhost:6006 to see the board
         logdir = make_logdir(args)
 
         # Import logger for training output
@@ -1457,9 +1456,49 @@ class GymProblem(SimProblem):
 
         logger.debug(f"Saving run in {logdir}")
 
+        # Launch TensorBoard if requested
+        tb_process = None
         if args.open_tensorboard:
-            logger.debug("Opening tensorboard...")
+            logger.info("Launching TensorBoard...")
             tb_process = launch_tensorboard(logdir)
+            if tb_process is None:
+                logger.warning("TensorBoard launch failed, continuing without it")
+
+        # Initialize W&B logger if requested
+        wandb_logger = None
+        if args.use_wandb:
+            try:
+                from gympn.wandb_integration import init_wandb
+
+                # Prepare config for W&B
+                config = {
+                    'algorithm': args.algorithm,
+                    'episodes': args.episodes,
+                    'epochs': args.epochs,
+                    'batch_size': args.batch_size,
+                    'policy_lr': args.policy_lr,
+                    'value_lr': args.value_lr,
+                    'gam': args.gam,
+                    'lam': args.lam,
+                    'eps': args.eps,
+                    'vf_coeff': args.vf_coeff,
+                    'causal_rl': args.causal_rl,
+                }
+
+                wandb_logger = init_wandb(
+                    project=args.wandb_project,
+                    entity=args.wandb_entity,
+                    run_name=os.path.basename(logdir),
+                    config=config,
+                    mode=args.wandb_mode,
+                    open_dashboard=args.open_wandb,  # Use the open_wandb argument
+                    dashboard_port=8080
+                )
+                logger.info("Weights & Biases logger initialized")
+            except ImportError:
+                logger.warning("wandb not installed, skipping W&B logging")
+            except Exception as e:
+                logger.warning(f"Could not initialize W&B: {e}")
 
         logger.training_start(agent.__class__.__name__, args.epochs, args.episodes)
 
@@ -1469,12 +1508,35 @@ class GymProblem(SimProblem):
 
         agent.train(env, episodes=args.episodes, epochs=args.epochs,
                     save_freq=args.save_freq, logdir=logdir, verbose=args.verbose,
-                    max_episode_length=args.max_episode_length, batch_size=args.batch_size, test_env=test_env, test_freq=test_freq)
+                    max_episode_length=args.max_episode_length, batch_size=args.batch_size,
+                    test_env=test_env, test_freq=test_freq, wandb_logger=wandb_logger)
 
         logger.training_end(agent.best_test_metric if hasattr(agent, 'best_test_metric') else 0.0)
-        if args.open_tensorboard:
-            tb_process.terminate()
-            tb_process.wait()  # Wait for the process to terminate
+
+        # Finish W&B run
+        if wandb_logger:
+            try:
+                wandb_logger.log_summary({
+                    'best_return': agent.best_test_metric if hasattr(agent, 'best_test_metric') else 0.0,
+                })
+                wandb_logger.finish()
+                logger.info("W&B run finished")
+            except Exception as e:
+                logger.warning(f"Could not finish W&B run: {e}")
+
+        # Clean up TensorBoard process
+        if tb_process is not None:
+            try:
+                logger.info("Stopping TensorBoard...")
+                tb_process.terminate()
+                tb_process.wait(timeout=5)
+                logger.info("TensorBoard stopped")
+            except subprocess.TimeoutExpired:
+                logger.warning("TensorBoard did not stop gracefully, killing process...")
+                tb_process.kill()
+                tb_process.wait()
+            except Exception as e:
+                logger.warning(f"Error stopping TensorBoard: {e}")
 
     def _augment_bindings_with_postpone(self, bindings: List) -> List:
         """

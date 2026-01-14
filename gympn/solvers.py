@@ -49,9 +49,12 @@ class GymSolver(BaseSolver):
         None
         """
         self.policy_model = torch.load(weights_path, weights_only=False)
+        # Ensure eval mode for deterministic inference
+        self.policy_model.eval()
 
     def solve(self, obs) -> Any:
-        return self.policy_model.forward(obs)
+        with torch.no_grad():
+            return self.policy_model.forward(obs)
 
 
 class HeuristicSolver(BaseSolver):

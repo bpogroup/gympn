@@ -173,7 +173,8 @@ class Agent:
 
 
     def train(self, env, episodes=10, epochs=1, max_episode_length=None, verbose=0, save_freq=1,
-              logdir=None, batch_size=64, sort_states=False, test_env=None, test_freq=5, test_episodes=10):
+              logdir=None, batch_size=64, sort_states=False, test_env=None, test_freq=5, test_episodes=10,
+              wandb_logger=None):
         """Train the agent on env with optional testing during training.
 
         Parameters
@@ -184,6 +185,8 @@ class Agent:
             The test environment for evaluation during training.
         test_freq : int, optional
             Frequency (in epochs) to run testing during training.
+        wandb_logger : WandBLogger, optional
+            Logger for Weights & Biases integration.
 
         Returns
         -------
@@ -278,11 +281,22 @@ class Agent:
                 history['test_max_returns'][test_index] = test_metrics['max_returns']
                 history['test_std_returns'][test_index] = test_metrics['std_returns']
 
+
                 if tb_writer is not None:
                     tb_writer.add_scalar('test_mean_returns', test_metrics['mean_returns'], global_step=i)
                     tb_writer.add_scalar('test_min_returns', test_metrics['min_returns'], global_step=i)
                     tb_writer.add_scalar('test_max_returns', test_metrics['max_returns'], global_step=i)
                     tb_writer.add_scalar('test_std_returns', test_metrics['std_returns'], global_step=i)
+
+                # Log test metrics to W&B if logger provided
+                if wandb_logger is not None:
+                    wandb_logger.log_test(
+                        epoch=i,
+                        mean_return=test_metrics['mean_returns'],
+                        std_return=test_metrics['std_returns'],
+                        min_return=test_metrics['min_returns'],
+                        max_return=test_metrics['max_returns'],
+                    )
 
             if test_env is None and logdir is not None and (i + 1) % save_freq == 0: #only save all the policies when no test in train is performed
                 self.save_policy_weights(logdir + "/policy-" + str(i + 1) + ".h5")
@@ -315,6 +329,17 @@ class Agent:
                 tb_writer.add_scalar('policy_ent', history['policy_ent'][i], global_step=i)
                 tb_writer.add_scalar('policy_kld', history['policy_kld'][i], global_step=i)
                 tb_writer.flush()
+            # Log to W&B if logger provided
+            if wandb_logger is not None:
+                wandb_logger.log_epoch(
+                    epoch=i,
+                    mean_return=float(history['mean_returns'][i]),
+                    std_return=float(history['std_returns'][i]),
+                    policy_loss=float(history['delta_policy_loss'][i]) if not np.isnan(history['delta_policy_loss'][i]) else None,
+                    kld=float(history['policy_kld'][i]) if not np.isnan(history['policy_kld'][i]) else None,
+                    entropy=float(history['policy_ent'][i]) if not np.isnan(history['policy_ent'][i]) else None,
+                )
+
             if verbose > 0:
                 print_status_bar(i, epochs, history, verbose=verbose)
 
