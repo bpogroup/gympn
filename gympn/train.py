@@ -49,8 +49,6 @@ import torch
 from gympn.environment import AEPN_Env
 from gympn.networks import HeteroActor, HeteroCritic
 from gympn.agents import PGAgent, PPOAgent
-from gympn.rollouts import RolloutConfig, RealRolloutPlanner
-from gympn.agents_rollouts import RolloutPIAgent
 
 from gympn.dcl_planner import PlannerConfig
 from gympn.agents_dcl import DCLAgent
@@ -76,7 +74,7 @@ def make_parser():
     alg = parser.add_argument_group('algorithm', 'algorithm parameters')
 
     alg.add_argument('--algorithm',
-                     choices=['ppo-clip', 'ppo-penalty', 'pg', 'rollout-pi', 'mbpo', 'dcl'],
+                     choices=['ppo-clip', 'ppo-penalty', 'pg', 'dcl'],
                      default='ppo-clip',
                      help='training algorithm')
 
@@ -239,15 +237,10 @@ def make_parser():
                          default=True,
                          help='whether to automatically open W&B dashboard')
 
-    roll = parser.add_argument_group('rollouts', 'rollout-based planning')
-    roll.add_argument('--rollout_horizon', type=int, default=5)
-    roll.add_argument('--rollout_trajs', type=int, default=64)
-    roll.add_argument('--rollout_temp', type=float, default=1.0)
-
-    roll = parser.add_argument_group('dcl', 'DCL planner parameters')
-    roll.add_argument('--dcl_horizon', type=int, default=5)
-    roll.add_argument('--dcl_rollouts', type=int, default=32)
-    roll.add_argument('--dcl_temp', type=float, default=1.0)
+    dcl = parser.add_argument_group('dcl', 'DCL planner parameters')
+    dcl.add_argument('--dcl_horizon', type=int, default=5)
+    dcl.add_argument('--dcl_rollouts', type=int, default=32)
+    dcl.add_argument('--dcl_temp', type=float, default=1.0)
 
     save = parser.add_argument_group('saving')
     save.add_argument('--name',
@@ -404,22 +397,6 @@ def make_agent(args, metadata=None):
                          gam=args.gam, lam=args.lam, kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus)
 
 
-    elif args.algorithm == 'rollout-pi':
-        planner = RealRolloutPlanner(RolloutConfig(
-            horizon=args.rollout_horizon,
-            num_trajs=args.rollout_trajs,
-            temperature=args.rollout_temp,
-            gamma=args.gam))
-        agent = RolloutPIAgent(
-            policy_network=policy_network,
-            value_network=value_network,
-            planner=planner,
-            policy_lr=args.policy_lr, policy_updates=args.policy_updates,
-            value_lr=args.value_lr, value_updates=args.value_updates,
-            gam=args.gam, lam=args.lam,
-            kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus
-        )
-
 
     elif args.algorithm == 'dcl':
         planner_cfg = PlannerConfig(
@@ -526,9 +503,17 @@ def launch_tensorboard(logdir, port=6006, wait_time=5, reload_interval=30):
 
         # Start TensorBoard as a subprocess
         print(f"ℹ Starting TensorBoard on port {port}...")
+
+        # Use wrapper script for Python 3.13+ imghdr compatibility
+        wrapper_script = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            'tensorboard_wrapper.py'
+        )
+
         tensorboard_process = subprocess.Popen(
             [
-                "tensorboard",
+                sys.executable,
+                wrapper_script,
                 "--logdir", logdir,
                 "--port", str(port),
                 "--reload_interval", str(reload_interval),

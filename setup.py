@@ -4,7 +4,7 @@ setup(
     name="gympn",
     version="0.0.1",
     author="Riccardo Lo Bianco",
-    author_email="your.email@example.com",
+    author_email="r.lo.bianco@tue.nl",
     description="A library for Action-Evolution Petri Net environments and agents, based on SimPN.",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
@@ -12,11 +12,16 @@ setup(
     license="MIT",
     packages=find_packages(),
     install_requires=[
-        "gymnasium==1.0.0",
-        "numpy==1.26.4",
-        "simpn>=1.2.9",
-        "torch==2.5.1",
-        "torch-geometric==2.6.1"
+        "gymnasium~=1.0.0",
+        "matplotlib~=3.10.0",
+        "simpn~=1.3.0",
+        "torch~=2.6.0",
+        "torch-geometric~=2.6.1",
+        "wandb>=0.17.0",
+        "dill~=0.4.0",
+        "tensorboard>=2.13.0",
+        "requests>=2.28.0",
+        "Pillow>=10.0.0"
     ],
     classifiers=[
         "Programming Language :: Python :: 3",

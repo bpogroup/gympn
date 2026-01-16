@@ -33,7 +33,7 @@ if __name__ == "__main__":
     ###########################################################################
 
     # Instantiate a simulation problem.
-    agency = GymProblem(allow_postpone=True, causal_rl=train)
+    agency = GymProblem(allow_postpone=True, causal_rl=False)
 
     # Define cases.
     arrival = agency.add_var("arrival", var_attributes=['task_type'])
@@ -92,7 +92,7 @@ if __name__ == "__main__":
     ###########################################################################
     # Choose which algorithm to use: "ppo-clip" (fast) or "dcl" (better planning)
     #ALGORITHM = "dcl"
-    ALGORITHM = "ppo-clip"
+    #ALGORITHM = "ppo-clip"
 
 
     ###########################################################################
@@ -101,7 +101,6 @@ if __name__ == "__main__":
 
     # PPO-clip configuration: Fast training, standard policy gradient
     ppo_config = {
-        "algorithm": "ppo-clip",
         "gam": 1,
         "lam": 0.99,
         "eps": 0.15,             # Tighter PPO clipping for stability
