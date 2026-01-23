@@ -9,10 +9,21 @@ theme:
     accent: indigo
 nav:
   - Home: index.md
-  - Getting Started: getting-started.md
-  - API Reference: api.md
-  - Examples: examples.md
+  - Documentation Overview: DOCUMENTATION_OVERVIEW.md
+  - Getting Started:
+      - Gentle Introduction: gentle_introduction.md
+      - Complete Example: complete_example.md
+  - Core Concepts:
+      - Algorithms: algorithms.md
+      - Agents Guide: agents_guide.md
+      - Advanced Features: advanced_features.md
+  - Advanced Topics:
+      - Postponement and Causal RL: postpone_causal.md
+      - Extending GymPN: extending_gympn.md
+      - Troubleshooting: troubleshooting.md
+  - Reference:
+      - API Quick Reference: api_reference.md
+      - Benchmarks: benchmarks.md
   - Contributing: contributing.md
-  - FAQ: faq.md
 plugins:
   - search

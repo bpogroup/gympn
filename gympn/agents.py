@@ -174,7 +174,7 @@ class Agent:
 
     def train(self, env, episodes=10, epochs=1, max_episode_length=None, verbose=0, save_freq=1,
               logdir=None, batch_size=64, sort_states=False, test_env=None, test_freq=5, test_episodes=10,
-              wandb_logger=None):
+              wandb_logger=None, num_workers=4):
         """Train the agent on env with optional testing during training.
 
         Parameters
@@ -234,7 +234,6 @@ class Agent:
             self.buffer.clear()
             # Use parallel episode collection with dill (4-8x speedup on collection, 2-4x overall)
             # Dill can serialize lambda functions and complex objects like SimVar
-            num_workers = 4
             return_history = self.run_episodes(env, episodes=episodes, max_episode_length=max_episode_length,
                                                store=True, num_workers=num_workers)
 
@@ -267,10 +266,23 @@ class Agent:
             history['max_ep_lens'][i] = np.max(return_history['lengths'])
             history['std_ep_lens'][i] = np.std(return_history['lengths'])
             history['policy_updates'][i] = len(policy_history['loss'])
-            history['delta_policy_loss'][i] = policy_history['loss'][-1] - self.previous_policy_loss
-            self.previous_policy_loss = policy_history['loss'][-1]
-            history['policy_ent'][i] = policy_history['ent'][-1]
-            history['policy_kld'][i] = policy_history['kld'][-1]
+
+            # === CRITICAL FIX: Check if policy_history has loss data before accessing ===
+            if len(policy_history['loss']) > 0:
+                history['delta_policy_loss'][i] = policy_history['loss'][-1] - self.previous_policy_loss
+                self.previous_policy_loss = policy_history['loss'][-1]
+                history['policy_ent'][i] = policy_history['ent'][-1]
+                history['policy_kld'][i] = policy_history['kld'][-1]
+            else:
+                # No batches were processed - warn and skip metrics
+                get_logger().warning(
+                    f"Epoch {i+1}: No complete batches to process. "
+                    f"Buffer size ({len(self.buffer)}) < batch_size ({batch_size}). "
+                    f"Consider reducing batch_size or increasing episodes per epoch."
+                )
+                history['delta_policy_loss'][i] = 0.0
+                history['policy_ent'][i] = 0.0
+                history['policy_kld'][i] = 0.0
 
             # Test the agent during training
             if test_env is not None and (i + 1) % test_freq == 0:
@@ -1237,5 +1249,4 @@ class PPOAgent(Agent):
             self.policy_loss = PPOPenaltyLoss(c=c)
         else:
             raise ValueError(f"Unknown PPO method: {method}")
-
 

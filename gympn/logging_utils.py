@@ -54,7 +54,12 @@ class Logger:
         use_color : bool
             Whether to use colored output
         """
-        self.verbose = verbose
+        # Ensure verbose is an integer
+        if isinstance(verbose, str):
+            # If a string is passed (like __name__), use default
+            self.verbose = 1
+        else:
+            self.verbose = int(verbose) if verbose is not None else 1
         self.use_color = use_color and sys.stdout.isatty()
 
     # Colors for terminal output
@@ -159,7 +164,7 @@ class Logger:
     def best_policy_saved(self, path: str, metric_value: float):
         """Log best policy save."""
         if self.verbose >= 1:
-            print(self._colorize(f"  ✓ Best policy saved: {metric_value:.4f}", 'GREEN'))
+            print(self._colorize(f"  [BEST] Best policy saved: {metric_value:.4f}", 'GREEN'))
 
     def error(self, message: str):
         """Log error message."""
@@ -173,7 +178,7 @@ class Logger:
     def info(self, message: str):
         """Log info message."""
         if self.verbose >= 1:
-            print(self._colorize(f"ℹ {message}", 'BLUE'))
+            print(self._colorize(f"[INFO] {message}", 'BLUE'))
 
     def debug(self, message: str):
         """Log debug message."""

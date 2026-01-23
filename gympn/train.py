@@ -264,6 +264,11 @@ def make_parser():
                       default=False,
                       help='whether to open tensorboard for this run')
 
+    # Additional arguments
+    train.add_argument('--num_workers',
+                       type=int,
+                       default=1,
+                       help='number of workers for parallel episode collection')
 
     return parser
 

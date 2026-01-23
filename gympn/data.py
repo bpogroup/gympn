@@ -655,6 +655,14 @@ class TrajectoryBuffer:
 
             data_list.append(g)
 
+        # === CRITICAL FIX: Ensure at least one batch is created ===
+        # If drop_remainder=True and data_list < batch_size, we'd get zero batches → no training
+        if drop_remainder and len(data_list) < batch_size:
+            import sys
+            print(f"[WARN:get] Data size {len(data_list)} < batch_size {batch_size} with drop_remainder=True. "
+                  f"Disabling drop_remainder to ensure ≥1 batch for training.", file=sys.stderr)
+            drop_remainder = False
+
         if drop_remainder and (len(data_list) % batch_size != 0):
 
             keep = len(data_list) - (len(data_list) % batch_size)

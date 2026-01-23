@@ -173,6 +173,7 @@ default_args = {
   "sort_states": False,
   "use_gpu": False,
   "load_policy_network": False,
+  "num_workers": 1,  # Parallel episode collection (increase for faster training)
   "verbose": 0,
 
   # Saving Parameters

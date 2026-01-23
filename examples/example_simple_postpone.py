@@ -92,7 +92,7 @@ if __name__ == "__main__":
     ###########################################################################
     # Choose which algorithm to use: "ppo-clip" (fast) or "dcl" (better planning)
     #ALGORITHM = "dcl"
-    #ALGORITHM = "ppo-clip"
+    ALGORITHM = "ppo-clip"
 
 
     ###########################################################################
