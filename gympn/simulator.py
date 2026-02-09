@@ -512,6 +512,7 @@ class GymProblem(SimProblem):
                         if key in p.tokens_attributes:
                             del p.tokens_attributes[key]
 
+        ret.clock = self.clock
         return ret
 
     def get_graph_observation(self, minimal_obs=False, normalize=True, remove_empty_nodes=True, add_self_loops=True):

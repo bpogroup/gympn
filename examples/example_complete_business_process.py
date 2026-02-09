@@ -21,11 +21,11 @@ if __name__ == "__main__":
 
     ###########################################################################
     # Run configurations
-    train = True #set to False to test a trained model
-    run_name = '2025-12-11-11-38-11_run'#'2025-10-02-11-14-25_run' #specify the run name to load the weights from
-    num_experiments = 1000 #number of test experiments to run (if train=False)
+    train = False #set to False to test a trained model
+    run_name = '2026-02-02-18-31-18_run'#'2025-10-02-11-14-25_run' #specify the run name to load the weights from
+    num_experiments = 5 #number of test experiments to run (if train=False)
     visualize_random = False  # Set to True to visualize the random solver
-    visualize_ppo = False  # Set to True to visualize the PPO solver
+    visualize_ppo = True  # Set to True to visualize the PPO solver
 
     weights_path = os.path.join(os.getcwd(), "data", "train", run_name, f"best_policy.pth") #customize if needed
 
@@ -34,158 +34,259 @@ if __name__ == "__main__":
     # Instantiate a simulation problem.
     agency = GymProblem(causal_rl=train, allow_postpone=True)
 
-    # Define cases.
+    # Define cases with two task types to create meaningful routing decisions
     arrival = agency.add_var("arrival", var_attributes=['task_type'])
     waiting = agency.add_var("waiting", var_attributes=['task_type'])
-    busy_register_application = agency.add_var("busy_register_application", var_attributes=['task_type', 'resource_id'])
+    busy_register = agency.add_var("busy_register", var_attributes=['task_type', 'resource_id'])
     arrival.put({'task_type': 0})
+    arrival.put({'task_type': 1})  # Two different task types
 
-    # Define choice
-    waiting_choice = agency.add_var("waiting_choice", var_attributes=['task_type'])
-    busy_simple_product = agency.add_var("busy_simple_product", var_attributes=['task_type', 'resource_id'])
-    busy_complex_product = agency.add_var("busy_complex_product", var_attributes=['task_type', 'resource_id'])
+    # Processing stage - CRITICAL CHOICE POINT
+    # Task type 0: Simple (should go to junior)
+    # Task type 1: Complex (should go to senior)
+    waiting_process = agency.add_var("waiting_process", var_attributes=['task_type'])
 
-    # Define rework with 20% probability
-    rework_junior_stage = agency.add_var("rework_junior_stage", var_attributes=['task_type'])
-    rework_senior_stage = agency.add_var("rework_senior_stage", var_attributes=['task_type'])
+    # Junior path: fast but poor quality for complex tasks
+    busy_junior_simple = agency.add_var("busy_junior_simple", var_attributes=['task_type', 'resource_id'])
+    busy_junior_complex = agency.add_var("busy_junior_complex", var_attributes=['task_type', 'resource_id'])
 
-    # Define draft proposal
-    draft_proposal_stage = agency.add_var("draft_proposal_stage", var_attributes=['task_type'])
-    busy_draft_proposal = agency.add_var("busy_draft_proposal", var_attributes=['task_type', 'resource_id'])
+    # Senior path: slower but high quality for complex tasks
+    busy_senior_simple = agency.add_var("busy_senior_simple", var_attributes=['task_type', 'resource_id'])
+    busy_senior_complex = agency.add_var("busy_senior_complex", var_attributes=['task_type', 'resource_id'])
+
+    # Quality check stages (only for complex tasks)
+    quality_check = agency.add_var("quality_check", var_attributes=['task_type', 'resource_id', 'quality_score'])
+    rework_stage = agency.add_var("rework_stage", var_attributes=['task_type'])
+
+    # Completed tasks
+    completed = agency.add_var("completed", var_attributes=['task_type'])
 
     # Define resources.
     junior_employee = agency.add_var("junior_employee", var_attributes=['code_employee'])
     junior_employee.put({'code_employee': 0})
-    junior_employee.put({'code_employee': 0})
+    junior_employee.put({'code_employee': 1})
 
     senior_employee = agency.add_var("senior_employee", var_attributes=['code_employee'])
     senior_employee.put({'code_employee': 0})
-    #senior_employee.put({'code_employee': 0})
 
 
     # Define events.
     def arrive(a):
-        return [SimToken(a, delay=random.expovariate(10)), SimToken(a)]
-
+        return [SimToken(a, delay=1/15), SimToken(a)]
 
     agency.add_event([arrival], [arrival, waiting], arrive)
 
+    # Registration event - all tasks must be registered
+    def register(c, r):
+        return [SimToken((c, r), delay=1 / 20)]
 
-    def start_register_application(c, r):
-        """"
-        This function is called on the event that assigns a the application to register to a junior employee.
-        :param c: the task
-        :param r: the resource
-        :return: a list of SimTokens representing the task and the resource that were assigned to them
-        """
-        return [SimToken((c, r), delay=1 / 10)]  # delay=random.expovariate(10))]
+    agency.add_event([waiting, junior_employee], [busy_register], behavior=register, name="register")
 
-
-    agency.add_event([waiting, junior_employee], [busy_register_application], behavior=start_register_application,
-                     name="start")
-
-
-    def complete_register_application(b):
-        """
-        This function is called when the registration of an application is completed.
-        It returns a list of SimTokens representing the task that was completed.
-        :param b: the tuple (task, resource)
-        :return: a list of SimTokens representing the resource that has completed a task
-        """
+    def complete_register(b):
         return [SimToken(b[1]), SimToken(b[0])]
 
+    agency.add_event([busy_register], [junior_employee, waiting_process], complete_register, name='complete_register')
 
-    agency.add_event([busy_register_application], [junior_employee, waiting_choice], complete_register_application,
-                     name='complete')#, reward_function=lambda x: 1)
+    # ===== CRITICAL CHOICE POINT: Route to junior or senior =====
+    # Simple task (type 0) to junior: 0.2 delay (fast, good)
+    # Simple task (type 0) to senior: 0.5 delay (slow, wasteful)
+    # Complex task (type 1) to junior: 0.8 delay (fast, poor quality!)
+    # Complex task (type 1) to senior: 0.4 delay (slower, good quality)
 
+    def route_to_junior_simple(c, r):
+        return [SimToken((c, r), delay=0.2)]
 
-    # The decision point - choice of the next task and which resource pool to use
-    def choice_simple_product(c, r):
-        return [SimToken((c, r), delay=1 / 5)]  # delay=random.expovariate(5))]
+    def route_to_senior_simple(c, r):
+        return [SimToken((c, r), delay=0.5)]
 
+    def route_to_junior_complex(c, r):
+        return [SimToken((c, r), delay=0.8)]
 
-    def choice_complex_product(c, r):
-        return [SimToken((c, r), delay=1 / 2.5)]  # delay=random.expovariate(2.5))]
+    def route_to_senior_complex(c, r):
+        return [SimToken((c, r), delay=0.4)]
 
+    agency.add_action([waiting_process, junior_employee], [busy_junior_simple],
+                      behavior=route_to_junior_simple, name="route_junior_simple")
+    agency.add_action([waiting_process, senior_employee], [busy_senior_simple],
+                      behavior=route_to_senior_simple, name="route_senior_simple")
+    agency.add_action([waiting_process, junior_employee], [busy_junior_complex],
+                      behavior=route_to_junior_complex, name="route_junior_complex")
+    agency.add_action([waiting_process, senior_employee], [busy_senior_complex],
+                      behavior=route_to_senior_complex, name="route_senior_complex")
 
-    agency.add_action([waiting_choice, junior_employee], [busy_simple_product], behavior=choice_simple_product,
-                      name="choice_simple_product")
-    agency.add_action([waiting_choice, senior_employee], [busy_complex_product], behavior=choice_complex_product,
-                      name="choice_complex_product")
+    # Completion events for simple tasks
+    def complete_simple_junior(task_employee_tuple):
+        # task_employee_tuple is (task, employee)
+        task, employee = task_employee_tuple
+        return [SimToken(employee), SimToken(task)]
 
+    def complete_simple_senior(task_employee_tuple):
+        # task_employee_tuple is (task, employee)
+        task, employee = task_employee_tuple
+        return [SimToken(employee), SimToken(task)]
 
-    def complete_product(b):
-        """
-        This function is called when a simple product task is completed.
-        It returns a list of SimTokens representing the task that was completed.
-        :param b: the tuple (task, resource)
-        :return: a list of SimTokens representing the resource that has completed a task
-        """
-        return [SimToken(b[1]), SimToken(b[0])]
+    agency.add_event([busy_junior_simple], [junior_employee, completed], complete_simple_junior,
+                     name='complete_junior_simple', reward_function=lambda x: 1)
+    agency.add_event([busy_senior_simple], [senior_employee, completed], complete_simple_senior,
+                     name='complete_senior_simple', reward_function=lambda x: 1)
 
-
-    agency.add_event([busy_simple_product], [junior_employee, rework_junior_stage], complete_product,
-                     name='complete_simple_product')
-    agency.add_event([busy_complex_product], [senior_employee, rework_senior_stage], complete_product,
-                     name='complete_complex_product')
-
-
-    def rework_junior(b):
+    # Complex tasks must pass quality check
+    def check_quality_junior(task_employee_tuple):
+        # task_employee_tuple is the value of the token from busy_junior_complex
+        # which is a tuple (task, employee) created by route_to_junior_complex
+        task, employee = task_employee_tuple
         prob = random.uniform(0, 1)
-        if prob > 0.6:
-            return [SimToken(b), None]
+        if prob > 0.3:  # 70% failure rate for junior on complex tasks
+            quality_result = {'quality': 0, 'task_type': task.get('task_type', 1)}
+            return [SimToken(quality_result, delay=0)]  # Failed quality check
         else:
-            return [None, SimToken(b)]
+            quality_result = {'quality': 1, 'task_type': task.get('task_type', 1)}
+            return [SimToken(quality_result, delay=0)]  # Passed quality check
 
-
-    agency.add_event([rework_junior_stage], [waiting, draft_proposal_stage], rework_junior, name='rework_junior')
-
-
-    def rework_senior(b):
+    def check_quality_senior(task_employee_tuple):
+        # task_employee_tuple is the value of the token from busy_senior_complex
+        # which is a tuple (task, employee) created by route_to_senior_complex
+        task, employee = task_employee_tuple
         prob = random.uniform(0, 1)
-        if prob > 0.95:
-            return [SimToken(b), None]
+        if prob > 0.1:  # 10% failure rate for senior on complex tasks
+            quality_result = {'quality': 1, 'task_type': task.get('task_type', 1)}
+            return [SimToken(quality_result, delay=0)]  # Passed quality check
         else:
-            return [None, SimToken(b)]
+            quality_result = {'quality': 0, 'task_type': task.get('task_type', 1)}
+            return [SimToken(quality_result, delay=0)]  # Failed quality check
+
+    agency.add_event([busy_junior_complex], [quality_check], check_quality_junior,
+                     name='check_junior_complex')
+    agency.add_event([busy_senior_complex], [quality_check], check_quality_senior,
+                     name='check_senior_complex')
+
+    # Handle quality check results
+    def handle_quality_pass(q):
+        # q is a dictionary: {'quality': quality_score, 'task_type': task_type}
+        # Return completed task
+        return [SimToken({'task_type': q.get('task_type', 0)})]
+
+    def handle_quality_fail(q):
+        # q is a dictionary: {'quality': quality_score, 'task_type': task_type}
+        # Return task for rework
+        return [SimToken({'task_type': q.get('task_type', 0)})]
+
+    # Quality pass event: reward given when quality=1
+    agency.add_event([quality_check], [completed],
+                     behavior=handle_quality_pass,
+                     name='quality_pass',
+                     guard=lambda q: isinstance(q, dict) and q.get('quality', 0) == 1,
+                     reward_function=lambda q: 1)
+
+    # Quality fail event: task goes to rework when quality=0
+    agency.add_event([quality_check], [rework_stage],
+                     behavior=handle_quality_fail,
+                     name='quality_fail',
+                     guard=lambda q: isinstance(q, dict) and q.get('quality', 0) == 0,
+                     reward_function=lambda q: -1)
+
+    # Rework event - takes task from rework_stage and puts it back for reprocessing
+    def rework(task):
+        # task comes from rework_stage
+        return [SimToken(task)]
+
+    agency.add_event([rework_stage], [waiting_process], rework, name='rework_requeue')
 
 
-    agency.add_event([rework_senior_stage], [waiting, draft_proposal_stage], rework_senior, name='rework_senior')
-
-
-    def draft_proposal(b, r):
-        return [SimToken((b, r), delay=1 / 2.5)]  # delay=random.expovariate(2.5))]
-
-
-    agency.add_event([draft_proposal_stage, junior_employee], [busy_draft_proposal], draft_proposal,
-                     name="draft_proposal_event")
-
-
-    def final_complete_case(b):
-        return [SimToken(b[1])]
-
-
-    agency.add_event([busy_draft_proposal], [junior_employee], behavior=final_complete_case,
-                     name="complete_draft_proposal", reward_function=lambda x: 1)
 
     ###########################################################################
+
+    # Heuristic function for intelligent task routing
+    def task_routing_heuristic(pn, actions_dict, bindings=None):
+        """
+        Intelligent heuristic that routes tasks based on type:
+        - Simple tasks (type 0) → Junior employees (fast)
+        - Complex tasks (type 1) → Senior employees (better quality)
+
+        This creates a clear advantage over random routing because:
+        - Routing simple to junior: 0.2 delay (good)
+        - Routing simple to senior: 0.5 delay (waste of senior time)
+        - Routing complex to junior: 0.8 delay + 70% rework (very bad)
+        - Routing complex to senior: 0.4 delay + 10% rework (good)
+        """
+
+        waiting_tokens = HeuristicSolver.get_place_tokens('waiting_process', pn)
+        quality_check_tokens = HeuristicSolver.get_place_tokens('quality_check', pn)
+        rework_tokens = HeuristicSolver.get_place_tokens('rework_stage', pn)
+
+        junior_available = len(HeuristicSolver.get_place_tokens('junior_employee', pn))
+        senior_available = len(HeuristicSolver.get_place_tokens('senior_employee', pn))
+
+        # PRIORITY 1: Handle rework (failed complex tasks) - MUST use senior
+        if rework_tokens and senior_available > 0:
+            if 'rework' in actions_dict and actions_dict['rework']:
+                return {'rework': actions_dict['rework'][0]}
+
+        # PRIORITY 2: Handle quality check results
+        if quality_check_tokens:
+            if 'quality_pass' in actions_dict and actions_dict['quality_pass']:
+                return {'quality_pass': actions_dict['quality_pass'][0]}
+
+        # PRIORITY 3: Route waiting tasks based on TYPE
+        if waiting_tokens:
+            for token in waiting_tokens:
+                task_type = token.var_name if hasattr(token, 'var_name') else None
+                # Try to get task type from token attributes
+                if hasattr(token, 'attributes'):
+                    task_type = token.attributes.get('task_type', None)
+
+                # If we can determine it's a simple task, prefer junior
+                if task_type == 0:  # Simple task
+                    if junior_available > 0 and 'route_junior_simple' in actions_dict and actions_dict['route_junior_simple']:
+                        return {'route_junior_simple': actions_dict['route_junior_simple'][0]}
+                    elif senior_available > 0 and 'route_senior_simple' in actions_dict and actions_dict['route_senior_simple']:
+                        return {'route_senior_simple': actions_dict['route_senior_simple'][0]}
+
+                # If we can determine it's a complex task, prefer senior
+                elif task_type == 1:  # Complex task
+                    if senior_available > 0 and 'route_senior_complex' in actions_dict and actions_dict['route_senior_complex']:
+                        return {'route_senior_complex': actions_dict['route_senior_complex'][0]}
+                    elif junior_available > 0 and 'route_junior_complex' in actions_dict and actions_dict['route_junior_complex']:
+                        return {'route_junior_complex': actions_dict['route_junior_complex'][0]}
+
+                # If we can't determine type, use availability heuristic
+                else:
+                    if junior_available > 0 and 'route_junior_simple' in actions_dict and actions_dict['route_junior_simple']:
+                        return {'route_junior_simple': actions_dict['route_junior_simple'][0]}
+                    elif senior_available > 0 and 'route_senior_simple' in actions_dict and actions_dict['route_senior_simple']:
+                        return {'route_senior_simple': actions_dict['route_senior_simple'][0]}
+
+        # PRIORITY 4: Register new work if available
+        if 'register' in actions_dict and actions_dict['register']:
+            return {'register': actions_dict['register'][0]}
+
+        # FALLBACK: Take any available action
+        for action_name, assignments in actions_dict.items():
+            if assignments:
+                return {action_name: assignments[0]}
+
+        return 'postpone' if pn.allow_postpone else None
+
+
 
     # Default training arguments (change them as needed)
     default_args = {
         # Algorithm Parameters
         "algorithm": "ppo-clip",
-        "gam": 1, # With finite horizon, it is better to use gam=1
-        "lam": 0.99,
-        "eps": 0.2,
-        "c": 0.2,
+        "causal_rl": True,  # Enable causal RL for better credit assignment
+        "gam": 0.99,
+        "lam": 0.95,
+        "eps": 0.15,
+        "c": 0.1,
         "ent_bonus": 0.001,
         "agent_seed": None,
 
         # Policy Model
         "policy_model": "gnn",
-        "policy_kwargs": {"hidden_layers": [128, 64]},
-        "policy_lr": 3e-4,
+        "policy_kwargs": {"hidden_layers": [64, 32]},
+        "policy_lr": 5e-4,
         "policy_updates": 4,
-        "policy_kld_limit": 1,
+        "policy_kld_limit": 0.1,
         "policy_weights": "",
         "policy_network": "",
         "score": False,
@@ -193,27 +294,27 @@ if __name__ == "__main__":
 
         # Value Model
         "value_model": "gnn",
-        "value_kwargs": {"hidden_layers": [128, 64]},
+        "value_kwargs": {"hidden_layers": [64, 32]},
         "value_lr": 1e-3,
-        "value_updates": 5,
+        "value_updates": 3,
         "value_weights": "",
 
         # Training Parameters
-        "episodes": 20, #TODO: add a warning to the batch collection to hint if no complete batch is available
-        "epochs": 200,
+        "episodes": 20,
+        "epochs": 100,
         "max_episode_length": None,
-        "batch_size": 64,
+        "batch_size": 32,
         "sort_states": False,
         "use_gpu": True,
         "load_policy_network": False,
-        "verbose": 0,
+        "verbose": 1,
 
         # Saving Parameters
         "name": "run",
         "datetag": True,
         "logdir": "data/train",
         "save_freq": 1,
-        "open_tensorboard": False, # Open TensorBoard during training (defaults to False)
+        "open_tensorboard": False,
     }
 
 
@@ -257,6 +358,11 @@ if __name__ == "__main__":
             ppo_average, ppo_std = run_experiments(agency, solver, num_experiments, length=10)
             print(f"DRL solver average reward: {ppo_average}, std: {ppo_std}")
 
+        # Test heuristic solver
+        solver_heuristic = HeuristicSolver(heuristic_function=task_routing_heuristic)
+        heuristic_average, heuristic_std = run_experiments(agency, solver_heuristic, num_experiments, length=10)
+        print(f"Heuristic solver average reward: {heuristic_average}, std: {heuristic_std}")
+
         if not visualize_random and not visualize_ppo:
 
             #perform z-test to verify the statistical significance of the difference in average rewards
@@ -275,6 +381,32 @@ if __name__ == "__main__":
 
                 return z, p_value, significant
 
+            print("\n" + "="*70)
+            print("STATISTICAL SIGNIFICANCE TESTS")
+            print("="*70)
+
+            # DRL vs Random
             z, p_value, significant = check_statistical_significance(ppo_average, ppo_std, num_experiments, random_average, random_std, num_experiments)
-            print(f"Z-score: {z}, P-value: {p_value}, Statistically Significant: {significant}")
-            print(f"The percentage difference between the two average rewards is {100 * (ppo_average - random_average) / abs(random_average)}%")
+            print(f"\nDRL vs Random:")
+            print(f"  Z-score: {z:.4f}, P-value: {p_value:.6f}, Significant: {significant}")
+            print(f"  Percentage difference: {100 * (ppo_average - random_average) / abs(random_average):+.2f}%")
+
+            # DRL vs Heuristic
+            z, p_value, significant = check_statistical_significance(ppo_average, ppo_std, num_experiments, heuristic_average, heuristic_std, num_experiments)
+            print(f"\nDRL vs Heuristic:")
+            print(f"  Z-score: {z:.4f}, P-value: {p_value:.6f}, Significant: {significant}")
+            print(f"  Percentage difference: {100 * (ppo_average - heuristic_average) / abs(heuristic_average):+.2f}%")
+
+            # Heuristic vs Random
+            z, p_value, significant = check_statistical_significance(heuristic_average, heuristic_std, num_experiments, random_average, random_std, num_experiments)
+            print(f"\nHeuristic vs Random:")
+            print(f"  Z-score: {z:.4f}, P-value: {p_value:.6f}, Significant: {significant}")
+            print(f"  Percentage difference: {100 * (heuristic_average - random_average) / abs(random_average):+.2f}%")
+
+            print("\n" + "="*70)
+            print("SUMMARY")
+            print("="*70)
+            print(f"Random solver:     {random_average:.4f} ± {random_std:.4f}")
+            print(f"Heuristic solver:  {heuristic_average:.4f} ± {heuristic_std:.4f}")
+            print(f"DRL solver:        {ppo_average:.4f} ± {ppo_std:.4f}")
+            print("="*70)

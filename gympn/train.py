@@ -242,6 +242,37 @@ def make_parser():
     dcl.add_argument('--dcl_rollouts', type=int, default=32)
     dcl.add_argument('--dcl_temp', type=float, default=1.0)
 
+    rudder = parser.add_argument_group('rudder', 'RUDDER credit assignment parameters')
+    rudder.add_argument('--rudder_enabled',
+                        type=lambda x: str(x).lower() == 'true',
+                        default=False,
+                        help='whether to enable RUDDER credit assignment')
+    rudder.add_argument('--rudder_state_dim',
+                        type=int,
+                        default=128,
+                        help='state dimension for RUDDER network')
+    rudder.add_argument('--rudder_hidden_dim',
+                        type=int,
+                        default=256,
+                        help='hidden dimension for RUDDER LSTM')
+    rudder.add_argument('--rudder_learning_rate',
+                        type=float,
+                        default=1e-3,
+                        help='learning rate for RUDDER network')
+    rudder.add_argument('--rudder_training_freq',
+                        type=int,
+                        default=1,
+                        help='train RUDDER every N epochs')
+    rudder.add_argument('--rudder_redistribution_method',
+                        type=str,
+                        choices=['contribution', 'direct'],
+                        default='contribution',
+                        help='method for redistributing rewards (contribution or direct)')
+    rudder.add_argument('--rudder_device',
+                        type=str,
+                        default='cpu',
+                        help='device for RUDDER network (cpu or cuda)')
+
     save = parser.add_argument_group('saving')
     save.add_argument('--name',
                        type=str,

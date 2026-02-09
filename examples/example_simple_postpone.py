@@ -22,7 +22,7 @@ if __name__ == "__main__":
 
     ###########################################################################
     # Run configurations
-    train = True #set to False to test a trained model
+    train = False #set to False to test a trained model
     run_name = '2026-01-06-15-14-14_run'
     visualize_random = False  # Set to True to visualize the random solver
     visualize_heuristic = False # Set to True to visualize the heuristic solver

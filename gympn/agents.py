@@ -9,6 +9,7 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import multiprocessing as mp
+from typing import Dict
 
 from gympn.data import TrajectoryBuffer, print_status_bar
 from gympn.logging_utils import Logger, TrainingMetrics, TestMetrics, get_logger
@@ -236,6 +237,15 @@ class Agent:
             # Dill can serialize lambda functions and complex objects like SimVar
             return_history = self.run_episodes(env, episodes=episodes, max_episode_length=max_episode_length,
                                                store=True, num_workers=num_workers)
+
+            # === RUDDER Training and Reward Redistribution ===
+            if self.rudder_agent is not None and self.rudder_agent.should_train():
+                self._apply_rudder_credit_assignment(return_history)
+                rudder_loss = self.rudder_agent.train(num_epochs=5)
+                if wandb_logger and i % 10 == 0:
+                    wandb_logger.log({'rudder/loss': rudder_loss}, step=i)
+                self.rudder_agent.step_epoch()
+                get_logger().info(f"  [RUDDER] Training loss: {rudder_loss:.4f}")
 
             # CRITICAL FIX for Causal RL: Disable advantage normalization!
             # Problem: Causal credits sum to ~10-20 per episode, spread across ~70-100 steps
@@ -920,6 +930,64 @@ class Agent:
         """
         self.policy_model = torch.load(torch.load(filename))
 
+    def _apply_rudder_credit_assignment(self, return_history: Dict) -> None:
+        """
+        Apply RUDDER credit assignment to buffer trajectories.
+
+        This method is called during training to train the RUDDER network
+        and redistribute rewards based on learned importance weights.
+
+        Parameters
+        ----------
+        return_history : dict
+            Dictionary containing 'returns' and optionally state sequences
+        """
+        if not hasattr(self, 'rudder_agent') or self.rudder_agent is None:
+            return
+
+        try:
+            # Extract trajectories from buffer for RUDDER training
+            if hasattr(self.buffer, 'states') and len(self.buffer.states) > 0:
+                # Group buffer data by episode
+                trajectories = []
+                current_traj_idx = 0
+
+                for ep_idx in range(len(return_history['returns'])):
+                    traj_length = return_history['lengths'][ep_idx]
+
+                    # Extract trajectory data
+                    traj_states = self.buffer.states[current_traj_idx:current_traj_idx + traj_length]
+                    traj_rewards = self.buffer.rewards[current_traj_idx:current_traj_idx + traj_length]
+                    episode_return = return_history['returns'][ep_idx]
+
+                    # Convert to numpy
+                    if hasattr(traj_states, 'cpu'):
+                        states_np = traj_states.cpu().numpy()
+                    else:
+                        states_np = np.array(traj_states)
+
+                    if hasattr(traj_rewards, 'cpu'):
+                        rewards_np = traj_rewards.cpu().numpy()
+                    else:
+                        rewards_np = np.array(traj_rewards)
+
+                    # Flatten states if needed
+                    if states_np.ndim > 2:
+                        states_np = states_np.reshape(states_np.shape[0], -1)
+
+                    # Add trajectory to RUDDER buffer
+                    self.rudder_agent.add_trajectory(
+                        states=states_np,
+                        actions=None,  # Not used in contribution-based method
+                        rewards=rewards_np,
+                        episode_return=episode_return
+                    )
+
+                    current_traj_idx += traj_length
+
+        except Exception as e:
+            get_logger().warning(f"⚠ RUDDER credit assignment failed: {e}")
+
     def _fit_policy_and_value_models(self, dataloader, epochs=1):
         """Fit both policy and value models simultaneously using data from dataset.
 
@@ -1236,11 +1304,30 @@ class PPOAgent(Agent):
 
     """
 
-    def __init__(self, policy_network, method='clip', eps=0.2, c=0.01, **kwargs):
+    def __init__(self, policy_network, method='clip', eps=0.2, c=0.01, rudder_config=None, **kwargs):
         super().__init__(policy_network, **kwargs)
         self.method = method
         self.eps = eps
         self.c = c
+        self.rudder_config = rudder_config or {}
+        self.rudder_agent = None
+
+        # Initialize RUDDER if enabled
+        if self.rudder_config.get('enabled', False):
+            try:
+                from gympn.rudder import RUDDERAgent
+                self.rudder_agent = RUDDERAgent(
+                    state_dim=self.rudder_config.get('state_dim', 128),
+                    hidden_dim=self.rudder_config.get('hidden_dim', 256),
+                    learning_rate=self.rudder_config.get('learning_rate', 1e-3),
+                    device=self.rudder_config.get('device', 'cpu'),
+                    training_frequency=self.rudder_config.get('training_frequency', 1),
+                    redistribution_method=self.rudder_config.get('redistribution_method', 'contribution')
+                )
+                get_logger().info(f"✓ RUDDER agent initialized with state_dim={self.rudder_config.get('state_dim', 128)}")
+            except ImportError:
+                get_logger().warning("⚠ RUDDER module not available, skipping RUDDER initialization")
+                self.rudder_agent = None
 
         # Instantiate picklable loss classes
         if method == 'clip':

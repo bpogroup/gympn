@@ -18,8 +18,8 @@ if __name__ == "__main__":
 
     ###########################################################################
     # Run configurations
-    train = True #set to False to test a trained model
-    run_name = '2025-06-18-22-10-15_run'
+    train = False #set to False to test a trained model
+    run_name = '2026-02-04-10-49-47_run'
     visualize_random = False  # Set to True to visualize the random solver
     visualize_heuristic = False # Set to True to visualize the heuristic solver
     visualize_ppo = True  # Set to True to visualize the PPO solver
@@ -29,7 +29,7 @@ if __name__ == "__main__":
     ###########################################################################
 
     # Instantiate a simulation problem.
-    agency = GymProblem(causal_rl=True)
+    agency = GymProblem(causal_rl=train)
 
     # Define cases.
     arrival = agency.add_var("arrival", var_attributes=['task_type'])
@@ -113,7 +113,7 @@ if __name__ == "__main__":
         "sort_states": False,
         "use_gpu": False,
         "load_policy_network": False,
-        "verbose": 0,
+        "verbose": 1,
 
         # Saving Parameters
         "name": "run",
