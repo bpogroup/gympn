@@ -413,22 +413,29 @@ class TrajectoryBuffer:
             else:
                 credits_vec = torch.as_tensor(credits, dtype=torch.float32)
 
-            # DEBUG: Check length matching
-            #import sys
-            #if credits_vec.numel() != rewards_ep.numel():
-            #    print(f"[CAUSAL-WARNING] Credits length {credits_vec.numel()} != episode length {rewards_ep.numel()}", file=sys.stderr)
-            #    print(f"  Credits: {credits_vec}", file=sys.stderr)
-            #else:
-            #    if credits_vec.sum() > 0:
-            #        print(f"[CAUSAL-OK] Episode {rewards_ep.numel()} steps, credits sum={credits_vec.sum():.4f}", file=sys.stderr)
+            # Guard against length mismatch between redistributed credits and episode buffer
+            ep_len = rewards_ep.numel()
+            if credits_vec.numel() != ep_len:
+                import warnings
+                warnings.warn(
+                    f"[CAUSAL] Credits length {credits_vec.numel()} != episode length {ep_len}. "
+                    "Padding/truncating to match."
+                )
+                if credits_vec.numel() > ep_len:
+                    credits_vec = credits_vec[:ep_len]
+                else:
+                    pad = torch.zeros(ep_len - credits_vec.numel(), dtype=torch.float32)
+                    credits_vec = torch.cat([credits_vec, pad])
 
             if mode == "replace":
-                # Use redistributed rewards directly as returns (causal mode)
-                returns_ep = credits_vec
-            else:
+                # Use redistributed credits as the step-level reward signal (causal RL mode)
+                returns_ep = discount_returns(credits_vec, self.gam)
+            elif mode == "add":
                 # Add credits to original rewards, then discount
                 modified_rewards = rewards_ep + credits_vec
                 returns_ep = discount_returns(modified_rewards, self.gam)
+            else:
+                raise ValueError(f"Unknown credits mode '{mode}'. Expected 'replace' or 'add'.")
         else:
             # No credits: discount original rewards
             returns_ep = discount_returns(rewards_ep, self.gam)
@@ -443,11 +450,6 @@ class TrajectoryBuffer:
             # - Value network learns to predict cumulative credits (the true returns)
             # - GAE provides variance reduction through temporal smoothing
             # - Advantage signal is clean and properly bootstrapped
-
-            # Credits are per-step redistributed rewards from causal traces
-            # We need to compute proper returns and advantages from them
-            # Use standard discount_returns to get cumulative discounted credits
-            returns_ep = discount_returns(credits_vec, self.gam)
 
             # Now use standard GAE with credits as the reward signal
             adv_ep = compute_advantages(

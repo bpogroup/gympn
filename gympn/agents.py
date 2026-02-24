@@ -247,12 +247,7 @@ class Agent:
                 self.rudder_agent.step_epoch()
                 get_logger().info(f"  [RUDDER] Training loss: {rudder_loss:.4f}")
 
-            # CRITICAL FIX for Causal RL: Disable advantage normalization!
-            # Problem: Causal credits sum to ~10-20 per episode, spread across ~70-100 steps
-            # This gives ~0.1-0.2 advantage per step
-            # After normalization: (0.15 - mean) / std ≈ 0 (advantage signal lost!)
-            # Solution: Don't normalize advantages when using causal RL
-            normalize_adv_for_batch = self.normalize_advantages and not env.pn.causal_rl
+            normalize_adv_for_batch = self.normalize_advantages
 
             dataloader = self.buffer.get(normalize_advantages=normalize_adv_for_batch,
                                          normalize_returns=self.normalize_returns,

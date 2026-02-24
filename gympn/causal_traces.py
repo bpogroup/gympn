@@ -1,6 +1,3 @@
-from torch.ao.quantization.utils import activation_is_dynamically_quantized
-
-
 class TransitionHistory:
     """
     Tracks the history of transitions fired in the Petri net simulation, together with the transition type (action or evolution), the tokens used to fire, the produced tokens, and the generated reward.
