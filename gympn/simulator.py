@@ -492,6 +492,11 @@ class GymProblem(SimProblem):
         for p in ret.places:
             ret.id2node[p._id] = p
 
+        # copy var_attributes for observable places
+        for p in ret.places:
+            if p._id in self.var_attributes:
+                ret.var_attributes[p._id] = list(self.var_attributes[p._id])
+
         # events fully within observed places
         for e in self.events:
             if set(e.incoming) <= set(ret.places) and set(e.outgoing) <= set(ret.places):
@@ -506,11 +511,19 @@ class GymProblem(SimProblem):
 
         # remove unobservable token attrs (if any)
         if self.unobservable_token_attrs:
-            for p in ret.places:
+            for i, p in enumerate(ret.places):
                 if p._id in self.unobservable_token_attrs:
+                    # deep-copy the place so we don't mutate the original
+                    p = copy.deepcopy(p)
+                    ret.places[i] = p
+                    ret.id2node[p._id] = p
                     for key in list(self.unobservable_token_attrs[p._id]):
-                        if key in p.tokens_attributes:
-                            del p.tokens_attributes[key]
+                        if key in ret.var_attributes.get(p._id, []):
+                            ret.var_attributes[p._id].remove(key)
+                        # also strip unobservable keys from actual token values
+                        for token in p.marking:
+                            if isinstance(token.value, dict) and key in token.value:
+                                del token.value[key]
 
         ret.clock = self.clock
         return ret
@@ -1657,6 +1670,7 @@ class GymProblem(SimProblem):
         :param solver: An instance of a solver class implementing the `BaseSolver` interface.
         :param length: The maximum duration of the testing run. The simulation will stop if the clock exceeds (or matches) this length.
         :param reporter: A reporter to log simulation events.
+        :param visualize: Whether to visualize the simulation.
         :return: The total reward accumulated during the testing run.
         """
 
