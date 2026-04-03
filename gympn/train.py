@@ -110,6 +110,20 @@ def make_parser():
                      type=lambda x: str(x).lower() == 'true',
                      default=False,
                      help='whether to use causal RL (credit redistribution via causal traces)')
+    alg.add_argument('--causal_scheme',
+                     type=str,
+                     default='flow',
+                     choices=['exponential', 'linear', 'uniform', 'depth', 'hybrid', 'flow'],
+                     help='redistribution scheme for causal RL (default: flow)')
+    alg.add_argument('--causal_gamma',
+                     type=float,
+                     default=0.9,
+                     help='per-hop decay factor for causal RL redistribution (default: 0.9)')
+    alg.add_argument('--causal_pg',
+                     type=lambda x: str(x).lower() == 'true',
+                     default=False,
+                     help='use causal policy gradient (credits as advantages, no value baseline, '
+                          'no KLD early stopping). Auto-enabled when causal_rl=True.')
 
 
     policy = parser.add_argument_group('policy model')
@@ -355,9 +369,11 @@ def make_policy_network(args, metadata=None):
             policy_network = HeteroActor(
                 input_size=args.policy_kwargs.get("input_size", -1),
                 hidden_size=args.policy_kwargs.get("hidden_size", 256),
-                output_size=args.policy_kwargs.get("output_size", 64),
+                num_layers=args.policy_kwargs.get("num_layers", 3),
+                metadata=metadata,
                 num_heads=args.policy_kwargs.get("num_heads", 1),
-                metadata=metadata
+                dropout=args.policy_kwargs.get("dropout", 0.1),
+                residual=args.policy_kwargs.get("residual", True),
             )
         else:
             raise Exception("No policy network to load!")
@@ -417,20 +433,35 @@ def make_agent(args, metadata=None):
     policy_network = make_policy_network(args, metadata=metadata)
     value_network = make_value_network(args, metadata=metadata)
 
+    # Extract causal RL config (with safe defaults for backward compatibility)
+    causal_scheme = getattr(args, 'causal_scheme', 'flow')
+    causal_gamma = getattr(args, 'causal_gamma', 0.9)
+    # causal_pg (advantage replacement) is opt-in only.
+    # Standard PPO with GAE + value baseline on redistributed credits
+    # is more stable and converges better.
+    causal_pg = getattr(args, 'causal_pg', False)
+    causal_rl = getattr(args, 'causal_rl', False)
+
     if args.algorithm == 'pg':
         agent = PGAgent(policy_network=policy_network,policy_lr=args.policy_lr, policy_updates=args.policy_updates,
                         value_network=value_network, value_lr=args.value_lr, value_updates=args.value_updates,
-                        gam=args.gam, lam=args.lam, kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus)
+                        gam=args.gam, lam=args.lam, kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus,
+                        causal_scheme=causal_scheme, causal_gamma=causal_gamma, causal_pg=causal_pg,
+                        causal_rl=causal_rl)
     elif args.algorithm == 'ppo-clip':
         agent = PPOAgent(policy_network=policy_network, method='clip', eps=args.eps,
                          policy_lr=args.policy_lr, policy_updates=args.policy_updates,
                          value_network=value_network, value_lr=args.value_lr, value_updates=args.value_updates,
-                         gam=args.gam, lam=args.lam, kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus)
+                         gam=args.gam, lam=args.lam, kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus,
+                         causal_scheme=causal_scheme, causal_gamma=causal_gamma, causal_pg=causal_pg,
+                         causal_rl=causal_rl)
     elif args.algorithm == 'ppo-penalty':
         agent = PPOAgent(policy_network=policy_network, method='penalty', c=args.c,
                          policy_lr=args.policy_lr, policy_updates=args.policy_updates,
                          value_network=value_network, value_lr=args.value_lr, value_updates=args.value_updates,
-                         gam=args.gam, lam=args.lam, kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus)
+                         gam=args.gam, lam=args.lam, kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus,
+                         causal_scheme=causal_scheme, causal_gamma=causal_gamma, causal_pg=causal_pg,
+                         causal_rl=causal_rl)
 
 
 

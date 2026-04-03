@@ -368,9 +368,9 @@ def create_postpone_environment():
 if __name__ == "__main__":
     # Configuration for comparison
     config = {
-        'epochs': 50,
+        'epochs': 30,
         'episodes': 20,
-        'max_episode_length': 500,
+        'max_episode_length': 10,
         'batch_size': 32,
         'policy_lr': 8e-4,
         'value_lr': 8e-4,

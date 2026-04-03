@@ -283,7 +283,8 @@ class DCLAgent(Agent):
             return float('nan'), float('nan'), float('nan')
 
     def train(self, env, episodes=10, epochs=1, max_episode_length=None, verbose=0, save_freq=1,
-              logdir=None, batch_size=64, sort_states=False, test_env=None, test_freq=5, test_episodes=10):
+              logdir=None, batch_size=64, sort_states=False, test_env=None, test_freq=5, test_episodes=10,
+              wandb_logger=None, num_workers=4):
         """
         Train the DCL agent with optional testing during training.
 
@@ -313,6 +314,10 @@ class DCLAgent(Agent):
             Frequency (in epochs) to run testing.
         test_episodes : int
             Number of episodes for testing.
+        wandb_logger : optional
+            Logger for Weights & Biases integration.
+        num_workers : int
+            Number of parallel workers for episode collection.
 
         Returns
         -------

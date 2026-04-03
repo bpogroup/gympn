@@ -352,6 +352,23 @@ class GymProblem(SimProblem):
         else:
             return [], False
 
+        # CRITICAL FIX: Check just_postponed AGAIN after potential tag switch.
+        # The tag may have been switched from 'e' to 'a' in the logic above
+        # (e.g., when evolutions are in the future but actions are available sooner).
+        # After a postpone, the agent must NOT be given action bindings —
+        # instead, advance the clock to the next evolution event.
+        if self.allow_postpone and self.just_postponed and self.network_tag.is_action():
+            # Tag was switched to 'a' but we just postponed.
+            # Switch back to 'e' and advance to the next evolution time.
+            if len(timed_bindings_evo) > 0:
+                self.network_tag.tag = 'e'
+                if self.clock < timed_bindings_evo[0][1]:
+                    self.clock = timed_bindings_evo[0][1]
+                timed_bindings_curr = timed_bindings_evo
+            else:
+                # No evolution events at all — model is stuck
+                return [], True
+
         # Return the timed bindings that have time <= clock
         bindings = [(binding, time, t) for (binding, time, t) in timed_bindings_curr if time <= self.clock]
         # The other bindings are useful to delay
@@ -488,34 +505,42 @@ class GymProblem(SimProblem):
         ret.just_postponed = self.just_postponed
 
         # copy places (excluding unobservable)
-        ret.places = [p for p in self.places if p._id not in self.unobservable_simvars]
+        # FIX: deepcopy places that need token attr removal to avoid mutating originals
+        observable_places = [p for p in self.places if p._id not in self.unobservable_simvars]
+        ret.places = []
+        for p in observable_places:
+            if self.unobservable_token_attrs and p._id in self.unobservable_token_attrs:
+                p_copy = copy.deepcopy(p)
+                # Strip unobservable attributes from token values in the copy
+                for token in p_copy.marking:
+                    if isinstance(token.value, dict):
+                        for key in list(self.unobservable_token_attrs[p._id]):
+                            token.value.pop(key, None)
+                ret.places.append(p_copy)
+            else:
+                ret.places.append(p)
         for p in ret.places:
             ret.id2node[p._id] = p
 
-        # events fully within observed places
+        # events fully within observed places — compare by _id since we may have copies
+        observable_place_ids = {p._id for p in ret.places}
         for e in self.events:
-            if set(e.incoming) <= set(ret.places) and set(e.outgoing) <= set(ret.places):
+            if all(p._id in observable_place_ids for p in e.incoming) and \
+               all(p._id in observable_place_ids for p in e.outgoing):
                 ret.events.append(e)
                 ret.id2node[e._id] = e
 
-        # actions fully within observed places (FIX: append to ret.actions)
+        # actions fully within observed places
         for a in self.actions:
-            if set(a.incoming) <= set(ret.places) and set(a.outgoing) <= set(ret.places):
+            if all(p._id in observable_place_ids for p in a.incoming) and \
+               all(p._id in observable_place_ids for p in a.outgoing):
                 ret.actions.append(a)
                 ret.id2node[a._id] = a
-
-        # remove unobservable token attrs (if any)
-        if self.unobservable_token_attrs:
-            for p in ret.places:
-                if p._id in self.unobservable_token_attrs:
-                    for key in list(self.unobservable_token_attrs[p._id]):
-                        if key in p.tokens_attributes:
-                            del p.tokens_attributes[key]
 
         ret.clock = self.clock
         return ret
 
-    def get_graph_observation(self, minimal_obs=False, normalize=True, remove_empty_nodes=True, add_self_loops=True):
+    def get_graph_observation(self, minimal_obs=False, normalize=False, remove_empty_nodes=True, add_self_loops=True):
         """
         Generates a graph-based observation of the problem.
 
@@ -560,7 +585,7 @@ class GymProblem(SimProblem):
 
                             for token in p.marking:  # will always be only a single token because places were expanded already
                                 if isinstance(token.value, dict): #token attrs observability assumes tokens are dictionaries
-                                    token_value = torch.tensor([float(value) for key, value in token.value.items() if key not in self.unobservable_token_attrs and key not in self.categorical_token_attrs.get(p_name_original, {})]).type(
+                                    token_value = torch.tensor([float(value) for key, value in token.value.items() if key not in self.unobservable_token_attrs.get(p_name_original, []) and key not in self.categorical_token_attrs.get(p_name_original, {})]).type(
                                         torch.float32) #if the token has no attributes, we create an empty tensor
                                     if p_name_original in self.categorical_token_attrs.keys():
                                         #one hot encoding of categorical values
@@ -645,7 +670,11 @@ class GymProblem(SimProblem):
                     # If not, create a new Data object and assign it to ret_graph[n_t]
                     new_nodes = torch.stack(nodes)
                     if new_nodes.numel() == 0 and n_t not in ['a_transition', 'e_transition']:
-                        ret_graph[n_t].x = torch.empty(0, len(self.var_attributes[n_t]))
+                        if n_t not in self.unobservable_token_attrs.keys():
+                            ret_graph[n_t].x = torch.empty(0, len(self.var_attributes[n_t]))
+                        else:
+                            ret_graph[n_t].x = torch.empty(0, len(
+                                [el for el in self.var_attributes[n_t] if el not in self.unobservable_token_attrs[n_t]]))
                     else:
                         ret_graph[n_t].x = new_nodes
 
@@ -658,7 +687,7 @@ class GymProblem(SimProblem):
                         ret_graph[n_t].x = torch.empty(0, len(self.var_attributes[n_t]))  # create empty placeholder of the right size
                     else:
                         ret_graph[n_t].x = torch.empty(0, len(
-                            [el for el in self.var_attributes[n_t] if el not in self.unobservable_simvars[n_t]]))  # create empty placeholder of the right size
+                            [el for el in self.var_attributes[n_t] if el not in self.unobservable_token_attrs[n_t]]))  # create empty placeholder of the right size
 
 
         # Update the HeteroData object with the arcs
@@ -1203,41 +1232,91 @@ class GymProblem(SimProblem):
 
         while self.clock <= self.length and active_model:
             bindings, active_model = self.bindings()
-            if self.clock <= self.length:
-                if len(bindings) > 0 and self.network_tag.is_evolution():
-                    #if self.just_postponed:
-                        #print("Postpone taking place!")
-                    self.just_postponed = False
-                    binding = random.choice(bindings)
-                    run.append(binding)
-                    result_tokens = self.fire(binding)
-                    #if binding[-1]._id in self.reward_functions.keys():
-                    self.update_reward(binding, result_tokens)
-                    i += 1
-                    #print(f"Evolution fired at time {self.clock}")
+            # NOTE: bindings() may advance self.clock past self.length when
+            # the next enabled binding is scheduled beyond the horizon.
+            # We still fire evolution bindings that were returned because
+            # they were causally triggered by actions taken within the horizon.
+            # Without this, the very last completion event gets lost (off-by-one).
+            if len(bindings) > 0 and self.network_tag.is_evolution():
+                #if self.just_postponed:
+                    #print("Postpone taking place!")
+                self.just_postponed = False
+                binding = random.choice(bindings)
+                run.append(binding)
+                result_tokens = self.fire(binding)
+                #if binding[-1]._id in self.reward_functions.keys():
+                self.update_reward(binding, result_tokens)
+                i += 1
+                #print(f"Evolution fired at time {self.clock}")
 
-                elif len(bindings) > 0 and self.network_tag.is_action():#give control to the gym env by returning the current observation
-                    if not self.allow_postpone:
-                        condition = True if self.causal_rl else len(bindings) > 1
-                        #if len(bindings) > 1: #only call the environment if there is more than one action available
-                        if condition: #the old condition creates problems with causal tracing
-                            return self.get_graph_observation(), self.clock > self.length or not active_model, i
-                        else:
-                            binding = bindings[0]
-                            run.append(binding)
-                            result_tokens = self.fire(binding)
-                            #if binding[-1]._id in self.reward_functions.keys():
-                            self.update_reward(binding, result_tokens)
-                            i += 1
-                    else:
-                        active_model = False if self.just_postponed else True
-                        return self.get_graph_observation(), self.clock > self.length or not active_model, i
-                else:
+            elif len(bindings) > 0 and self.network_tag.is_action():#give control to the gym env by returning the current observation
+                if self.clock > self.length:
+                    # Clock advanced past horizon — no more actions allowed
                     active_model = False
+                elif not self.allow_postpone:
+                    condition = True if self.causal_rl else len(bindings) > 1
+                    #if len(bindings) > 1: #only call the environment if there is more than one action available
+                    if condition: #the old condition creates problems with causal tracing
+                        return self.get_graph_observation(), self.clock > self.length or not active_model, i
+                    else:
+                        binding = bindings[0]
+                        run.append(binding)
+                        result_tokens = self.fire(binding)
+                        #if binding[-1]._id in self.reward_functions.keys():
+                        self.update_reward(binding, result_tokens)
+                        i += 1
+                else:
+                    # allow_postpone is True
+                    # After a postpone + evolutions, the agent can now choose again.
+                    # Do NOT terminate the episode just because just_postponed was True.
+                    return self.get_graph_observation(), self.clock > self.length or not active_model, i
             else:
                 active_model = False
 
-        return self.get_graph_observation(), self.clock >= self.length or not active_model, i
+        # --- Drain remaining evolution events past the horizon ---
+        # Actions taken within the horizon may have triggered evolution events
+        # (e.g., completion events) scheduled slightly past self.length.
+        # Fire all such pending evolution events so their rewards are counted.
+        self._drain_pending_evolutions(run, i)
+
+        return self.get_graph_observation(), self.clock > self.length or not active_model, i
+
+    def _drain_pending_evolutions(self, run, i):
+        """
+        Fire any remaining evolution events that were causally triggered by
+        actions taken within the horizon.  This is called after the main
+        run_evolutions loop exits (clock > length) to ensure that completion
+        events for the last actions are not lost.
+
+        Only fires reward-producing evolution events; non-reward events
+        (e.g., arrival recycling) and action bindings are skipped to avoid
+        cascading side-effects past the horizon.
+        """
+        max_drain = 50  # Safety limit to prevent infinite loops
+        for _ in range(max_drain):
+            # Collect only reward-producing evolution bindings
+            timed_bindings_evo = []
+            for t in self.events:
+                if t._id not in self.reward_functions:
+                    continue  # Skip non-reward events (e.g., arrive)
+                for (binding, time) in self.event_bindings(t):
+                    timed_bindings_evo.append((binding, time, t))
+            if not timed_bindings_evo:
+                break
+            timed_bindings_evo.sort(key=lambda b: b[1])
+            earliest = timed_bindings_evo[0]
+            # Only fire events reasonably close to the horizon
+            # (caused by actions within the episode, not far-future events)
+            if earliest[1] > self.length * 2:
+                break
+            # Advance clock and fire
+            if self.clock < earliest[1]:
+                self.clock = earliest[1]
+            binding = earliest
+            run.append(binding)
+            result_tokens = self.fire(binding)
+            self.update_reward(binding, result_tokens)
+            i += 1
 
     def update_reward(self, timed_binding, result_tokens=None):
         binding, time, transition = timed_binding
@@ -1270,7 +1349,17 @@ class GymProblem(SimProblem):
         return r_f, variable_values
 
 
-    def make_metadata(self, add_self_loops=True):
+    def make_metadata(self, add_self_loops=True, add_action_to_action=True, add_reverse_edges=False):
+        """
+        Construct PyG HeteroData metadata: (node_types, edge_type_tuples).
+
+        New optional flags:
+        - add_action_to_action: include a generic ('a_transition','a_to_a','a_transition') metapath
+          that connects action nodes (useful to let the GNN pass messages directly between
+          different action nodes such as stage A and stage B).
+        - add_reverse_edges: add reverse edge types for each discovered edge type so message
+          passing can flow bidirectionally (each (u,rel,v) adds (v, rel+'_rev', u)).
+        """
         nodes_meta = ['e_transition', 'a_transition']
         edges_meta = []
         if add_self_loops:
@@ -1306,6 +1395,24 @@ class GymProblem(SimProblem):
             for n in nodes_meta:
                 if n != 'postpone':
                     edges_meta.append((n, 'to_postpone', 'postpone'))
+
+        # Optionally add a generic action->action metapath to connect action nodes
+        # (helps message passing across different action types such as start_A -> start_B)
+        if add_action_to_action:
+            a2a = ('a_transition', 'a_to_a', 'a_transition')
+            if a2a not in edges_meta:
+                edges_meta.append(a2a)
+
+        # Optionally add reverse edge types for all discovered edge types so the GNN
+        # can pass messages bidirectionally without relying on the conv implementation
+        # to implicitly handle reverse relations.
+        if add_reverse_edges:
+            # Gather existing edge types snapshot and add reverse counterparts when missing
+            existing = list(edges_meta)
+            for (src, rel, dst) in existing:
+                rev = (dst, rel + '_rev', src)
+                if rev not in edges_meta:
+                    edges_meta.append(rev)
 
         return tuple([nodes_meta, edges_meta])
 
@@ -1432,8 +1539,31 @@ class GymProblem(SimProblem):
                     #include _id in the set of unobservable features
                     for token in place.marking:
                         setattr(token, '_id', str(uuid.uuid4()))
-                        print(f"Assigned token id {token._id} to token in place {place._id}")
                 print("Causal RL enabled: each token has been assigned a unique identifier.")
+                # Ensure causal trace starts empty at the beginning of training
+                try:
+                    self.causal_trace.flush()
+                except Exception:
+                    pass
+
+                # Register initial tokens as roots in the causal trace.
+                # This ensures the BFS in redistribute_rewards() can find them
+                # as proper root nodes instead of encountering unknown token IDs.
+                import types
+                initial_sentinel = types.SimpleNamespace(_id="__initial__")
+                for place in self.places:
+                    for token in place.marking:
+                        self.causal_trace.register_token(
+                            token, initial_sentinel, parent_tokens=[], time=0
+                        )
+                self.causal_trace.register_transition(
+                    transition=initial_sentinel,
+                    input_tokens=[],
+                    output_tokens=[t for p in self.places for t in p.marking],
+                    is_action=False,
+                    reward=0.0,
+                    time=0
+                )
 
         env = AEPN_Env(self)
 
@@ -1507,10 +1637,13 @@ class GymProblem(SimProblem):
         if hasattr(env, 'causal_rl') and env.causal_rl:
             logger.causal_rl_enabled()
 
-        agent.train(env, episodes=args.episodes, epochs=args.epochs,
+        history = agent.train(env, episodes=args.episodes, epochs=args.epochs,
                     save_freq=args.save_freq, logdir=logdir, verbose=args.verbose,
                     max_episode_length=args.max_episode_length, batch_size=args.batch_size,
                     test_env=test_env, test_freq=test_freq, wandb_logger=wandb_logger)
+
+        # Store training history for programmatic access
+        self.training_history = history if history is not None else {}
 
         logger.training_end(agent.best_test_metric if hasattr(agent, 'best_test_metric') else 0.0)
 
@@ -1650,35 +1783,167 @@ class GymProblem(SimProblem):
 
     def testing_run(self, solver, length=10, reporter=None, visualize=False):
         """
-        Executes a testing run for the problem using the specified solver.
-
-        The testing run evaluates the solver's performance over a specified duration.
-
-        :param solver: An instance of a solver class implementing the `BaseSolver` interface.
-        :param length: The maximum duration of the testing run. The simulation will stop if the clock exceeds (or matches) this length.
-        :param reporter: A reporter to log simulation events.
-        :return: The total reward accumulated during the testing run.
+        Test run aligned with AEPN_Env semantics:
+          1) Ensure we start in ACTION phase (like env.reset()).
+          2) Loop:
+               - Choose exactly ONE action (or postpone).
+               - Apply it (fire or postpone).
+               - Run all evolutions: obs, terminated, _ = run_evolutions(...)
+               - Stop when 'terminated' is True (same as AEPN_Env.step).
+          3) Return total accumulated reward (same scalar your env exposes in info['pn_reward']).
         """
-
-        if not isinstance(solver, BaseSolver):
-            raise Exception(f"The provided solver {solver} does not extend BaseSolver")
-
-        self.set_solver(solver)
+        # ---- Setup identical to environment.reset() ----
         self.length = length
-
-        active_model = True
-
         if visualize:
-            print("Visualizing the simulation...")
-            visual = Visualisation(self)
-            visual.show()
-        else:
-            while self.clock <= self.length and active_model:
-                binding, active_model = self.step(reporter, length)
-                if self._debugging:
-                    print(f"Binding: {binding}")
+            # Keep your existing visualization path if needed
+            from gympn.visualisation import Visualisation
+            Visualisation(self).show()
+            return self.reward
 
-        #print(f'Final reward: {self.reward}')
+        # Ensure we are at the first action (env.reset does this)
+        if self.network_tag.is_evolution():
+            self.get_to_first_action()  # moves clock/tag to first action when possible  [1](https://tuenl-my.sharepoint.com/personal/r_lo_bianco_tue_nl/Documents/Microsoft%20Copilot%20Chat%20Files/environment%20-%20Copy.txt)
+
+        # Local "run" log & cursor, like AEPN_Env keeps (not strictly needed, but harmless)
+        run_log, i = [], 0
+
+        # Helper to pick & apply exactly one action (or postpone)
+        def _apply_one_action_gymsolver():
+            """GymSolver branch (policy model). Returns True if an action/postpone was applied."""
+            import torch
+            obs = self.get_graph_observation(normalize=False)  # keep features stationary like training
+            actions = obs.get('actions_dict', [])
+            if not actions:
+                return False
+            # Policy returns per-action logits/probs; pick argmax deterministically for testing.
+            probs = solver.solve(
+                obs)  # GymSolver.solve calls policy.forward(obs)  [1](https://tuenl-my.sharepoint.com/personal/r_lo_bianco_tue_nl/Documents/Microsoft%20Copilot%20Chat%20Files/environment%20-%20Copy.txt)
+            if isinstance(probs, torch.Tensor) and probs.dim() > 1 and probs.size(-1) == 1:
+                probs = probs.squeeze(-1)
+            a_idx = int(torch.argmax(probs).item()) if isinstance(probs, torch.Tensor) else int(probs)
+            a_idx = max(0, min(a_idx, len(actions) - 1))
+            chosen = actions[a_idx]
+
+            # Postpone option (pseudo-binding): (['postpone'], current_clock, None)
+            if isinstance(chosen, tuple) and chosen and chosen[0] == ['postpone']:
+                if self.allow_postpone:
+                    self.postpone()
+                    self.just_postponed = True
+                    if reporter is not None:
+                        # Optional: reporter callback for postpone sentinel (no timed binding)
+                        try:
+                            reporter.callback(chosen)
+                        except Exception:
+                            pass
+                    return True
+                # If postpone is NOT allowed, fallback to first real binding if any
+                real = [b for b in actions if isinstance(b, tuple) and b and isinstance(b[0], list)]
+                if real:
+                    chosen = real[0]
+                else:
+                    return False
+
+            # Fire the real binding
+            self.just_postponed = False
+            result_tokens = self.fire(
+                chosen)  # applies behavior and places tokens  [1](https://tuenl-my.sharepoint.com/personal/r_lo_bianco_tue_nl/Documents/Microsoft%20Copilot%20Chat%20Files/environment%20-%20Copy.txt)
+            self.update_reward(chosen,
+                               result_tokens)  # accumulate reward (non-causal mode uses deltas)  [1](https://tuenl-my.sharepoint.com/personal/r_lo_bianco_tue_nl/Documents/Microsoft%20Copilot%20Chat%20Files/environment%20-%20Copy.txt)
+            if reporter is not None:
+                try:
+                    reporter.callback(chosen)
+                except Exception:
+                    pass
+            # Refresh tag like env.step does before run_evolutions
+            self.bindings()
+            return True
+
+        def _apply_one_action_heuristic_like():
+            """Heuristic/Random branch. Returns True if applied."""
+            # Expect to be in ACTION phase here; get current action bindings
+            bindings, _active = self.bindings()
+            if not bindings:
+                return False
+
+            # Expose postpone as a pseudo-binding if configured
+            aug = self._augment_bindings_with_postpone(bindings)
+
+            # Heuristic solver API: solve(observable_net, bindings)
+            try:
+                selection = solver.solve(self.get_heuristic_observation(), aug)
+            except TypeError:
+                # Some heuristics take (obs, tokens_comb) in your codebase; fallback to postpone-first real binding
+                selection = aug[0] if aug else None
+
+            if selection is None:
+                return False
+
+            # Handle 'postpone' sentinel in the same way as env
+            if selection == 'postpone' or (isinstance(selection, tuple) and selection and selection[0] == ['postpone']):
+                if self.allow_postpone:
+                    self.postpone()
+                    self.just_postponed = True
+                    if reporter is not None:
+                        try:
+                            reporter.callback((['postpone'], self.clock, None))
+                        except Exception:
+                            pass
+                    # Refresh tag before evolutions (match env.step)
+                    self.bindings()
+                    return True
+                # fell through: if postpone not allowed, try to fire a real one
+                real = [b for b in aug if isinstance(b, tuple) and b and isinstance(b[0], list)]
+                if not real:
+                    return False
+                selection = real[0]
+
+            # If selection is an index
+            if isinstance(selection, int):
+                if selection < 0 or selection >= len(aug):
+                    return False
+                selection = aug[selection]
+
+            # selection should now be a real timed binding
+            if not (isinstance(selection, tuple) and selection and isinstance(selection[0], list)):
+                return False
+
+            self.just_postponed = False
+            result_tokens = self.fire(selection)
+            self.update_reward(selection, result_tokens)
+            if reporter is not None:
+                try:
+                    reporter.callback(selection)
+                except Exception:
+                    pass
+            # Refresh tag like env.step before run_evolutions
+            self.bindings()
+            return True
+
+        # ------------------ Main loop (env-aligned) ------------------
+        terminated = False
+        while not terminated:
+            # Choose & apply ONE action/postpone
+            applied = False
+            try:
+                from gympn.solvers import GymSolver
+                if isinstance(solver, GymSolver):
+                    applied = _apply_one_action_gymsolver()
+                else:
+                    applied = _apply_one_action_heuristic_like()
+            except Exception:
+                # If solver type cannot be imported/checked, try policy path first
+                applied = _apply_one_action_gymsolver()
+
+            # If nothing could be applied, we still need to check evolutions once to determine termination
+            # (e.g., no action bindings but evolutions remain)
+            # Run evolutions exactly like AEPN_Env.step does:
+            _obs_after, terminated, i = self.run_evolutions(run_log, i,
+                                                            active_model=True)  # returns terminated flag  [1](https://tuenl-my.sharepoint.com/personal/r_lo_bianco_tue_nl/Documents/Microsoft%20Copilot%20Chat%20Files/environment%20-%20Copy.txt)
+
+            # If we are over the horizon or inactive, stop (this mirrors AEPN_Env)
+            if terminated:
+                break
+
         return self.reward
 
     def set_unobservable(self, simvars=None, token_attrs=None):
@@ -1743,6 +2008,8 @@ class GymProblem(SimProblem):
 
         input_tokens = []
         output_tokens = []
+        # Capture old token IDs before mutation so transition input_tokens use pre-postpone IDs
+        old_id_map = {}  # id(token_object) -> old _id
 
         for timed_binding in bindings:
             try:
@@ -1754,22 +2021,58 @@ class GymProblem(SimProblem):
                 for place, token in binding:
                     if token not in input_tokens:
                         input_tokens.append(token)
-                        # Assign new ID directly to token in marking
+                        # Save old ID before mutating
+                        old_id = getattr(token, '_id', None)
+                        old_id_map[id(token)] = old_id
+                        # Assign new ID using identity-based lookup.
+                        # place.marking.index(token) uses SimToken.__eq__ which
+                        # compares by value — this can find the WRONG token when
+                        # multiple tokens with the same value sit in a place.
+                        # Use id() (Python object identity) to locate the exact object.
                         new_id = str(uuid.uuid4())
-                        if token in place.marking:
-                            idx = place.marking.index(token)
-                            place.marking[idx]._id = new_id
+                        identity_map = {id(t): i for i, t in enumerate(place.marking)}
+                        obj_idx = identity_map.get(id(token))
+                        if obj_idx is not None:
+                            place.marking[obj_idx]._id = new_id
+                        else:
+                            token._id = new_id
                         # Add the same token (now updated) to output_tokens
                         output_tokens.append(token)
 
+        if not input_tokens:
+            return
+
+        # Create a sentinel transition object with a unique _id
+        # (TokenHistory.add_token accesses transition._id, so we can't pass None)
+        import types
+        sentinel_transition = types.SimpleNamespace(_id=f"postpone_{uuid.uuid4()}")
+
+        # Build a list of "old" input tokens for the transition history
+        # We need objects with the OLD _id for input_tokens
+        class _OldIdToken:
+            """Lightweight wrapper to supply the old _id for transition history recording."""
+            def __init__(self, old_id):
+                self._id = old_id
+
+        old_input_tokens = [_OldIdToken(old_id_map[id(t)]) for t in input_tokens
+                            if old_id_map.get(id(t)) is not None]
+
+        # Register the transition using old IDs for input and new IDs for output
         self.causal_trace.register_transition(
-            transition=None,
-            input_tokens=input_tokens,
+            transition=sentinel_transition,
+            input_tokens=old_input_tokens,
             output_tokens=output_tokens,
             is_action=True,
             reward=0.0,
             time=self.clock
         )
+
+        # Register each output token in token_history to maintain causal chain
+        # The output tokens (with new IDs) are children of the input tokens (with old IDs)
+        for out_token in output_tokens:
+            self.causal_trace.register_token(
+                out_token, sentinel_transition, old_input_tokens, time=self.clock
+            )
 
     def update_causal_trace(self, bindings, result_tokens, reward, transition):
         """
@@ -1883,7 +2186,7 @@ class NetworkTag():
 
 class GymVar(SimVar):
     def __init__(self, _id, attributes: dict, priority=lambda token: token.time):
-        super().__init__(self, _id, priority=priority)
+        super().__init__(_id, priority=priority)
         self.attributes = attributes
 
 

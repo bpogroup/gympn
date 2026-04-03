@@ -5,6 +5,7 @@ gradient or vanilla policy optimization
 agent.
 """
 import numpy as np
+import os
 import torch
 from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -82,7 +83,9 @@ class Agent:
                  value_lr=1e-3, value_updates=25,
                  gam=0.99, lam=0.97, normalize_advantages=True, eps=0.2,
                  kld_limit=0.01, ent_bonus=0.01, test_in_train=True, vf_coeff=0.05,
-                 normalize_returns=False, lr_schedule=False):
+                 normalize_returns=False, lr_schedule=False,
+                 causal_scheme='flow', causal_gamma=0.9, causal_pg=False,
+                 causal_rl=False):
         self.policy_model = policy_network
         self.policy_loss = NotImplementedError
         self.policy_optimizer = torch.optim.Adam(params=list(policy_network.parameters()),
@@ -96,7 +99,13 @@ class Agent:
 
         self.lam = lam
         self.gam = gam
-        self.buffer = TrajectoryBuffer(gam=gam, lam=lam)
+        self.causal_pg = causal_pg
+        self.causal_rl = bool(causal_rl)
+        self.buffer = TrajectoryBuffer(gam=gam, lam=lam,
+                                       causal_scheme=causal_scheme,
+                                       causal_gamma=causal_gamma,
+                                       causal_pg=causal_pg,
+                                       causal_rl=causal_rl)
         self.normalize_advantages = normalize_advantages
         self.normalize_returns = normalize_returns  # New parameter
         self.lr_schedule = lr_schedule  # New parameter
@@ -134,6 +143,11 @@ class Agent:
             action = torch.multinomial(torch.exp(logpi.squeeze(1)), 1)[0]
 
         if return_logprob:
+            if os.environ.get('GP_DEBUG_PPO', '0') == '1':
+                try:
+                    print(f"[PPO DEBUG] act: logpi shape = {tuple(logpi.shape)}")
+                except Exception:
+                    pass
             return action.item(), logpi[action].item(), logpi
         else:
             return action
@@ -175,7 +189,7 @@ class Agent:
 
     def train(self, env, episodes=10, epochs=1, max_episode_length=None, verbose=0, save_freq=1,
               logdir=None, batch_size=64, sort_states=False, test_env=None, test_freq=5, test_episodes=10,
-              wandb_logger=None, num_workers=4):
+              wandb_logger=None, num_workers=1):
         """Train the agent on env with optional testing during training.
 
         Parameters
@@ -247,12 +261,12 @@ class Agent:
                 self.rudder_agent.step_epoch()
                 get_logger().info(f"  [RUDDER] Training loss: {rudder_loss:.4f}")
 
-            # CRITICAL FIX for Causal RL: Disable advantage normalization!
-            # Problem: Causal credits sum to ~10-20 per episode, spread across ~70-100 steps
-            # This gives ~0.1-0.2 advantage per step
-            # After normalization: (0.15 - mean) / std ≈ 0 (advantage signal lost!)
-            # Solution: Don't normalize advantages when using causal RL
-            normalize_adv_for_batch = self.normalize_advantages and not env.pn.causal_rl
+            # Advantage normalization.
+            # In causal RL mode, advantages are (credit - V(s)) which need
+            # normalization just like standard GAE advantages.
+            # The _normalize_advantages method handles low-variance cases
+            # (e.g., near-optimal policy) with a center-only fallback.
+            normalize_adv_for_batch = self.normalize_advantages
 
             dataloader = self.buffer.get(normalize_advantages=normalize_adv_for_batch,
                                          normalize_returns=self.normalize_returns,
@@ -264,6 +278,9 @@ class Agent:
             #value_history = self._fit_value_model(dataloader, epochs=self.value_updates)
             #policy_history = self._fit_policy_model(dataloader, logpis, epochs=self.policy_updates)
             #
+            # Standard PPO training: policy + value networks.
+            # In causal RL mode, the value net learns to predict per-action
+            # credits and advantages are (credit - V(s)), normalized.
             policy_history = self._fit_policy_and_value_models(dataloader, epochs=self.policy_updates)
 
             # Update training history
@@ -397,8 +414,11 @@ class Agent:
 
         """
         state = env.reset()
-        if hasattr(env, "problem") and hasattr(env.problem, "causal_trace"):
-            env.problem.causal_trace.flush()
+        # NOTE: Do NOT flush causal traces here. env.reset() already flushes
+        # the trace and then get_to_first_action() populates it with initial
+        # evolution data (e.g. 'arrive' tokens and their parent-child links).
+        # A second flush would wipe that data and break the causal chain for
+        # tokens created during the initial evolution phase.
 
         done = False
         episode_length = 0
@@ -454,6 +474,21 @@ class Agent:
 
         if buffer is not None:
             if 'eligibility_credits' in info and info['eligibility_credits'] is not None:
+                # Diagnostic: if environment signals debugging, print causal trace stats
+                try:
+                    pn = getattr(env, 'pn', None) or getattr(env, 'problem', None)
+                    if pn is not None and getattr(pn, '_debugging', False) and pn.causal_rl:
+                        ct = pn.causal_trace
+                        tok_count, trans_count = ct.stats()
+                        # compute a quick redistribution sample (flow) to check sizes
+                        try:
+                            sample_cr = ct.redistribute_rewards(gamma=0.9, scheme='flow')
+                        except Exception as e:
+                            sample_cr = None
+                            import warnings
+                            warnings.warn(f"[CAUSAL-DIAG] tokens={tok_count}, transitions={trans_count}, ep_steps={episode_length}, redis_len={len(sample_cr) if sample_cr is not None else 'ERR'}, redis_sum={sum(sample_cr) if sample_cr is not None else 'ERR'}")
+                except Exception:
+                    pass
                 buffer.finish(credits=info['eligibility_credits'], mode="replace")
             else:
                 buffer.finish(credits=None)
@@ -734,13 +769,30 @@ class Agent:
         try:
             loss.backward(retain_graph=True)  # compute gradients
         except Exception as e:
-            print("Invalid loss")
+            print("Invalid loss", e)
 
         # Clip gradients for stability - critical for PPO
         torch.nn.utils.clip_grad_norm_(self.policy_model.parameters(), 1.0)
+        # Debug: print gradient norms per parameter if requested
+        try:
+            if os.environ.get('GP_DEBUG_PPO', '0') == '1':
+                for name, param in self.policy_model.named_parameters():
+                    if param.grad is not None:
+                        try:
+                            gnorm = float(torch.norm(param.grad).item())
+                        except Exception:
+                            gnorm = None
+                        print(f"[PPO DEBUG] grad_norm policy {name}: {gnorm}")
+        except Exception:
+            pass
+
         self.policy_optimizer.step()
 
-        print(f"KLD divergence: {kld.item()}")
+        try:
+            if os.environ.get('GP_DEBUG_PPO', '0') == '1':
+                print(f"KLD divergence: {kld.item():.6f} ent: {ent.item():.6f}")
+        except Exception:
+            pass
         return loss.item(), kld.item(), ent.item()
 
     # Assuming `model` is your PyTorch model
@@ -1003,25 +1055,26 @@ class Agent:
         dict
             Dictionary containing training history with keys 'loss', 'kld', and 'ent'.
         """
-        history = {'loss': [], 'kld': [], 'ent': []}
+        history = {'loss': [], 'kld': [], 'ent': [], 'policy_core_loss': [], 'value_loss': []}
         for epoch in range(epochs):
             loss, kld, ent, batches = 0, 0, 0, 0
+            policy_core_acc, value_loss_acc = 0, 0
             early_stop_epoch = False
 
-            for batch in dataloader:
-                batch_loss, batch_kld, batch_ent = self._fit_policy_and_value_model_step(batch)
+            for batch_i, batch in enumerate(dataloader, start=1):
+                batch_loss, batch_kld, batch_ent, batch_vloss, batch_ploss = self._fit_policy_and_value_model_step(batch)
                 loss += batch_loss
                 kld += batch_kld
                 ent += batch_ent
+                value_loss_acc += batch_vloss
+                policy_core_acc += batch_ploss
                 batches += 1
-
-                # === CRITICAL FIX: Check KLD limit per-batch ===
-                # This allows early stopping DURING an epoch, not just after
-                if self.kld_limit is not None and batch_kld > self.kld_limit:
-                    get_logger().debug(f'Early stopping at epoch {epoch+1}, batch {batches}: '
-                                      f'batch KLD {batch_kld:.6f} exceeded limit {self.kld_limit:.6f}')
-                    early_stop_epoch = True
-                    break
+                # Debugging hooks: print per-batch KLD and entropy if requested
+                try:
+                    if os.environ.get('GP_DEBUG_PPO', '0') == '1':
+                        print(f"[PPO DEBUG] epoch={epoch+1} batch={batch_i} batch_kld={batch_kld:.6f} batch_ent={batch_ent:.6f}")
+                except Exception:
+                    pass
 
             if batches == 0:
                 get_logger().no_batches_warning()
@@ -1030,17 +1083,208 @@ class Agent:
             avg_loss = loss / batches
             avg_kld = kld / batches
             avg_ent = ent / batches
+            avg_vloss = value_loss_acc / batches
+            avg_ploss = policy_core_acc / batches
             history['loss'].append(avg_loss)
             history['kld'].append(avg_kld)
             history['ent'].append(avg_ent)
+            history['value_loss'].append(avg_vloss)
+            history['policy_core_loss'].append(avg_ploss)
 
             # Stop training if KLD exceeded limit in any batch of this epoch
             if early_stop_epoch:
                 get_logger().debug(f'Early stopping due to KLD divergence at epoch {epoch+1}. '
                                   f'Average epoch KLD: {avg_kld:.6f}, Limit: {self.kld_limit:.6f}')
+                if os.environ.get('GP_DEBUG_PPO', '0') == '1':
+                    print(f"[PPO DEBUG] Early stopped epoch={epoch+1} batches_processed={batches} avg_kld={avg_kld:.6f}")
                 return {k: np.array(v) for k, v in history.items()}
 
         return {k: np.array(v) for k, v in history.items()}
+
+    # ==================================================================
+    # Causal PG: policy-only training with causal credits as advantages
+    # ==================================================================
+
+    def _fit_causal_policy_models(self, dataloader, epochs=1):
+        """Fit policy + value using causal credits as advantages (advantage replacement).
+
+        Key differences from _fit_policy_and_value_models:
+          - Advantages come from causal credits directly (not GAE).
+          - Value function is trained on discounted-credit targets for stability.
+          - KLD early stopping prevents catastrophic policy collapse.
+          - Full normalization (mean + std) applied upstream in get(), with
+            low-variance fallback to center-only when std < threshold.
+        """
+        history = {'loss': [], 'kld': [], 'ent': [], 'policy_core_loss': [], 'value_loss': []}
+        for epoch in range(epochs):
+            loss_acc, ent_acc, kld_acc, batches = 0.0, 0.0, 0.0, 0
+            ploss_acc = 0.0
+            early_stop_epoch = False
+
+            for batch_i, batch in enumerate(dataloader, start=1):
+                batch_loss, batch_ent, batch_ploss, batch_kld = self._fit_causal_policy_step(batch)
+                loss_acc += batch_loss
+                ent_acc += batch_ent
+                ploss_acc += batch_ploss
+                kld_acc += batch_kld
+                batches += 1
+
+                # KLD guard: prevent catastrophic policy updates
+                if self.kld_limit is not None and abs(batch_kld) > self.kld_limit:
+                    get_logger().debug(
+                        f'Causal PG early stopping at epoch {epoch+1}, batch {batch_i}: '
+                        f'batch KLD {batch_kld:.6f} exceeded limit {self.kld_limit:.6f}')
+                    early_stop_epoch = True
+                    break
+
+            if batches == 0:
+                get_logger().no_batches_warning()
+                continue
+
+            avg_loss = loss_acc / batches
+            avg_ent = ent_acc / batches
+            avg_ploss = ploss_acc / batches
+            avg_kld = kld_acc / batches
+            history['loss'].append(avg_loss)
+            history['kld'].append(avg_kld)
+            history['ent'].append(avg_ent)
+            history['value_loss'].append(0.0)
+            history['policy_core_loss'].append(avg_ploss)
+
+            if early_stop_epoch:
+                get_logger().debug(f'Causal PG early stopping at epoch {epoch+1}. '
+                                  f'Average KLD: {avg_kld:.6f}')
+                return {k: np.array(v) for k, v in history.items()}
+
+        return {k: np.array(v) for k, v in history.items()}
+
+    def _fit_causal_policy_step(self, batch):
+        """One gradient step for causal policy gradient with advantage replacement.
+
+        Key design:
+          - Advantages come from causal credits (NOT from value baseline).
+          - Value network is trained alongside policy on discounted-credit targets
+            for stability and monitoring.
+          - KLD is computed for early stopping.
+          - Normal entropy bonus (1x).
+        """
+        self.policy_model.train()
+        if self.value_model is not None and not isinstance(self.value_model, str):
+            self.value_model.train()
+
+        epsilon = 1e-7
+        new_probs = self.policy_model(batch)
+        new_logpis = (new_probs + epsilon).log()
+        if new_logpis.dim() == 2 and new_logpis.size(-1) == 1:
+            new_logpis = new_logpis.squeeze(-1)
+
+        actions = torch.as_tensor(batch.y)
+        advantages = batch.advantage.clone()
+        old_logprob = batch.logprobs.clone()
+
+        has_a = ('a_transition' in batch.x_dict)
+        has_p = ('postpone' in batch.x_dict)
+
+        nA = batch['a_transition'].x.size(0) if has_a else 0
+        nP = batch['postpone'].x.size(0) if has_p else 0
+
+        new_logpis_a = new_logpis[:nA] if nA else None
+        new_logpis_p = new_logpis[nA:nA + nP] if nP else None
+
+        old_logpis_a = batch['a_transition'].logpis if has_a else None
+        if old_logpis_a is not None and old_logpis_a.dim() == 2 and old_logpis_a.size(-1) == 1:
+            old_logpis_a = old_logpis_a.squeeze(-1)
+
+        old_logpis_p = None
+        if has_p and hasattr(batch['postpone'], 'logpis'):
+            old_logpis_p = batch['postpone'].logpis
+            if old_logpis_p is not None and old_logpis_p.dim() == 2 and old_logpis_p.size(-1) == 1:
+                old_logpis_p = old_logpis_p.squeeze(-1)
+
+        idx_a = batch['a_transition'].batch.data if has_a else None
+        idx_p = batch['postpone'].batch.data if has_p else None
+
+        unique_samples = (idx_a.unique() if has_a else idx_p.unique())
+
+        sel_new, sel_old, sel_adv = [], [], []
+        kld_terms = []
+
+        for s in unique_samples:
+            parts_new = []
+
+            if has_a:
+                mask_a = (idx_a == s)
+                ns_a = new_logpis_a[mask_a].reshape(-1)
+                if ns_a.numel():
+                    parts_new.append(ns_a)
+
+            if has_p and new_logpis_p is not None:
+                mask_p = (idx_p == s)
+                ns_p = new_logpis_p[mask_p].reshape(-1)
+                if ns_p.numel():
+                    parts_new.append(ns_p)
+
+            if len(parts_new) == 0:
+                continue
+
+            ns_cat = torch.cat(parts_new, dim=0)
+            a_idx = int(actions[s])
+
+            sel_new.append(ns_cat[a_idx].reshape(()))
+            sel_old.append(old_logprob[s].reshape(()))
+            sel_adv.append(advantages[s].reshape(()))
+
+            # KLD per sample
+            kld_sample = old_logprob[s].item() - ns_cat[a_idx].item()
+            kld_terms.append(kld_sample)
+
+        # ----- Value loss (always trained for stability) -----
+        loss_value = torch.tensor(0.0)
+        if self.value_model is not None and not isinstance(self.value_model, str):
+            pred_values = self.value_model(batch).squeeze()
+            loss_value = torch.mean(self.value_loss.forward(
+                input=pred_values, target=batch.value.clone()))
+
+        self.policy_optimizer.zero_grad()
+        if self.value_model is not None and not isinstance(self.value_model, str):
+            self.value_optimizer.zero_grad()
+
+        if len(sel_new) == 0:
+            # No policy samples but still train value
+            if loss_value.requires_grad:
+                loss_value.backward(retain_graph=True)
+                torch.nn.utils.clip_grad_norm_(self.value_model.parameters(), 1.0)
+                self.value_optimizer.step()
+            return 0.0, 0.0, 0.0, 0.0
+
+        new_sel = torch.stack(sel_new)
+        old_sel = torch.stack(sel_old)
+        adv_sel = torch.stack(sel_adv)
+
+        # PPO clipped surrogate loss
+        loss_policy_core = torch.mean(self.policy_loss(new_sel, old_sel, adv_sel))
+
+        # Entropy bonus
+        ent = -torch.mean(new_probs * new_logpis)
+
+        # Combined loss: policy + value (value provides useful gradients but
+        # does NOT affect advantage computation — advantages are from credits).
+        loss_total = loss_policy_core + self.vf_coeff * loss_value - self.ent_bonus * ent
+
+        # KLD for monitoring and early stopping
+        if len(kld_terms) > 0:
+            kld = sum(kld_terms) / len(kld_terms)
+        else:
+            kld = 0.0
+
+        loss_total.backward(retain_graph=True)
+        torch.nn.utils.clip_grad_norm_(self.policy_model.parameters(), 1.0)
+        if self.value_model is not None and not isinstance(self.value_model, str):
+            torch.nn.utils.clip_grad_norm_(self.value_model.parameters(), 1.0)
+            self.value_optimizer.step()
+        self.policy_optimizer.step()
+
+        return loss_total.item(), ent.item(), float(loss_policy_core.item()), kld
 
     def _fit_policy_and_value_model_step(self, batch):
         self.policy_model.train()
@@ -1175,7 +1419,9 @@ class Agent:
         p1 = sum((p.data.norm() for p in self.policy_model.parameters()), torch.tensor(0.0))
         get_logger().debug(f"Δ||θ|| = {(p1 - p0).item():.6f}")
 
-        return loss_total.item(), kld.item(), ent.item()
+        # Return also value and policy-core losses for diagnostics
+        return loss_total.item(), kld.item(), ent.item(), float(loss_value.item()), float(loss_policy_core.item())
+
 
 def pg_surrogate_loss(new_logps, old_logps, advantages):
     """Return loss with gradient for policy gradient.

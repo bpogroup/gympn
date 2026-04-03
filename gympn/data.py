@@ -6,6 +6,7 @@ from torch_geometric.data import Data
 
 from typing import Optional, List, Dict, Any, Sequence
 import copy
+import os
 import numpy as np
 import torch
 from torch_geometric.data import HeteroData
@@ -155,21 +156,22 @@ def discount_rewards(rewards, gam):
 
     return returns
 
-def apply_causal_credits(causal_trace):
+def apply_causal_credits(causal_trace, gamma=0.9, scheme='flow'):
     """
     Apply causal credits to redistribute rewards based on causal trace information.
 
     Parameters
     ----------
     :param causal_trace : CausalTrace object
-
+    :param gamma : float, per-hop decay factor
+    :param scheme : str, redistribution scheme
 
     Returns
     -------
     action_rewards : list
         List of redistributed rewards per action.
     """
-    return torch.tensor(causal_trace.redistribute_rewards(), dtype=torch.float32)
+    return torch.tensor(causal_trace.redistribute_rewards(gamma=gamma, scheme=scheme), dtype=torch.float32)
 
 
 def compute_advantages(
@@ -240,7 +242,7 @@ def _to_1d_tensor(x) -> Tensor:
 
 
 def discount_returns(rewards: Tensor, gamma: float) -> Tensor:
-    """Compute discounted returns using vectorized operations (~5-10x faster).
+    """Compute discounted returns-to-go: G_t = r_t + gamma * G_{t+1}.
 
     Parameters
     ----------
@@ -258,12 +260,12 @@ def discount_returns(rewards: Tensor, gamma: float) -> Tensor:
     if T == 0:
         return rewards
 
-    # Vectorized cumsum: G_t = r_t + gamma*G_{t+1}
-    # Process in reverse: flip, cumsum with decay, flip back
-    flipped = torch.flip(rewards, [0])
-    discounts = torch.pow(gamma, torch.arange(T, dtype=rewards.dtype, device=rewards.device))
-    cumsum_flipped = torch.cumsum(flipped * discounts, dim=0)
-    returns = torch.flip(cumsum_flipped, [0]) / discounts
+    # Reverse accumulation: G_t = r_t + gamma * G_{t+1}
+    returns = torch.zeros_like(rewards)
+    G = 0.0
+    for t in range(T - 1, -1, -1):
+        G = float(rewards[t]) + gamma * G
+        returns[t] = G
 
     return returns
 
@@ -296,11 +298,16 @@ class TrajectoryBuffer:
       - q_first (Tensor): rollout diagnostic targets (vector or scalar)
     """
 
-    def __init__(self, gam=1.0, lam=1.0, data_type='hetero', action_mode="node_selection"):
+    def __init__(self, gam=1.0, lam=1.0, data_type='hetero', action_mode="node_selection",
+                 causal_scheme='flow', causal_gamma=0.9, causal_pg=False, causal_rl=False):
         self.gam = float(gam)
         self.lam = float(lam)
         self.data_type = data_type
         self.action_mode = action_mode
+        self.causal_scheme = causal_scheme
+        self.causal_gamma = float(causal_gamma)
+        self.causal_pg = causal_pg
+        self.causal_rl = bool(causal_rl)
 
         # rolling storage
         self.states: List[Dict[str, Any]] = []
@@ -309,6 +316,8 @@ class TrajectoryBuffer:
         self.logprobs_sel: Tensor = torch.empty(0, dtype=torch.float32)
         self.values_pred: Tensor = torch.empty(0, dtype=torch.float32)
         self.logpis_nodes: List[Tensor] = []
+        # Metadata about stored logpis: record node counts at storage time to debug ordering issues
+        self.logpis_meta: List[dict] = []
         self.token_ids: List[List[int]] = []
 
         # DCL fields (lists; must be aligned with states)
@@ -332,12 +341,24 @@ class TrajectoryBuffer:
               target_pi: Optional[Tensor] = None,
               q_first: Optional[Tensor] = None):
         """Append one interaction; always append placeholders for DCL fields to keep alignment."""
-        self.states.append(state)
+        # Deep-copy the state to freeze the graph structure at storage time. This
+        # prevents later environment mutations from changing node counts and
+        # causing mismatches between stored logpis and the graph snapshot used
+        # during training data construction.
+        self.states.append(copy.deepcopy(state))
         self.actions.append(int(action))
         self.rewards_raw = torch.cat([self.rewards_raw, _to_1d_tensor(reward)], dim=0)
         self.logprobs_sel = torch.cat([self.logprobs_sel, _to_1d_tensor(logprob)], dim=0)
         self.values_pred = torch.cat([self.values_pred, _to_1d_tensor(value)], dim=0)
         self.logpis_nodes.append(None if logpis is None else logpis.detach().flatten().to(torch.float32))
+        # Record expected node counts at storage time (helps detect later mismatches)
+        try:
+            g = state['graph']
+            nA = g['a_transition'].num_nodes if hasattr(g, 'node_types') and 'a_transition' in g.node_types else 0
+            nP = g['postpone'].num_nodes if hasattr(g, 'node_types') and 'postpone' in g.node_types else 0
+            self.logpis_meta.append({'nA': int(nA), 'nP': int(nP), 'total': int(nA + nP)})
+        except Exception:
+            self.logpis_meta.append({'nA': 0, 'nP': 0, 'total': 0})
         self.token_ids.append([] if token_ids is None else list(token_ids))
 
         # --- DCL fields: build safe placeholders if missing ---
@@ -388,13 +409,18 @@ class TrajectoryBuffer:
     def finish(self, credits: Optional[Any] = None, mode: str = "replace"):
         """
         Close current episode [start:end). Compute returns and advantages for that slice.
+
         credits:
-            - None                          -> use raw rewards
-            - Tensor/list length T          -> per-step redistributed rewards (aligned with this episode window)
+            - None                          -> use raw rewards (standard RL)
+            - Tensor/list length T          -> per-step causal attributions
             - object with .redistribute_rewards() -> will be called to get length-T vector
-        mode:
-            - "replace": use credits as the rewards
-            - "add":     rewards_raw + credits
+
+        In causal RL mode, credits[t] is "how much total reward did action t cause?"
+        — a retrospective per-action attribution, NOT a temporal step-reward.
+        Therefore credits are:
+            - Used directly as value-function targets (no discounting).
+            - Used directly as advantages after subtracting V(s_t) baseline
+              (no GAE, which assumes temporal reward structure).
         """
         tau = slice(self.start, self.end)
         rewards_ep = self.rewards_raw[tau]
@@ -402,31 +428,39 @@ class TrajectoryBuffer:
         dones_ep = torch.zeros_like(rewards_ep, dtype=torch.bool)
         dones_ep[-1] = True
 
-        # --- Check if we're in causal_rl mode (step rewards are zero) ---
-        has_step_rewards = rewards_ep.sum().item() != 0.0
+        # --- Check if we're in causal_rl mode ---
+        # Use the explicit flag instead of the fragile rewards_ep.sum() != 0 heuristic.
+        # The old heuristic would incorrectly trigger causal mode when standard RL
+        # step rewards happened to cancel to zero.
+        is_causal = self.causal_rl
 
         # --- Handle credits if provided ---
         if credits is not None:
             if hasattr(credits, "redistribute_rewards") and callable(credits.redistribute_rewards):
-                cr = credits.redistribute_rewards()
+                cr = credits.redistribute_rewards(
+                    gamma=self.causal_gamma,
+                    scheme=self.causal_scheme,
+                )
                 credits_vec = torch.as_tensor(cr, dtype=torch.float32)
             else:
                 credits_vec = torch.as_tensor(credits, dtype=torch.float32)
 
-            # DEBUG: Check length matching
-            #import sys
-            #if credits_vec.numel() != rewards_ep.numel():
-            #    print(f"[CAUSAL-WARNING] Credits length {credits_vec.numel()} != episode length {rewards_ep.numel()}", file=sys.stderr)
-            #    print(f"  Credits: {credits_vec}", file=sys.stderr)
-            #else:
-            #    if credits_vec.sum() > 0:
-            #        print(f"[CAUSAL-OK] Episode {rewards_ep.numel()} steps, credits sum={credits_vec.sum():.4f}", file=sys.stderr)
+            # Length-alignment guard: credits MUST match episode length 1:1.
+            # When causal_rl=True the simulator always consults the agent for
+            # every action transition (including single-binding), so
+            # len(action_transitions) == len(env.step() calls) == ep_len.
+            # A mismatch indicates a real bug; do NOT silently pad/truncate.
+            ep_len = rewards_ep.numel()
+            cr_len = credits_vec.numel()
+            if cr_len != ep_len:
+                raise RuntimeError(
+                    f"[CAUSAL-RL] Credits length ({cr_len}) != episode length ({ep_len}). "
+                    f"This indicates a bug in the causal trace / simulator step alignment."
+                )
 
             if mode == "replace":
-                # Use redistributed rewards directly as returns (causal mode)
                 returns_ep = credits_vec
             else:
-                # Add credits to original rewards, then discount
                 modified_rewards = rewards_ep + credits_vec
                 returns_ep = discount_returns(modified_rewards, self.gam)
         else:
@@ -435,30 +469,17 @@ class TrajectoryBuffer:
             credits_vec = None
 
         # --- Compute advantages ---
-        if not has_step_rewards and credits_vec is not None:
-            # Causal RL mode with value function integration:
-            # In causal mode, step rewards are zero. The actual return signal comes from credits.
-            # We compute cumulative credits (which are the TRUE returns), then use standard GAE
-            # to compute advantages. This way:
-            # - Value network learns to predict cumulative credits (the true returns)
-            # - GAE provides variance reduction through temporal smoothing
-            # - Advantage signal is clean and properly bootstrapped
-
-            # Credits are per-step redistributed rewards from causal traces
-            # We need to compute proper returns and advantages from them
-            # Use standard discount_returns to get cumulative discounted credits
-            returns_ep = discount_returns(credits_vec, self.gam)
-
-            # Now use standard GAE with credits as the reward signal
-            adv_ep = compute_advantages(
-                credits_vec,
-                values_ep,
-                self.gam,
-                self.lam,
-                dones=dones_ep
-            )
+        if credits_vec is not None and is_causal:
+            # CAUSAL RL MODE
+            # Credits are per-action causal attributions, not temporal rewards.
+            # Value targets: credits directly (no discounting — credit[t] is the
+            #   total reward attributable to action t, not a future-looking sum).
+            # Advantages: credit[t] - V(s_t)  (simple baseline subtraction,
+            #   no GAE which assumes temporal reward structure).
+            returns_ep = credits_vec
+            adv_ep = credits_vec - values_ep
         else:
-            # Normal mode: use step rewards for advantages
+            # STANDARD RL MODE: temporal rewards → GAE advantages
             adv_ep = compute_advantages(rewards_ep, values_ep, self.gam, self.lam, dones=dones_ep)
 
         if self.returns_.numel() == 0:
@@ -472,7 +493,7 @@ class TrajectoryBuffer:
 
         # DEBUG: Log advantage statistics for causal RL
         #import sys
-        #if not has_step_rewards and credits_vec is not None:
+        #if is_causal and credits_vec is not None:
         #    mean_adv = adv_ep.mean().item()
         #    std_adv = adv_ep.std().item() if len(adv_ep) > 1 else 0.0
         #    print(f"[ADV-STATS] Ep len={len(adv_ep)}, credits_sum={credits_vec.sum():.2f}, "
@@ -522,6 +543,7 @@ class TrajectoryBuffer:
         self.actions.clear()
         self.token_ids.clear()
         self.logpis_nodes.clear()
+        self.logpis_meta.clear()
         self.target_pi.clear()
         self.q_first.clear()
 
@@ -537,12 +559,19 @@ class TrajectoryBuffer:
     def _normalize_advantages(self, adv: Tensor) -> Tensor:
         """Normalize advantages to zero mean and unit variance.
 
-        Use population-standard-deviation (unbiased=False) for stability and add
-        a small epsilon to avoid division by zero when the advantages are constant.
+        Use population-standard-deviation (unbiased=False) for stability.
+        When the std is very small (e.g., all episodes produce the same return),
+        center only (subtract mean) without dividing by near-zero std.
+        This preserves gradient magnitude when the policy is at a local optimum
+        and all episodes look similar.
         """
         eps = 1e-8
+        low_variance_threshold = 1e-4
         std = adv.std(unbiased=False)
         mean = adv.mean()
+        if std.item() < low_variance_threshold:
+            # Low variance: center only, preserve gradient magnitude
+            return adv - mean
         return (adv - mean) / (std + eps)
 
     @torch.no_grad()
@@ -619,11 +648,31 @@ class TrajectoryBuffer:
 
             if total_expected > 0:
                 if lp.numel() != total_expected:
-                    # Try to recover: if we only have a_transition and lp is longer, truncate; if shorter, pad zeros.
-                    # Warn once so you can inspect upstream ordering/length.
-                    print(f"[WARN:get] old logpis length {lp.numel()} != nA+nP {total_expected} (sample {i}). "
-                          f"{'Truncating' if lp.numel() > total_expected else 'Padding with zeros'}.")
+                    # Detailed diagnostics to track ordering/length mismatches between
+                    # stored per-step logpis and the node counts in the HeteroData sample.
+                    debug_flag = os.environ.get('GP_DEBUG_NET_ORDER', '0') == '1'
+                    info = {
+                        'sample_index': i,
+                        'lp_len': int(lp.numel()),
+                        'expected_nA_nP': int(total_expected),
+                        'nA': int(nA),
+                        'nP': int(nP),
+                        'g_node_types': list(g.node_types) if hasattr(g, 'node_types') else None,
+                        'a_batch_len': int(getattr(g['a_transition'], 'batch', torch.tensor([], dtype=torch.int64)).numel()) if 'a_transition' in g.node_types else None,
+                        'p_batch_len': int(getattr(g['postpone'], 'batch', torch.tensor([], dtype=torch.int64)).numel()) if 'postpone' in g.node_types else None,
+                        'stored_meta': self.logpis_meta[i] if i < len(self.logpis_meta) else None,
+                    }
 
+                    msg = (f"[ERROR:get] old logpis length {info['lp_len']} != nA+nP {info['expected_nA_nP']} "
+                           f"(sample {i}). nA={info['nA']} nP={info['nP']}. "
+                           f"node_types={info['g_node_types']}. a_batch_len={info['a_batch_len']} p_batch_len={info['p_batch_len']}")
+
+                    # If debugging is enabled, raise an error with diagnostics to force a fix upstream.
+                    if debug_flag:
+                        raise RuntimeError(msg + "\nSet GP_DEBUG_NET_ORDER=0 to fallback to legacy padding behaviour.")
+
+                    # Otherwise, fall back to legacy behaviour but log the mismatch so it's visible.
+                    print(f"[WARN:get] {msg} Falling back to padding/truncation for now.")
                     if lp.numel() > total_expected:
                         lp = lp[:total_expected]
                     else:

@@ -18,6 +18,12 @@ class AEPN_Env(Env):
         super().__init__()
         self.pn = aepn
         self.frozen_pn = copy.deepcopy(self.pn)
+        # Ensure frozen copy does not carry over causal traces from previous runs
+        try:
+            if hasattr(self.frozen_pn, 'causal_trace') and self.frozen_pn.causal_trace is not None:
+                self.frozen_pn.causal_trace.flush()
+        except Exception:
+            pass
         self.metadata = None
 
         # gym specific
@@ -83,8 +89,12 @@ class AEPN_Env(Env):
         if self.debug:
             print(f"Entered reset with current reward for PN: {self.pn.reward} \n")
         self.pn = copy.deepcopy(self.frozen_pn)
-        # ensure per-episode action index alignment with buffer indices
-        self.pn._action_index = 0
+        # Ensure the active PN starts with a fresh causal trace
+        try:
+            if hasattr(self.pn, 'causal_trace') and self.pn.causal_trace is not None:
+                self.pn.causal_trace.flush()
+        except Exception:
+            pass
         if self.pn.network_tag.is_evolution():
             self.pn.get_to_first_action()
 
