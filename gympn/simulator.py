@@ -1477,7 +1477,7 @@ class GymProblem(SimProblem):
         - `policy_kwargs` (dict): Arguments to the policy model constructor, passed through `json.loads`. Default: `{"hidden_layers": [64]}`.
         - `policy_lr` (float): Policy model learning rate. Default: `3e-4`.
         - `policy_updates` (int): Number of policy model updates per epoch. Default: `2`.
-        - `policy_kld_limit` (float): KL divergence limit for early stopping. Default: `0.01`.
+        - `policy_kld_limit` (float or None): KL divergence limit for early stopping. Default: `None` (disabled — not recommended for variable action sets).
         - `policy_weights` (str): Filename for initial policy weights. Default: `""` (empty string).
         - `policy_network` (str): Filename for initial policy network. Default: `""` (empty string).
         - `score` (bool): Whether to have multi-objective training. Default: `False`.
@@ -1645,7 +1645,11 @@ class GymProblem(SimProblem):
         # Store training history for programmatic access
         self.training_history = history if history is not None else {}
 
-        logger.training_end(agent.best_test_metric if hasattr(agent, 'best_test_metric') else 0.0)
+        # Report best metric: prefer test metric, fall back to best training return
+        best_metric = getattr(agent, 'best_test_metric', float('-inf'))
+        if best_metric == float('-inf') and history is not None and 'mean_returns' in history:
+            best_metric = float(np.max(history['mean_returns']))
+        logger.training_end(best_metric)
 
         # Finish W&B run
         if wandb_logger:

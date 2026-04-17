@@ -32,11 +32,11 @@ Used for learning action probabilities:
 from gympn.networks import GNNPolicyNetwork
 
 policy_net = GNNPolicyNetwork(
-    input_dim=64,           # Feature dimension (from metadata)
-    hidden_dim=128,         # Hidden layer dimension
-    output_dim=num_actions, # Number of actions
-    num_layers=2,           # Graph convolution layers
-    dropout=0.0             # Dropout rate
+    input_dim=64,  # Feature dimension (from metadata)
+    hidden_dim=128,  # Hidden layer dimension
+    output_dim=num_actions,  # Number of actions
+    num_layers=2,  # Graph convolution layers
+    dropout=0.0  # Dropout rate
 )
 ```
 

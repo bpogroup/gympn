@@ -145,8 +145,13 @@ def make_parser():
                         help='policy model updates per epoch')
     policy.add_argument('--policy_kld_limit',
                         type=float,
-                        default=1, #0.01
-                        help='KL divergence limit used for early stopping')
+                        default=None,
+                        help='KL divergence limit for early stopping (default: disabled). '
+                             'Not recommended for variable action sets — PPO clip handles trust region.')
+    policy.add_argument('--lr_schedule',
+                        type=lambda x: str(x).lower() == 'true',
+                        default=False,
+                        help='whether to use cosine annealing learning rate schedule')
     policy.add_argument('--policy_weights',
                         type=str,
                         default="",#"policy-500.h5",
@@ -447,21 +452,21 @@ def make_agent(args, metadata=None):
                         value_network=value_network, value_lr=args.value_lr, value_updates=args.value_updates,
                         gam=args.gam, lam=args.lam, kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus,
                         causal_scheme=causal_scheme, causal_gamma=causal_gamma, causal_pg=causal_pg,
-                        causal_rl=causal_rl)
+                        causal_rl=causal_rl, lr_schedule=getattr(args, 'lr_schedule', False))
     elif args.algorithm == 'ppo-clip':
         agent = PPOAgent(policy_network=policy_network, method='clip', eps=args.eps,
                          policy_lr=args.policy_lr, policy_updates=args.policy_updates,
                          value_network=value_network, value_lr=args.value_lr, value_updates=args.value_updates,
                          gam=args.gam, lam=args.lam, kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus,
                          causal_scheme=causal_scheme, causal_gamma=causal_gamma, causal_pg=causal_pg,
-                         causal_rl=causal_rl)
+                         causal_rl=causal_rl, lr_schedule=getattr(args, 'lr_schedule', False))
     elif args.algorithm == 'ppo-penalty':
         agent = PPOAgent(policy_network=policy_network, method='penalty', c=args.c,
                          policy_lr=args.policy_lr, policy_updates=args.policy_updates,
                          value_network=value_network, value_lr=args.value_lr, value_updates=args.value_updates,
                          gam=args.gam, lam=args.lam, kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus,
                          causal_scheme=causal_scheme, causal_gamma=causal_gamma, causal_pg=causal_pg,
-                         causal_rl=causal_rl)
+                         causal_rl=causal_rl, lr_schedule=getattr(args, 'lr_schedule', False))
 
 
 

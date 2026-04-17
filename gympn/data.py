@@ -415,12 +415,44 @@ class TrajectoryBuffer:
             - Tensor/list length T          -> per-step causal attributions
             - object with .redistribute_rewards() -> will be called to get length-T vector
 
-        In causal RL mode, credits[t] is "how much total reward did action t cause?"
-        — a retrospective per-action attribution, NOT a temporal step-reward.
-        Therefore credits are:
-            - Used directly as value-function targets (no discounting).
-            - Used directly as advantages after subtracting V(s_t) baseline
-              (no GAE, which assumes temporal reward structure).
+        ═══════════════════════════════════════════════════════════════════
+        Causal RL Mode — Credits-as-Rewards with GAE(γ=1, λ)
+        ═══════════════════════════════════════════════════════════════════
+
+        When causal_rl=True, credits[t] = c_t is the causal attribution for
+        action t (how much total reward did action t cause?).  By construction,
+        Σ_t c_t = episode return.  We treat these as step rewards and apply
+        standard GAE but with γ=1 (no discounting) to avoid the position-
+        dependent bias that γ<1 would introduce on credits.
+
+        Value targets:  V_target(t) = Σ_{k≥t} c_k  (sum of future credits)
+        ──────────────────────────────────────────────────────────────────
+        With γ=1, this is just the cumulative remaining credit.  V(s_t) learns
+        to predict "how much total credit is still ahead from state s_t".
+        The Bellman equation holds:  V(s_t) = c_t + V(s_{t+1}).
+
+        Why γ=1 (not the configured γ):
+        Credits are complete per-action attributions.  Discounting with γ<1
+        would create systematic position-dependent bias (earlier steps get
+        larger discounted sums simply due to more future terms, not because
+        the credit signal is less reliable).
+
+        Advantages:  GAE with γ=1 and the configured λ
+        ──────────────────────────────────────────────────────────────────
+          δ_t = c_t + V(s_{t+1}) − V(s_t)      (Bellman holds with γ=1)
+          A_t = Σ_l λ^l δ_{t+l}                 (multi-step GAE)
+
+        Why GAE instead of pure credit-baseline (A_t = c_t − V(s_t)):
+        The pure approach (λ=0 equivalent) oversmooths advantages — V quickly
+        learns E[c_t|s_t], making A_t ≈ 0 and killing the gradient signal
+        even for suboptimal policies.  Multi-step GAE (λ>0) requires V to
+        predict the *entire* future trajectory correctly before A_t → 0,
+        sustaining the learning signal much longer.
+
+        Policy gradient:
+            ∇J ≈ Σ_t A_t ∇log π(a_t|s_t)
+        where A_t combines per-step credit attribution (from redistribution)
+        with multi-step temporal structure (from GAE).
         """
         tau = slice(self.start, self.end)
         rewards_ep = self.rewards_raw[tau]
@@ -470,14 +502,20 @@ class TrajectoryBuffer:
 
         # --- Compute advantages ---
         if credits_vec is not None and is_causal:
-            # CAUSAL RL MODE
-            # Credits are per-action causal attributions, not temporal rewards.
-            # Value targets: credits directly (no discounting — credit[t] is the
-            #   total reward attributable to action t, not a future-looking sum).
-            # Advantages: credit[t] - V(s_t)  (simple baseline subtraction,
-            #   no GAE which assumes temporal reward structure).
-            returns_ep = credits_vec
-            adv_ep = credits_vec - values_ep
+            # CAUSAL RL MODE — GAE(γ=1, λ) on credits-as-rewards
+            #
+            # Use γ=1 for credits to avoid position-dependent discount bias.
+            # Bellman holds: V(s_t) = c_t + V(s_{t+1}) with γ=1.
+            #
+            # Value targets: sum of future credits (discounted returns with γ=1).
+            # Advantages: GAE with γ=1 and configured λ.
+            #
+            # This prevents the "oversmoothing" problem of pure credit-baseline
+            # (A_t = c_t − V(s_t)) where V quickly learns E[c_t|s_t] and kills
+            # the gradient signal.  Multi-step GAE sustains learning longer.
+            _causal_gamma = 1.0  # no discounting on credits
+            returns_ep = discount_returns(credits_vec, _causal_gamma)
+            adv_ep = compute_gae(credits_vec, values_ep, _causal_gamma, self.lam, dones=dones_ep)
         else:
             # STANDARD RL MODE: temporal rewards → GAE advantages
             adv_ep = compute_advantages(rewards_ep, values_ep, self.gam, self.lam, dones=dones_ep)
@@ -566,11 +604,12 @@ class TrajectoryBuffer:
         and all episodes look similar.
         """
         eps = 1e-8
-        low_variance_threshold = 1e-4
+        low_variance_threshold = 0.01
         std = adv.std(unbiased=False)
         mean = adv.mean()
         if std.item() < low_variance_threshold:
-            # Low variance: center only, preserve gradient magnitude
+            # Low variance: don't normalize at all — preserve raw advantage magnitudes.
+            # Normalizing would amplify noise when the policy is near-optimal.
             return adv - mean
         return (adv - mean) / (std + eps)
 

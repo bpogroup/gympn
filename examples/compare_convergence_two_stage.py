@@ -29,13 +29,13 @@ class ComparisonConfig:
         self.num_seeds = 10 
         # Run longer by default per user's request
         self.epochs = 30
-        self.episodes_per_epoch = 10
+        self.episodes_per_epoch = 20       # was 10: more data → lower-variance advantages
         self.max_episode_length = None
         self.batch_size = 32
 
         self.policy_lr = 3e-4
-        self.value_lr = 1e-3
-        self.entropy_coeff = 0.01
+        self.value_lr = 3e-4               # was 1e-3: lower for γ=1 value targets (wider range)
+        self.entropy_coeff = 0.005
 
         self.ppo_eps = 0.2
         self.use_causal_rl = True
@@ -76,15 +76,14 @@ class ConvergenceComparisonTwoStage:
             'batch_size': self.config.batch_size,
             'max_episode_length': self.config.max_episode_length,
             'policy_lr': self.config.policy_lr,
-            'policy_updates': 3,  # Critical: limit gradient steps to prevent overfitting on small batches
+            'policy_updates': 2,             # fewer inner updates to prevent cumulative KLD drift
             'value_lr': self.config.value_lr,
-            'value_updates': 10,  # Critical: match policy updates frequency for stable baselines
+            'value_updates': 10,             # (only used by standalone value training, not combined)
             'gam': self.config.gam,
             'lam': self.config.lam,
             'eps': self.config.ppo_eps,
             'vf_coeff': 0.5,
             'ent_bonus': self.config.entropy_coeff,
-            'policy_kld_limit': 0.2,
             'causal_rl': causal_rl,
             'algorithm': 'ppo-clip',
             'verbose': 1,
@@ -94,6 +93,8 @@ class ConvergenceComparisonTwoStage:
             'open_tensorboard': False,
             'test_in_train': False,
             "save_freq": 1000000,
+            'policy_kld_limit': 0.1,       # KL early stopping to prevent catastrophic updates
+            'lr_schedule': True,            # cosine annealing LR decay
         }
 
     def _create_two_stage_env(self, causal_rl=False) -> GymProblem:

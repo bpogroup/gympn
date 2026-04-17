@@ -12,7 +12,7 @@ from gympn.visualisation import Visualisation
 
 if __name__ == "__main__":
 
-    train=False #set to False to test a trained model
+    train=True #set to False to test a trained model
     run_name = "2025-05-29-19-21-45_run"
 
     # Instantiate a simulation problem.

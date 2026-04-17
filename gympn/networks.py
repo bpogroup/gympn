@@ -12,7 +12,8 @@ from torch_geometric.utils import softmax as pyg_softmax
 # Helper: ensure HGTConv never sees an empty node-type tensor.
 # Returns a patched x_dict and the set of node types we "dummied".
 # ---------------------------------------------------------------------
-def _prepare_x_dict_for_conv(x_dict, input_size, graph=None, params_iter=None):
+def _prepare_x_dict_for_conv(x_dict, input_size, graph=None, params_iter=None,
+                              seen_dims=None):
     device = torch.device('cpu')
     dtype = torch.float32
     if params_iter is not None:
@@ -22,7 +23,7 @@ def _prepare_x_dict_for_conv(x_dict, input_size, graph=None, params_iter=None):
         except Exception:
             pass
 
-    # Infer input dim
+    # Infer a global fallback input dim
     input_dim = None
     if isinstance(input_size, int) and input_size > 0:
         input_dim = input_size
@@ -53,7 +54,9 @@ def _prepare_x_dict_for_conv(x_dict, input_size, graph=None, params_iter=None):
     for ntype in node_types:
         x = (x_dict or {}).get(ntype)
         if x is None or x.size(0) == 0:
-            x_fixed[ntype] = torch.zeros((1, input_dim), device=device, dtype=dtype)
+            # Use the per-type dim if known, otherwise fall back to the global dim
+            dim = (seen_dims or {}).get(ntype, input_dim)
+            x_fixed[ntype] = torch.zeros((1, dim), device=device, dtype=dtype)
             dummies.add(ntype)
         else:
             x_fixed[ntype] = x
@@ -107,10 +110,28 @@ class HGTStack(nn.Module):
 
         self.drop = nn.Dropout(self.dropout)
 
+        # Track per-node-type input feature dims so that dummy tensors for
+        # temporarily-empty types use the correct width after LazyLinear
+        # layers have already been materialized.
+        self._input_dims: Dict[str, int] = {}
+
     def forward(self, x_dict, edge_index_dict, input_size, graph, params_iter):
         out = x_dict
+
+        # Record input feature dims from non-empty types (persists across calls)
+        for ntype, x in (out or {}).items():
+            if x is not None and x.numel() > 0:
+                self._input_dims[ntype] = x.size(-1)
+
         for li, conv in enumerate(self.convs):
-            x_clean, dummies = _prepare_x_dict_for_conv(out, input_size, graph=graph, params_iter=params_iter)
+            # First layer: node types may have heterogeneous input dims →
+            # use the recorded per-type dims.  Later layers: all types share
+            # hidden_channels, so the default single-dim inference is fine.
+            layer_dims = self._input_dims if li == 0 else None
+            x_clean, dummies = _prepare_x_dict_for_conv(
+                out, input_size, graph=graph, params_iter=params_iter,
+                seen_dims=layer_dims,
+            )
             y = conv(x_clean, edge_index_dict)  # dict -> dict
 
             # Residual (only if enabled)

@@ -236,8 +236,12 @@ class DCLAgent(Agent):
             # Cross-entropy toward the planner-improved target
             ce = -(tpi * logprobs).sum() / max(1.0, float(tpi.numel()))
 
-            # Entropy regularization
-            ent = -(probs * logprobs).sum() / max(1.0, float(probs.numel()))
+            # Entropy regularization (normalized for variable action spaces)
+            if hasattr(batch, 'batch') and batch.batch is not None:
+                from gympn.agents import _normalized_entropy
+                ent = _normalized_entropy(probs.view(-1), logprobs.view(-1), batch.batch.data)
+            else:
+                ent = -(probs * logprobs).sum() / max(1.0, float(probs.numel()))
 
             # Optional value regression to rollout target (mean of q_first if vector)
             loss_v = torch.tensor(0.0, dtype=torch.float32, device=probs.device)
