@@ -34,7 +34,7 @@ class ComparisonConfig:
         self.batch_size = 32
 
         self.policy_lr = 3e-4
-        self.value_lr = 3e-4               # was 1e-3: lower for γ=1 value targets (wider range)
+        self.value_lr = 1e-3               # was 1e-3: lower for γ=1 value targets (wider range)
         self.entropy_coeff = 0.005
 
         self.ppo_eps = 0.2

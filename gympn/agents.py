@@ -1480,7 +1480,14 @@ class Agent:
         else:
             kld = torch.tensor(0.0, device=new_probs.device)
 
-        ent = -torch.mean(new_probs * new_logpis)  # coarse entropy over all nodes
+        # Normalized entropy using combined batch index (same as causal path)
+        _ent_parts = []
+        if has_a and idx_a is not None:
+            _ent_parts.append(idx_a)
+        if has_p and idx_p is not None:
+            _ent_parts.append(idx_p)
+        _ent_idx = torch.cat(_ent_parts, dim=0) if _ent_parts else idx_a
+        ent = _normalized_entropy(new_probs, new_logpis, _ent_idx)
 
         # === DECOUPLED: Train policy and value with separate backward passes ===
         # This prevents value loss gradients from perturbing the policy network,
