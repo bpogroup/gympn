@@ -37,11 +37,15 @@ class ComparisonConfig:
     def __init__(self):
         # Small defaults for quick smoke test — increase for real experiments
         self.max_episode_timesteps = 10
-        self.num_seeds = 10
+        self.num_seeds = 3
         self.epochs = 30
         self.episodes_per_epoch = 20
         self.max_episode_length = None
         self.batch_size = 32
+        # Deterministic (argmax) evaluation every `test_freq` epochs via
+        # test_in_train. This captures the GREEDY policy's score, distinct from
+        # the noisy sampled-policy training return.
+        self.test_freq = 5
 
         self.policy_lr = 3e-4
         self.value_lr = 3e-4
@@ -108,7 +112,8 @@ class ConvergenceComparisonParallelDisjoint:
             "agent_seed": None,
             "use_wandb": False,
             "open_tensorboard": False,
-            "test_in_train": False,
+            "test_in_train": True,
+            "test_freq": self.config.test_freq,
             "save_freq": 1_000_000,
         }
 
@@ -238,15 +243,29 @@ class ConvergenceComparisonParallelDisjoint:
         return np.nanmean(stacked, axis=0), np.nanstd(stacked, axis=0)
 
     def _analyze_results(self):
-        logger.info("Analysis summary:")
+        logger.info(f"Analysis summary (across {self.config.num_seeds} seeds):")
+        # Number of populated deterministic-eval points (history pre-allocates one
+        # extra slot that stays 0; slice it off so it doesn't corrupt max/final).
+        n_test = self.config.epochs // self.config.test_freq
         for label, key in [("PPO-Clip", "ppo_clip"), ("PPO+Causal", "ppo_causal")]:
-            mean_ret, std_ret = self._extract_metric(self.results[key], "mean_returns")
+            mean_ret, _ = self._extract_metric(self.results[key], "mean_returns")
             if mean_ret is None:
                 logger.info(f"  {label}: no data")
                 continue
+
+            # Deterministic (argmax) evaluation captured via test_in_train.
+            test_mean, test_std = self._extract_metric(self.results[key], "test_mean_returns")
+            if test_mean is not None and n_test > 0:
+                test_mean = test_mean[:n_test]
+                greedy_best = float(np.max(test_mean))
+                greedy_final = float(test_mean[-1])
+                greedy_str = f"GREEDY(eval) best={greedy_best:.2f} final={greedy_final:.2f}"
+            else:
+                greedy_str = "GREEDY(eval) n/a"
+
             logger.info(
-                f"  {label}: final mean return = {mean_ret[-1]:.2f}, "
-                f"best = {np.max(mean_ret):.2f}"
+                f"  {label}: SAMPLED(train) best={np.max(mean_ret):.2f} "
+                f"final={mean_ret[-1]:.2f}  |  {greedy_str}"
             )
 
     # ── save results to JSON ──────────────────────────────────────────────

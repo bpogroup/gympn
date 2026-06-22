@@ -156,7 +156,7 @@ def discount_rewards(rewards, gam):
 
     return returns
 
-def apply_causal_credits(causal_trace, gamma=0.9, scheme='flow'):
+def apply_causal_credits(causal_trace, gamma=0.9, scheme='flow_dag'):
     """
     Apply causal credits to redistribute rewards based on causal trace information.
 
@@ -281,6 +281,53 @@ def compute_gae(rewards: Tensor, values: Tensor, gamma: float, lam: float,
     return compute_advantages(rewards, values, gamma, lam, dones=dones, last_value=last_value)
 
 
+def smdp_discounted_returns(rewards: Tensor, discounts: Tensor) -> Tensor:
+    """Return-to-go with a PER-STEP discount (Semi-Markov / SMDP).
+
+    ``discounts[t] = e^{-beta * tau_t}`` is the discount applied to the
+    continuation after step t, where tau_t is the elapsed (wall-clock) time
+    between decision t and decision t+1. With discounts == 1 this reduces to
+    the undiscounted (gamma=1) sum used by the legacy causal path.
+
+        G_t = r_t + discounts[t] * G_{t+1}
+    """
+    T = rewards.shape[0]
+    out = torch.zeros_like(rewards)
+    G = 0.0
+    for t in range(T - 1, -1, -1):
+        G = float(rewards[t]) + float(discounts[t]) * G
+        out[t] = G
+    return out
+
+
+def smdp_gae(rewards: Tensor, values: Tensor, discounts: Tensor, lam: float,
+             dones: Optional[Tensor] = None) -> Tensor:
+    """GAE with a PER-STEP (SMDP) discount instead of a constant gamma.
+
+        delta_t = r_t + d_t * V(s_{t+1}) - V(s_t)
+        A_t     = delta_t + d_t * lam * A_{t+1}
+    where d_t = discounts[t] * mask_t  (mask=0 at a terminal step, dropping the
+    bootstrap). This is the time-aware advantage of SMDP actor-critic: the
+    continuation V(s_{t+1}) is discounted by the actual sojourn, so a decision
+    that only spends time (e.g. postpone) carries its opportunity cost.
+    """
+    T = rewards.shape[0]
+    device = rewards.device
+    if dones is None:
+        masks = torch.ones(T, dtype=torch.float32, device=device)
+    else:
+        masks = 1.0 - dones.to(dtype=torch.float32, device=device)
+    next_values = torch.cat([values[1:], torch.zeros(1, dtype=values.dtype, device=device)])
+    adv = torch.zeros(T, dtype=torch.float32, device=device)
+    gae = 0.0
+    for t in range(T - 1, -1, -1):
+        d = float(discounts[t]) * float(masks[t])
+        delta = float(rewards[t]) + d * float(next_values[t]) - float(values[t])
+        gae = delta + d * lam * gae
+        adv[t] = gae
+    return adv
+
+
 class TrajectoryBuffer:
     """
     DCL-ready episodic buffer.
@@ -299,13 +346,26 @@ class TrajectoryBuffer:
     """
 
     def __init__(self, gam=1.0, lam=1.0, data_type='hetero', action_mode="node_selection",
-                 causal_scheme='flow', causal_gamma=0.9, causal_pg=False, causal_rl=False):
+                 causal_scheme='flow_dag', causal_gamma=0.9, causal_pg=False, causal_rl=False,
+                 causal_self_credit=1.0, causal_lam=0.0, causal_beta=0.0):
         self.gam = float(gam)
         self.lam = float(lam)
         self.data_type = data_type
         self.action_mode = action_mode
         self.causal_scheme = causal_scheme
         self.causal_gamma = float(causal_gamma)
+        self.causal_self_credit = float(causal_self_credit)
+        # SMDP discount rate for the causal advantage: the continuation after a
+        # decision is discounted by e^{-causal_beta * tau}, tau = elapsed time to
+        # the next decision (from per-step clocks). 0.0 = no time discounting
+        # (legacy gamma=1 behaviour). >0 gives time an opportunity cost, so a
+        # decision that only spends time (postpone) is correctly penalised.
+        self.causal_beta = float(causal_beta)
+        # GAE lambda used ONLY for the causal-RL advantage (credits-as-rewards,
+        # γ=1). Default 0.0 = TD(0): each action keeps its own causal credit c_t
+        # plus a one-step value bootstrap, with no raw cross-action credit
+        # smearing. Raising it (→1) re-introduces multi-step temporal mixing.
+        self.causal_lam = float(causal_lam)
         self.causal_pg = causal_pg
         self.causal_rl = bool(causal_rl)
 
@@ -319,6 +379,10 @@ class TrajectoryBuffer:
         # Metadata about stored logpis: record node counts at storage time to debug ordering issues
         self.logpis_meta: List[dict] = []
         self.token_ids: List[List[int]] = []
+
+        # Per-step decision time (wall-clock of the simulator at the decision).
+        # Used to derive sojourn times tau_t for SMDP discounting.
+        self.times: List[float] = []
 
         # DCL fields (lists; must be aligned with states)
         self.target_pi: List[Tensor] = []
@@ -339,8 +403,10 @@ class TrajectoryBuffer:
     def store(self, state, action, reward, logprob, value, logpis,
               token_ids: Optional[List[int]] = None,
               target_pi: Optional[Tensor] = None,
-              q_first: Optional[Tensor] = None):
+              q_first: Optional[Tensor] = None,
+              time: Optional[float] = None):
         """Append one interaction; always append placeholders for DCL fields to keep alignment."""
+        self.times.append(0.0 if time is None else float(time))
         # Deep-copy the state to freeze the graph structure at storage time. This
         # prevents later environment mutations from changing node counts and
         # causing mismatches between stored logpis and the graph snapshot used
@@ -416,43 +482,48 @@ class TrajectoryBuffer:
             - object with .redistribute_rewards() -> will be called to get length-T vector
 
         ═══════════════════════════════════════════════════════════════════
-        Causal RL Mode — Credits-as-Rewards with GAE(γ=1, λ)
+        Causal RL Mode — Credits-as-rewards with TD(0)  (γ=1, λ=causal_lam=0)
         ═══════════════════════════════════════════════════════════════════
 
         When causal_rl=True, credits[t] = c_t is the causal attribution for
-        action t (how much total reward did action t cause?).  By construction,
-        Σ_t c_t = episode return.  We treat these as step rewards and apply
-        standard GAE but with γ=1 (no discounting) to avoid the position-
-        dependent bias that γ<1 would introduce on credits.
+        action t (how much total reward did action t cause?).  Under the legacy
+        "flow" scheme Σ_t c_t = episode return exactly; under the default
+        "flow_dag" scheme Σ_t c_t ≤ episode return, because the *uncontrollable*
+        fraction of each reward (the part traced only to root/evolution tokens,
+        owed to no action) is deliberately left unassigned rather than smeared
+        across actions.
 
-        Value targets:  V_target(t) = Σ_{k≥t} c_k  (sum of future credits)
+        We treat the credits as step rewards (γ=1, no discounting) and form
+        advantages with GAE at λ = self.causal_lam (default 0.0 → one-step TD):
+
+            Value target: G_t = Σ_{k≥t} c_k        (return-to-go over credits)
+            Advantage:    A_t = c_t + V(s_{t+1}) − V(s_t)        (TD(0), λ=0)
+
+        Why λ=0 (TD) rather than either extreme:
         ──────────────────────────────────────────────────────────────────
-        With γ=1, this is just the cumulative remaining credit.  V(s_t) learns
-        to predict "how much total credit is still ahead from state s_t".
-        The Bellman equation holds:  V(s_t) = c_t + V(s_{t+1}).
+          • Pure baseline A_t = c_t − V(s_t) gives token-producing actions a
+            clean signal, but POSTPONE actions receive c_t = 0 by construction
+            (they manipulate no tokens, see causal_traces.redistribute_rewards
+            with include_postpone=False), so V learns ~0 there and A ≈ 0 — the
+            policy can never learn *when to wait*, even though waiting may be a
+            good strategy.
+          • Full GAE (λ→1) gives postpone a bootstrap signal but re-mixes each
+            real action's advantage with FUTURE actions' raw credits
+            (A_t ≈ Σ_l λ^l c_{t+l}), smearing the precise per-action attribution
+            back into an ordinary temporal return — defeating causal credit.
 
-        Why γ=1 (not the configured γ):
-        Credits are complete per-action attributions.  Discounting with γ<1
-        would create systematic position-dependent bias (earlier steps get
-        larger discounted sums simply due to more future terms, not because
-        the credit signal is less reliable).
+        TD(0) is exactly "pure causal baseline + a one-step value bootstrap":
+            A_t = [c_t − E[c_t|s_t]]  +  [V(s_{t+1}) − E[Σ_{k>t}c_k | s_t]]
+        For a token-producing action the c_t term dominates (signal stays clean,
+        and the bootstrap is the value *estimate*, NOT the raw credit c_{t+1}, so
+        there is no cross-action credit smearing).  For postpone, c_t = 0, so
+        A_t = V(s_{t+1}) − V(s_t): a genuine "did waiting reach a better state
+        than expected?" signal — the only kind of signal a non-token-touching
+        decision can have.
 
-        Advantages:  GAE with γ=1 and the configured λ
-        ──────────────────────────────────────────────────────────────────
-          δ_t = c_t + V(s_{t+1}) − V(s_t)      (Bellman holds with γ=1)
-          A_t = Σ_l λ^l δ_{t+l}                 (multi-step GAE)
-
-        Why GAE instead of pure credit-baseline (A_t = c_t − V(s_t)):
-        The pure approach (λ=0 equivalent) oversmooths advantages — V quickly
-        learns E[c_t|s_t], making A_t ≈ 0 and killing the gradient signal
-        even for suboptimal policies.  Multi-step GAE (λ>0) requires V to
-        predict the *entire* future trajectory correctly before A_t → 0,
-        sustaining the learning signal much longer.
-
-        Policy gradient:
-            ∇J ≈ Σ_t A_t ∇log π(a_t|s_t)
-        where A_t combines per-step credit attribution (from redistribution)
-        with multi-step temporal structure (from GAE).
+        self.causal_lam is exposed as a dial: 0.0 = TD (recommended, minimal
+        smearing); raise toward 1.0 only if you want more multi-step propagation
+        at the cost of blurring per-action credit.
         """
         tau = slice(self.start, self.end)
         rewards_ep = self.rewards_raw[tau]
@@ -472,6 +543,8 @@ class TrajectoryBuffer:
                 cr = credits.redistribute_rewards(
                     gamma=self.causal_gamma,
                     scheme=self.causal_scheme,
+                    self_credit=self.causal_self_credit,
+                    beta=self.causal_beta,
                 )
                 credits_vec = torch.as_tensor(cr, dtype=torch.float32)
             else:
@@ -502,23 +575,39 @@ class TrajectoryBuffer:
 
         # --- Compute advantages ---
         if credits_vec is not None and is_causal:
-            # CAUSAL RL MODE — GAE(γ=1, λ) on credits-as-rewards
+            # CAUSAL RL MODE — credits-as-rewards with SMDP discounting.
             #
-            # Use γ=1 for credits to avoid position-dependent discount bias.
-            # Bellman holds: V(s_t) = c_t + V(s_{t+1}) with γ=1.
+            # The A-E PN is a Semi-Markov DP: the time between decisions varies.
+            # We discount the continuation after each decision by e^{-beta*tau_t},
+            # where tau_t is the elapsed clock time to the next decision. This
+            # gives time an opportunity cost, so a decision that only spends time
+            # (postpone, c_t = 0) gets a NEGATIVE advantage instead of a free
+            # positive bootstrap (the bug that made postpone collapse on
+            # multi-stage envs). causal_beta = 0 recovers the legacy gamma=1
+            # behaviour. See CAUSAL_REDISTRIBUTION_SMDP_THEORY.md (Route A).
             #
-            # Value targets: sum of future credits (discounted returns with γ=1).
-            # Advantages: GAE with γ=1 and configured λ.
-            #
-            # This prevents the "oversmoothing" problem of pure credit-baseline
-            # (A_t = c_t − V(s_t)) where V quickly learns E[c_t|s_t] and kills
-            # the gradient signal.  Multi-step GAE sustains learning longer.
-            _causal_gamma = 1.0  # no discounting on credits
-            returns_ep = discount_returns(credits_vec, _causal_gamma)
-            adv_ep = compute_gae(credits_vec, values_ep, _causal_gamma, self.lam, dones=dones_ep)
+            #   per-step discount: d_t = e^{-beta * tau_t}
+            #   value target:      G_t = c_t + d_t * G_{t+1}
+            #   advantage:         A_t = c_t + d_t*V(s_{t+1}) - V(s_t)   (+ lam)
+            times_ep = torch.tensor(self.times[self.start:self.end], dtype=torch.float32)
+            if times_ep.numel() >= 2:
+                taus = times_ep[1:] - times_ep[:-1]
+                taus = torch.cat([taus, torch.zeros(1, dtype=torch.float32)])
+            else:
+                taus = torch.zeros_like(credits_vec)
+            taus = torch.clamp(taus, min=0.0)
+            discounts = torch.exp(-self.causal_beta * taus)
+            returns_ep = smdp_discounted_returns(credits_vec, discounts)
+            adv_ep = smdp_gae(credits_vec, values_ep, discounts, self.causal_lam, dones=dones_ep)
         else:
             # STANDARD RL MODE: temporal rewards → GAE advantages
             adv_ep = compute_advantages(rewards_ep, values_ep, self.gam, self.lam, dones=dones_ep)
+            # Fix #3: value target = GAE / TD(λ) return (advantage + V), which is
+            # lower-variance than the Monte-Carlo return-to-go set above. Applied
+            # only to the genuine standard-PPO path (no credits); the causal /
+            # credits paths keep their own return targets.
+            if credits_vec is None:
+                returns_ep = adv_ep + values_ep
 
         if self.returns_.numel() == 0:
             self.returns_ = returns_ep.clone()
@@ -582,6 +671,7 @@ class TrajectoryBuffer:
         self.token_ids.clear()
         self.logpis_nodes.clear()
         self.logpis_meta.clear()
+        self.times.clear()
         self.target_pi.clear()
         self.q_first.clear()
 
@@ -595,22 +685,19 @@ class TrajectoryBuffer:
 
     @torch.no_grad()
     def _normalize_advantages(self, adv: Tensor) -> Tensor:
-        """Normalize advantages to zero mean and unit variance.
+        """Standard per-batch advantage normalization: zero mean, unit variance.
 
-        Use population-standard-deviation (unbiased=False) for stability.
-        When the std is very small (e.g., all episodes produce the same return),
-        center only (subtract mean) without dividing by near-zero std.
-        This preserves gradient magnitude when the policy is at a local optimum
-        and all episodes look similar.
+        ``(adv - mean) / (std + eps)`` with population std (unbiased=False). Applied
+        when the agent's ``normalize_advantages`` flag is set (default ON, standard
+        PPO). It is needed to learn low-margin tasks (tiny raw advantages would give
+        too weak a gradient otherwise). The downside — the step not decaying at
+        convergence → post-peak drift — is handled by best-checkpoint restore, not
+        by disabling normalization (which under-learns low-headroom envs). See
+        INSTABILITY_ANALYSIS.md.
         """
         eps = 1e-8
-        low_variance_threshold = 0.01
-        std = adv.std(unbiased=False)
         mean = adv.mean()
-        if std.item() < low_variance_threshold:
-            # Low variance: don't normalize at all — preserve raw advantage magnitudes.
-            # Normalizing would amplify noise when the policy is near-optimal.
-            return adv - mean
+        std = adv.std(unbiased=False)
         return (adv - mean) / (std + eps)
 
     @torch.no_grad()

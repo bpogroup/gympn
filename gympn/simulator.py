@@ -54,13 +54,20 @@ class GymProblem(SimProblem):
         :param debugging: if set to True, produces more information for debugging purposes (defaults to True).
     """
 
-    def __init__(self, debugging=True, binding_priority=lambda bindings: bindings[0], tag='e', has_var_attrs=True, solver=None, plot_observations=False, allow_postpone=False, causal_rl=False):
+    def __init__(self, debugging=True, binding_priority=lambda bindings: bindings[0], tag='e', has_var_attrs=True, solver=None, plot_observations=False, allow_postpone=False, causal_rl=False, causal_postpone_tokenflow=False):
         super().__init__(debugging, binding_priority)
 
         self.network_tag = NetworkTag(tag)  # boolean to indicate if it is time to take action ('a') or evolutions (i.e. normal events, 'e')
         self.has_var_attrs = has_var_attrs  # boolean to indicate if the problem has variable attributes (necessary for DRL)
         self.allow_postpone = allow_postpone  # boolean to indicate if the problem allows postponing actions
         self.just_postponed = False  # boolean to indicate if the system just postponed
+        # When True, postpone is recorded in the causal trace as a real
+        # token-flow transition (consume-and-recreate the action-eligible tokens,
+        # with the postpone sentinel as their producer) so it becomes a node in
+        # the token DAG and can receive flow credit. When False (default) postpone
+        # is a sink-less sentinel that occupies its step slot but gets zero credit
+        # (credit flows *through* it). See CAUSAL_ADVANTAGE_TD0.md (Design C).
+        self.causal_postpone_tokenflow = causal_postpone_tokenflow
 
         self.reward_functions = {} # reward functions are associated to events/actions through a dictionary for backward compatibility with simpn events
         self.var_attributes = {} # similarly, places need to be associated with the attributes of their tokens
@@ -97,6 +104,9 @@ class GymProblem(SimProblem):
         self.causal_rl = causal_rl  # whether to use causal traces for reward assignment
         if self.causal_rl:
             self.causal_trace = CausalTraces()  # tune gamma/lam if needed
+            # Single source of truth: redistribute_rewards() reads this to decide
+            # whether postpone sentinels are treated as credit sinks.
+            self.causal_trace.postpone_tokenflow = self.causal_postpone_tokenflow
 
         self._debugging = True
 
@@ -498,7 +508,8 @@ class GymProblem(SimProblem):
                          solver=None,
                          plot_observations=False,
                          allow_postpone=self.allow_postpone,  # propagate flags
-                         causal_rl=self.causal_rl)
+                         causal_rl=self.causal_rl,
+                         causal_postpone_tokenflow=self.causal_postpone_tokenflow)
 
         # carry flags explicitly (in case constructor defaults differ)
         ret.allow_postpone = self.allow_postpone
@@ -1232,91 +1243,41 @@ class GymProblem(SimProblem):
 
         while self.clock <= self.length and active_model:
             bindings, active_model = self.bindings()
-            # NOTE: bindings() may advance self.clock past self.length when
-            # the next enabled binding is scheduled beyond the horizon.
-            # We still fire evolution bindings that were returned because
-            # they were causally triggered by actions taken within the horizon.
-            # Without this, the very last completion event gets lost (off-by-one).
+            # Finite-horizon premise: NO transition may fire past self.length.
+            # bindings() may advance the clock to the next scheduled event; if that
+            # event lies beyond the horizon, the episode ends WITHOUT firing it
+            # (work not completed by the deadline yields no reward). This keeps the
+            # simulated return well-defined as "reward accrued within [0, length]".
+            if self.clock > self.length:
+                active_model = False
+                break
+
             if len(bindings) > 0 and self.network_tag.is_evolution():
-                #if self.just_postponed:
-                    #print("Postpone taking place!")
                 self.just_postponed = False
                 binding = random.choice(bindings)
                 run.append(binding)
                 result_tokens = self.fire(binding)
-                #if binding[-1]._id in self.reward_functions.keys():
                 self.update_reward(binding, result_tokens)
                 i += 1
-                #print(f"Evolution fired at time {self.clock}")
 
-            elif len(bindings) > 0 and self.network_tag.is_action():#give control to the gym env by returning the current observation
-                if self.clock > self.length:
-                    # Clock advanced past horizon — no more actions allowed
-                    active_model = False
-                elif not self.allow_postpone:
+            elif len(bindings) > 0 and self.network_tag.is_action():  # hand control to the gym env
+                if not self.allow_postpone:
                     condition = True if self.causal_rl else len(bindings) > 1
-                    #if len(bindings) > 1: #only call the environment if there is more than one action available
-                    if condition: #the old condition creates problems with causal tracing
+                    if condition:  # only consult the agent when there is a real choice
                         return self.get_graph_observation(), self.clock > self.length or not active_model, i
                     else:
                         binding = bindings[0]
                         run.append(binding)
                         result_tokens = self.fire(binding)
-                        #if binding[-1]._id in self.reward_functions.keys():
                         self.update_reward(binding, result_tokens)
                         i += 1
                 else:
-                    # allow_postpone is True
-                    # After a postpone + evolutions, the agent can now choose again.
-                    # Do NOT terminate the episode just because just_postponed was True.
+                    # allow_postpone: the agent may also choose to postpone.
                     return self.get_graph_observation(), self.clock > self.length or not active_model, i
             else:
                 active_model = False
 
-        # --- Drain remaining evolution events past the horizon ---
-        # Actions taken within the horizon may have triggered evolution events
-        # (e.g., completion events) scheduled slightly past self.length.
-        # Fire all such pending evolution events so their rewards are counted.
-        self._drain_pending_evolutions(run, i)
-
         return self.get_graph_observation(), self.clock > self.length or not active_model, i
-
-    def _drain_pending_evolutions(self, run, i):
-        """
-        Fire any remaining evolution events that were causally triggered by
-        actions taken within the horizon.  This is called after the main
-        run_evolutions loop exits (clock > length) to ensure that completion
-        events for the last actions are not lost.
-
-        Only fires reward-producing evolution events; non-reward events
-        (e.g., arrival recycling) and action bindings are skipped to avoid
-        cascading side-effects past the horizon.
-        """
-        max_drain = 50  # Safety limit to prevent infinite loops
-        for _ in range(max_drain):
-            # Collect only reward-producing evolution bindings
-            timed_bindings_evo = []
-            for t in self.events:
-                if t._id not in self.reward_functions:
-                    continue  # Skip non-reward events (e.g., arrive)
-                for (binding, time) in self.event_bindings(t):
-                    timed_bindings_evo.append((binding, time, t))
-            if not timed_bindings_evo:
-                break
-            timed_bindings_evo.sort(key=lambda b: b[1])
-            earliest = timed_bindings_evo[0]
-            # Only fire events reasonably close to the horizon
-            # (caused by actions within the episode, not far-future events)
-            if earliest[1] > self.length * 2:
-                break
-            # Advance clock and fire
-            if self.clock < earliest[1]:
-                self.clock = earliest[1]
-            binding = earliest
-            run.append(binding)
-            result_tokens = self.fire(binding)
-            self.update_reward(binding, result_tokens)
-            i += 1
 
     def update_reward(self, timed_binding, result_tokens=None):
         binding, time, transition = timed_binding
@@ -2010,11 +1971,26 @@ class GymProblem(SimProblem):
         if not self.causal_rl:
             return
 
-        input_tokens = []
-        output_tokens = []
-        # Capture old token IDs before mutation so transition input_tokens use pre-postpone IDs
-        old_id_map = {}  # id(token_object) -> old _id
+        if self.causal_postpone_tokenflow:
+            self._update_causal_trace_postpone_tokenflow(bindings)
+        else:
+            self._update_causal_trace_postpone_sinkless(bindings)
 
+    def _update_causal_trace_postpone_sinkless(self, bindings):
+        # B.4 fix (see CAUSAL_RL_REDISTRIBUTION_PROBLEMS.md #3): postpone must NOT
+        # re-ID the eligible tokens nor insert itself into the token lineage.
+        # The old behavior gave every eligible token a fresh id with a
+        # `postpone_` sentinel as its creating transition, which made postpone a
+        # graph-ancestor of those tokens — so any downstream reward consuming them
+        # leaked credit back to the no-op postpone. We now leave tokens untouched,
+        # so credit flows *through* postpone to the real upstream producers.
+        #
+        # We still register a postpone sentinel *transition* (is_action=True,
+        # reward 0, no output tokens) so it occupies exactly one action slot,
+        # preserving the 1:1 credit/step alignment that TrajectoryBuffer.finish()
+        # asserts. With no output tokens it can never be a credit sink under any
+        # scheme, so it always receives zero redistributed reward.
+        input_tokens = []
         for timed_binding in bindings:
             try:
                 binding, _, transition = timed_binding
@@ -2025,43 +2001,89 @@ class GymProblem(SimProblem):
                 for place, token in binding:
                     if token not in input_tokens:
                         input_tokens.append(token)
-                        # Save old ID before mutating
-                        old_id = getattr(token, '_id', None)
-                        old_id_map[id(token)] = old_id
-                        # Assign new ID using identity-based lookup.
-                        # place.marking.index(token) uses SimToken.__eq__ which
-                        # compares by value — this can find the WRONG token when
-                        # multiple tokens with the same value sit in a place.
-                        # Use id() (Python object identity) to locate the exact object.
-                        new_id = str(uuid.uuid4())
-                        identity_map = {id(t): i for i, t in enumerate(place.marking)}
-                        obj_idx = identity_map.get(id(token))
-                        if obj_idx is not None:
-                            place.marking[obj_idx]._id = new_id
-                        else:
-                            token._id = new_id
-                        # Add the same token (now updated) to output_tokens
-                        output_tokens.append(token)
+
+        # Create a sentinel transition object with a unique _id
+        # (TransitionHistory.add_transition accesses transition._id).
+        import types
+        sentinel_transition = types.SimpleNamespace(_id=f"postpone_{uuid.uuid4()}")
+
+        # Record the eligible tokens (by their current, unchanged _id) as inputs
+        # for diagnostics; no output tokens are produced and no token lineage is
+        # mutated.
+        self.causal_trace.register_transition(
+            transition=sentinel_transition,
+            input_tokens=input_tokens,
+            output_tokens=[],
+            is_action=True,
+            reward=0.0,
+            time=self.clock
+        )
+
+    def _update_causal_trace_postpone_tokenflow(self, bindings):
+        # Token-flow postpone (Design C, see CAUSAL_ADVANTAGE_TD0.md): model
+        # postpone as a real transition that CONSUMES the action-eligible tokens
+        # and RECREATES them in place (same token object, fresh _id), with the
+        # postpone sentinel as their producer. This inserts postpone into the
+        # token DAG (old token -> postpone -> new token), so credit can flow back
+        # to it like any action.
+        #
+        # No deferred re-emission is needed: in an A-E PN the clock is already
+        # advanced by postpone() (tag A->E + clock to next event), and action
+        # transitions fire at the clock, not at their input tokens' timestamps.
+        # Recreating the tokens in place therefore preserves the dynamics exactly
+        # and only changes lineage.
+        #
+        # NOTE: requires redistribute_rewards(include_postpone=True) for the
+        # recreated (output) tokens to be treated as credit sinks owned by the
+        # postpone action. That is wired via causal_trace.postpone_tokenflow.
+        import types
+
+        input_tokens = []        # eligible token objects (post-mutation)
+        output_tokens = []       # same objects, now carrying the new _id (sinks)
+        old_id_map = {}          # id(token_object) -> old _id (pre-mutation)
+
+        for timed_binding in bindings:
+            try:
+                binding, _, transition = timed_binding
+            except Exception:
+                continue
+
+            if isinstance(transition, SimAction):
+                for place, token in binding:
+                    if token in input_tokens:
+                        continue
+                    input_tokens.append(token)
+                    # Save the pre-postpone id, then assign a fresh id to the
+                    # exact object in the marking (identity lookup, NOT value
+                    # equality, so duplicate-valued tokens are disambiguated).
+                    old_id_map[id(token)] = getattr(token, '_id', None)
+                    new_id = str(uuid.uuid4())
+                    obj_idx = next(
+                        (i for i, t in enumerate(place.marking) if t is token),
+                        None
+                    )
+                    if obj_idx is not None:
+                        place.marking[obj_idx]._id = new_id
+                    else:
+                        token._id = new_id
+                    output_tokens.append(token)
 
         if not input_tokens:
             return
 
-        # Create a sentinel transition object with a unique _id
-        # (TokenHistory.add_token accesses transition._id, so we can't pass None)
-        import types
         sentinel_transition = types.SimpleNamespace(_id=f"postpone_{uuid.uuid4()}")
 
-        # Build a list of "old" input tokens for the transition history
-        # We need objects with the OLD _id for input_tokens
+        # Lightweight wrappers carrying the OLD ids, so the transition/token
+        # history records old-id inputs -> new-id outputs (postpone as the hop).
         class _OldIdToken:
-            """Lightweight wrapper to supply the old _id for transition history recording."""
             def __init__(self, old_id):
                 self._id = old_id
 
-        old_input_tokens = [_OldIdToken(old_id_map[id(t)]) for t in input_tokens
-                            if old_id_map.get(id(t)) is not None]
+        old_input_tokens = [
+            _OldIdToken(old_id_map[id(t)]) for t in input_tokens
+            if old_id_map.get(id(t)) is not None
+        ]
 
-        # Register the transition using old IDs for input and new IDs for output
         self.causal_trace.register_transition(
             transition=sentinel_transition,
             input_tokens=old_input_tokens,
@@ -2071,8 +2093,9 @@ class GymProblem(SimProblem):
             time=self.clock
         )
 
-        # Register each output token in token_history to maintain causal chain
-        # The output tokens (with new IDs) are children of the input tokens (with old IDs)
+        # Register each recreated token (new id) as a child of its old self with
+        # the postpone sentinel as the creating transition, so the lineage DAG
+        # routes downstream credit through postpone.
         for out_token in output_tokens:
             self.causal_trace.register_token(
                 out_token, sentinel_transition, old_input_tokens, time=self.clock
