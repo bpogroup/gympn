@@ -133,11 +133,10 @@ class Agent:
                  policy_network, value_network, policy_lr=1e-4, policy_updates=1,
                  value_lr=1e-3, value_updates=25,
                  gam=0.99, lam=0.97, normalize_advantages=True, eps=0.2,
-                 kld_limit=None, ent_bonus=0.01, test_in_train=True, vf_coeff=0.05,
+                 kld_limit=None, ent_bonus=0.0, test_in_train=True, vf_coeff=0.05,
                  normalize_returns=False, lr_schedule=False,
-                 causal_scheme='flow_dag', causal_gamma=0.9, causal_pg=False,
-                 causal_rl=False, causal_self_credit=1.0, causal_lam=0.0,
-                 causal_beta=0.0):
+                 causal_scheme='lrq', causal_pg=False,
+                 causal_rl=False, causal_beta=0.0, causal_mu=0.0):
         self.policy_model = policy_network
         self.policy_loss = NotImplementedError
         self.policy_optimizer = torch.optim.Adam(params=list(policy_network.parameters()),
@@ -155,12 +154,10 @@ class Agent:
         self.causal_rl = bool(causal_rl)
         self.buffer = TrajectoryBuffer(gam=gam, lam=lam,
                                        causal_scheme=causal_scheme,
-                                       causal_gamma=causal_gamma,
                                        causal_pg=causal_pg,
                                        causal_rl=causal_rl,
-                                       causal_self_credit=causal_self_credit,
-                                       causal_lam=causal_lam,
-                                       causal_beta=causal_beta)
+                                       causal_beta=causal_beta,
+                                       causal_mu=causal_mu)
         self.normalize_advantages = normalize_advantages
         self.normalize_returns = normalize_returns  # New parameter
         self.lr_schedule = lr_schedule  # New parameter
@@ -191,13 +188,18 @@ class Agent:
 
         """
         self.policy_model.eval()  # set model to evaluation mode
-        pi = self.policy_model(state)
-        logpi = pi.log()
+        # Rollout/eval only: no autograd graph is needed here (the stored logpis
+        # are detached old-policy constants; the policy fit recomputes a fresh
+        # forward on batches). Wrapping in no_grad avoids building and discarding
+        # an autograd graph on every single environment step.
+        with torch.no_grad():
+            pi = self.policy_model(state)
+            logpi = pi.log()
 
-        if deterministic:
-            action = torch.argmax(pi).item()  # Choose the action with the highest probability
-        else:
-            action = torch.multinomial(torch.exp(logpi.squeeze(1)), 1)[0]
+            if deterministic:
+                action = torch.argmax(pi).item()  # Choose the action with the highest probability
+            else:
+                action = torch.multinomial(torch.exp(logpi.squeeze(1)), 1)[0]
 
         if return_logprob:
             if os.environ.get('GP_DEBUG_PPO', '0') == '1':
@@ -221,26 +223,6 @@ class Agent:
         self.value_model.eval()  # set model to evaluation mode
         with torch.no_grad():  # disable gradient calculation
             return self.value_model(state)
-
-    def redistribute_rewards(self, token_history, reward_transitions):
-        """
-        reward_transitions: dict of {transition_id: reward_value}
-        Returns: dict of {action_index: cumulative_reward}
-        """
-        from collections import defaultdict
-        action_rewards = defaultdict(float)
-
-        for transition_id, reward in reward_transitions.items():
-            token_ids = token_history.get_tokens_by_transition(transition_id)
-            for tid in token_ids:
-                chain = token_history.get_causal_chain(tid)
-                if chain:
-                    per_action_reward = reward / len(chain)
-                    for action, _ in chain:
-                        if action is not None:
-                            action_rewards[action] += per_action_reward
-
-        return action_rewards
 
     def train(self, env, episodes=10, epochs=1, max_episode_length=None, verbose=0, save_freq=1,
               logdir=None, batch_size=64, sort_states=False, test_env=None, test_freq=5, test_episodes=10,
@@ -571,9 +553,9 @@ class Agent:
                     if pn is not None and getattr(pn, '_debugging', False) and pn.causal_rl:
                         ct = pn.causal_trace
                         tok_count, trans_count = ct.stats()
-                        # compute a quick redistribution sample (flow) to check sizes
+                        # compute a quick credit sample to check sizes
                         try:
-                            sample_cr = ct.redistribute_rewards(gamma=0.9, scheme='flow_dag')
+                            sample_cr = ct.redistribute_rewards(scheme='lrq')
                         except Exception as e:
                             sample_cr = None
                             import warnings
@@ -848,7 +830,10 @@ class Agent:
         loss = torch.mean(self.policy_loss(new_logprobs, logprobs, advantages)) - self.ent_bonus * ent
 
         try:
-            loss.backward(retain_graph=True)  # compute gradients
+            # No second backward runs on this graph (each batch recomputes a
+            # fresh forward), so retain_graph is unnecessary; dropping it frees
+            # the activation graph immediately.
+            loss.backward()  # compute gradients
         except Exception as e:
             print("Invalid loss", e)
 

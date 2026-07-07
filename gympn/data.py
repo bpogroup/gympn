@@ -156,24 +156,6 @@ def discount_rewards(rewards, gam):
 
     return returns
 
-def apply_causal_credits(causal_trace, gamma=0.9, scheme='flow_dag'):
-    """
-    Apply causal credits to redistribute rewards based on causal trace information.
-
-    Parameters
-    ----------
-    :param causal_trace : CausalTrace object
-    :param gamma : float, per-hop decay factor
-    :param scheme : str, redistribution scheme
-
-    Returns
-    -------
-    action_rewards : list
-        List of redistributed rewards per action.
-    """
-    return torch.tensor(causal_trace.redistribute_rewards(gamma=gamma, scheme=scheme), dtype=torch.float32)
-
-
 def compute_advantages(
     rewards: torch.Tensor,
     values: torch.Tensor,
@@ -281,25 +263,6 @@ def compute_gae(rewards: Tensor, values: Tensor, gamma: float, lam: float,
     return compute_advantages(rewards, values, gamma, lam, dones=dones, last_value=last_value)
 
 
-def smdp_discounted_returns(rewards: Tensor, discounts: Tensor) -> Tensor:
-    """Return-to-go with a PER-STEP discount (Semi-Markov / SMDP).
-
-    ``discounts[t] = e^{-beta * tau_t}`` is the discount applied to the
-    continuation after step t, where tau_t is the elapsed (wall-clock) time
-    between decision t and decision t+1. With discounts == 1 this reduces to
-    the undiscounted (gamma=1) sum used by the legacy causal path.
-
-        G_t = r_t + discounts[t] * G_{t+1}
-    """
-    T = rewards.shape[0]
-    out = torch.zeros_like(rewards)
-    G = 0.0
-    for t in range(T - 1, -1, -1):
-        G = float(rewards[t]) + float(discounts[t]) * G
-        out[t] = G
-    return out
-
-
 def smdp_gae(rewards: Tensor, values: Tensor, discounts: Tensor, lam: float,
              dones: Optional[Tensor] = None) -> Tensor:
     """GAE with a PER-STEP (SMDP) discount instead of a constant gamma.
@@ -346,32 +309,44 @@ class TrajectoryBuffer:
     """
 
     def __init__(self, gam=1.0, lam=1.0, data_type='hetero', action_mode="node_selection",
-                 causal_scheme='flow_dag', causal_gamma=0.9, causal_pg=False, causal_rl=False,
-                 causal_self_credit=1.0, causal_lam=0.0, causal_beta=0.0):
+                 causal_scheme='lrq', causal_pg=False, causal_rl=False,
+                 causal_beta=0.0, causal_mu=0.0):
         self.gam = float(gam)
         self.lam = float(lam)
         self.data_type = data_type
         self.action_mode = action_mode
+        # Only 'lrq' is implemented (all other redistribution schemes were
+        # removed); kept as a parameter so stale configs fail loudly in
+        # redistribute_rewards() rather than silently changing behaviour.
         self.causal_scheme = causal_scheme
-        self.causal_gamma = float(causal_gamma)
-        self.causal_self_credit = float(causal_self_credit)
         # SMDP discount rate for the causal advantage: the continuation after a
         # decision is discounted by e^{-causal_beta * tau}, tau = elapsed time to
         # the next decision (from per-step clocks). 0.0 = no time discounting
         # (legacy gamma=1 behaviour). >0 gives time an opportunity cost, so a
         # decision that only spends time (postpone) is correctly penalised.
         self.causal_beta = float(causal_beta)
-        # GAE lambda used ONLY for the causal-RL advantage (credits-as-rewards,
-        # γ=1). Default 0.0 = TD(0): each action keeps its own causal credit c_t
-        # plus a one-step value bootstrap, with no raw cross-action credit
-        # smearing. Raising it (→1) re-introduces multi-step temporal mixing.
-        self.causal_lam = float(causal_lam)
+        # LRQ hybrid coefficient: A = (1-mu)*A_LRQ + mu*A_GAE, where A_GAE
+        # is the standard SMDP-GAE advantage on the RAW temporal rewards. mu=0
+        # (default) = pure LRQ (no cross-case smearing, foreclosure-blind);
+        # raising it restores a gradient path for resource-contention effects
+        # LRQ cannot see, at the cost of re-admitting temporal smearing. See
+        # CAUSAL_LRQ_PROPOSAL.md §3.
+        self.causal_mu = float(causal_mu)
         self.causal_pg = causal_pg
         self.causal_rl = bool(causal_rl)
 
         # rolling storage
         self.states: List[Dict[str, Any]] = []
         self.actions: List[int] = []
+        # Per-step scalars are accumulated into plain Python lists and only
+        # materialized into 1-D tensors on demand (_materialize_steps). The old
+        # per-step torch.cat made store() O(T^2) in the number of steps and
+        # issued one torch.cat per step; the lists make store() O(1) and rebuild
+        # the tensors with a single cat each, only when a consumer needs them.
+        self._rewards_buf: List[Tensor] = []
+        self._logprobs_buf: List[Tensor] = []
+        self._values_buf: List[Tensor] = []
+        self._steps_dirty: bool = False
         self.rewards_raw: Tensor = torch.empty(0, dtype=torch.float32)
         self.logprobs_sel: Tensor = torch.empty(0, dtype=torch.float32)
         self.values_pred: Tensor = torch.empty(0, dtype=torch.float32)
@@ -407,15 +382,27 @@ class TrajectoryBuffer:
               time: Optional[float] = None):
         """Append one interaction; always append placeholders for DCL fields to keep alignment."""
         self.times.append(0.0 if time is None else float(time))
-        # Deep-copy the state to freeze the graph structure at storage time. This
-        # prevents later environment mutations from changing node counts and
-        # causing mismatches between stored logpis and the graph snapshot used
-        # during training data construction.
-        self.states.append(copy.deepcopy(state))
+        # Freeze the graph structure at storage time so later environment
+        # mutations cannot change node counts and break alignment with the
+        # stored logpis. The observation graph is rebuilt from scratch every step
+        # (no shared/cached skeleton) and only its tensors are read back during
+        # training-data construction, so a tensor-level HeteroData.clone() is
+        # sufficient and ~10x cheaper than a full Python deepcopy. We keep a
+        # shallow copy of the surrounding dict (its 'actions_dict' is never read
+        # back from the buffer during training). See Tier 2.2 in
+        # PERFORMANCE_OPTIMIZATION_PLAN.md.
+        if isinstance(state, dict):
+            frozen = dict(state)
+            g = state.get('graph')
+            frozen['graph'] = g.clone() if hasattr(g, 'clone') else copy.deepcopy(g)
+            self.states.append(frozen)
+        else:
+            self.states.append(state.clone() if hasattr(state, 'clone') else copy.deepcopy(state))
         self.actions.append(int(action))
-        self.rewards_raw = torch.cat([self.rewards_raw, _to_1d_tensor(reward)], dim=0)
-        self.logprobs_sel = torch.cat([self.logprobs_sel, _to_1d_tensor(logprob)], dim=0)
-        self.values_pred = torch.cat([self.values_pred, _to_1d_tensor(value)], dim=0)
+        self._rewards_buf.append(_to_1d_tensor(reward))
+        self._logprobs_buf.append(_to_1d_tensor(logprob))
+        self._values_buf.append(_to_1d_tensor(value))
+        self._steps_dirty = True
         self.logpis_nodes.append(None if logpis is None else logpis.detach().flatten().to(torch.float32))
         # Record expected node counts at storage time (helps detect later mismatches)
         try:
@@ -446,11 +433,28 @@ class TrajectoryBuffer:
 
         self.end += 1
 
+    def _materialize_steps(self):
+        """Rebuild the per-step tensors from the accumulation lists (one cat each).
+
+        Idempotent and cheap: a no-op unless store() appended since the last
+        materialization. Consumers that read rewards_raw/logprobs_sel/values_pred
+        must call this first."""
+        if not self._steps_dirty:
+            return
+        self.rewards_raw = (torch.cat(self._rewards_buf, dim=0) if self._rewards_buf
+                            else torch.empty(0, dtype=torch.float32))
+        self.logprobs_sel = (torch.cat(self._logprobs_buf, dim=0) if self._logprobs_buf
+                             else torch.empty(0, dtype=torch.float32))
+        self.values_pred = (torch.cat(self._values_buf, dim=0) if self._values_buf
+                            else torch.empty(0, dtype=torch.float32))
+        self._steps_dirty = False
+
     def apply_action_rewards(self, action_rewards: dict):
         """
         Replace rewards in the buffer using redistributed rewards per action.
         Each step may be associated with multiple token_ids; we use the first one to find the action.
         """
+        self._materialize_steps()
         new_rewards = []
         for i, token_ids in enumerate(getattr(self, 'token_ids', [])):
             # Use first token_id to trace back to action
@@ -482,49 +486,33 @@ class TrajectoryBuffer:
             - object with .redistribute_rewards() -> will be called to get length-T vector
 
         ═══════════════════════════════════════════════════════════════════
-        Causal RL Mode — Credits-as-rewards with TD(0)  (γ=1, λ=causal_lam=0)
+        Causal RL Mode — LRQ (Lineage-Restricted Q)
         ═══════════════════════════════════════════════════════════════════
 
-        When causal_rl=True, credits[t] = c_t is the causal attribution for
-        action t (how much total reward did action t cause?).  Under the legacy
-        "flow" scheme Σ_t c_t = episode return exactly; under the default
-        "flow_dag" scheme Σ_t c_t ≤ episode return, because the *uncontrollable*
-        fraction of each reward (the part traced only to root/evolution tokens,
-        owed to no action) is deliberately left unassigned rather than smeared
-        across actions.
+        When causal_rl=True, credits[t] = Q_t is the hindsight lineage return
+        of decision t: the FULL discounted sum of every future reward in whose
+        causal lineage the decision sits (per-decision Monte-Carlo Q-sample of
+        the policy-gradient theorem, NOT a redistribution of the return — a
+        reward with k lineage decisions is counted k times by design). The
+        estimator is plain centering:
 
-        We treat the credits as step rewards (γ=1, no discounting) and form
-        advantages with GAE at λ = self.causal_lam (default 0.0 → one-step TD):
+            Value target: G_t = Q_t                 (V_L regresses E[Q_t | s_t])
+            Advantage:    A_t = Q_t − V_L(s_t)      (no GAE/TD chaining)
 
-            Value target: G_t = Σ_{k≥t} c_k        (return-to-go over credits)
-            Advantage:    A_t = c_t + V(s_{t+1}) − V(s_t)        (TD(0), λ=0)
+        Chaining return-to-go/GAE over hindsight credits is deliberately NOT
+        done: backward-assigned mass vanishes from later decisions' return-
+        to-go, systematically undervaluing chain completion (the bias that
+        sank the removed credits-as-rewards schemes; see
+        CAUSAL_REC_CRITICAL_REVIEW.md §3 and CAUSAL_LRQ_PROPOSAL.md).
 
-        Why λ=0 (TD) rather than either extreme:
-        ──────────────────────────────────────────────────────────────────
-          • Pure baseline A_t = c_t − V(s_t) gives token-producing actions a
-            clean signal, but POSTPONE actions receive c_t = 0 by construction
-            (they manipulate no tokens, see causal_traces.redistribute_rewards
-            with include_postpone=False), so V learns ~0 there and A ≈ 0 — the
-            policy can never learn *when to wait*, even though waiting may be a
-            good strategy.
-          • Full GAE (λ→1) gives postpone a bootstrap signal but re-mixes each
-            real action's advantage with FUTURE actions' raw credits
-            (A_t ≈ Σ_l λ^l c_{t+l}), smearing the precise per-action attribution
-            back into an ordinary temporal return — defeating causal credit.
-
-        TD(0) is exactly "pure causal baseline + a one-step value bootstrap":
-            A_t = [c_t − E[c_t|s_t]]  +  [V(s_{t+1}) − E[Σ_{k>t}c_k | s_t]]
-        For a token-producing action the c_t term dominates (signal stays clean,
-        and the bootstrap is the value *estimate*, NOT the raw credit c_{t+1}, so
-        there is no cross-action credit smearing).  For postpone, c_t = 0, so
-        A_t = V(s_{t+1}) − V(s_t): a genuine "did waiting reach a better state
-        than expected?" signal — the only kind of signal a non-token-touching
-        decision can have.
-
-        self.causal_lam is exposed as a dial: 0.0 = TD (recommended, minimal
-        smearing); raise toward 1.0 only if you want more multi-step propagation
-        at the cost of blurring per-action credit.
+        Postpone decisions are lineage members under token-flow postpone, so
+        waiting sees the same rewards discounted from an earlier clock (timing
+        penalty) and a beneficial wait sees the larger mass it enabled.
+        self.causal_mu optionally mixes in the standard SMDP-GAE advantage on
+        raw temporal rewards as a hedge for foreclosure effects (resource
+        contention across cases) that lineage-restricted credit cannot see.
         """
+        self._materialize_steps()
         tau = slice(self.start, self.end)
         rewards_ep = self.rewards_raw[tau]
         values_ep = self.values_pred[tau]
@@ -541,9 +529,7 @@ class TrajectoryBuffer:
         if credits is not None:
             if hasattr(credits, "redistribute_rewards") and callable(credits.redistribute_rewards):
                 cr = credits.redistribute_rewards(
-                    gamma=self.causal_gamma,
                     scheme=self.causal_scheme,
-                    self_credit=self.causal_self_credit,
                     beta=self.causal_beta,
                 )
                 credits_vec = torch.as_tensor(cr, dtype=torch.float32)
@@ -563,6 +549,22 @@ class TrajectoryBuffer:
                     f"This indicates a bug in the causal trace / simulator step alignment."
                 )
 
+            # LRQ: the intra-lineage discount uses TRACE decision times u_t,
+            # while the SMDP sojourns below use BUFFER times (pn.clock read
+            # agent-side). The estimator is only coherent if the two clocks
+            # agree — same guard philosophy as the length check above.
+            if hasattr(credits, 'transition_history'):
+                trace_times = [a.get('time') for a in
+                               credits.transition_history.get_action_transitions()]
+                buf_times = self.times[self.start:self.end]
+                for k, (tt, bt) in enumerate(zip(trace_times, buf_times)):
+                    if tt is not None and abs(float(tt) - float(bt)) > 1e-6:
+                        raise RuntimeError(
+                            f"[LRQ] Decision-clock mismatch at step {k}: trace "
+                            f"u_t={tt} vs buffer time={bt}. The Q-sample discount "
+                            f"and the SMDP sojourns must share one clock."
+                        )
+
             if mode == "replace":
                 returns_ep = credits_vec
             else:
@@ -575,30 +577,34 @@ class TrajectoryBuffer:
 
         # --- Compute advantages ---
         if credits_vec is not None and is_causal:
-            # CAUSAL RL MODE — credits-as-rewards with SMDP discounting.
-            #
-            # The A-E PN is a Semi-Markov DP: the time between decisions varies.
-            # We discount the continuation after each decision by e^{-beta*tau_t},
-            # where tau_t is the elapsed clock time to the next decision. This
-            # gives time an opportunity cost, so a decision that only spends time
-            # (postpone, c_t = 0) gets a NEGATIVE advantage instead of a free
-            # positive bootstrap (the bug that made postpone collapse on
-            # multi-stage envs). causal_beta = 0 recovers the legacy gamma=1
-            # behaviour. See CAUSAL_REDISTRIBUTION_SMDP_THEORY.md (Route A).
-            #
-            #   per-step discount: d_t = e^{-beta * tau_t}
-            #   value target:      G_t = c_t + d_t * G_{t+1}
-            #   advantage:         A_t = c_t + d_t*V(s_{t+1}) - V(s_t)   (+ lam)
-            times_ep = torch.tensor(self.times[self.start:self.end], dtype=torch.float32)
-            if times_ep.numel() >= 2:
-                taus = times_ep[1:] - times_ep[:-1]
-                taus = torch.cat([taus, torch.zeros(1, dtype=torch.float32)])
-            else:
-                taus = torch.zeros_like(credits_vec)
-            taus = torch.clamp(taus, min=0.0)
-            discounts = torch.exp(-self.causal_beta * taus)
-            returns_ep = smdp_discounted_returns(credits_vec, discounts)
-            adv_ep = smdp_gae(credits_vec, values_ep, discounts, self.causal_lam, dones=dones_ep)
+            # LRQ MODE — credits are per-decision hindsight lineage Q-samples
+            # (full reward mass per lineage member, NOT a partition of the
+            # return; see CAUSAL_LRQ_PROPOSAL.md). The policy-gradient-theorem
+            # estimator is plain centering,
+            #   A_t = Q_t - V_L(s_t),
+            # with the value head V_L regressed on Q_t itself (returns_ep) and
+            # NO return-to-go/GAE chaining over the credits — chaining hindsight
+            # credits is exactly what produced the chain-dilution bias in the
+            # removed credits-as-rewards schemes (CAUSAL_REC_CRITICAL_REVIEW.md §3).
+            returns_ep = credits_vec
+            adv_ep = credits_vec - values_ep
+            if self.causal_mu > 0.0:
+                # Foreclosure hedge: mix in the standard SMDP-GAE advantage on
+                # the RAW temporal rewards, with the per-sojourn discount
+                # d_t = e^{-beta*tau_t} from the buffer clocks. Caveat: it
+                # bootstraps with the same critic, which is trained on LRQ
+                # targets, so the hybrid term is approximate — keep mu small.
+                times_ep = torch.tensor(self.times[self.start:self.end], dtype=torch.float32)
+                if times_ep.numel() >= 2:
+                    taus = times_ep[1:] - times_ep[:-1]
+                    taus = torch.cat([taus, torch.zeros(1, dtype=torch.float32)])
+                else:
+                    taus = torch.zeros_like(credits_vec)
+                taus = torch.clamp(taus, min=0.0)
+                discounts = torch.exp(-self.causal_beta * taus)
+                adv_gae = smdp_gae(rewards_ep, values_ep, discounts,
+                                   self.lam, dones=dones_ep)
+                adv_ep = (1.0 - self.causal_mu) * adv_ep + self.causal_mu * adv_gae
         else:
             # STANDARD RL MODE: temporal rewards → GAE advantages
             adv_ep = compute_advantages(rewards_ep, values_ep, self.gam, self.lam, dones=dones_ep)
@@ -633,6 +639,7 @@ class TrajectoryBuffer:
         Close current episode [start:end). Compute returns and advantages for that slice.
         If 'credits' is a stepwise vector (same length as episode), we add it to rewards before discounting.
         """
+        self._materialize_steps()
         tau = slice(self.start, self.end)
         rewards_ep = self.rewards_raw[tau]
         values_ep = self.values_pred[tau]
@@ -675,6 +682,10 @@ class TrajectoryBuffer:
         self.target_pi.clear()
         self.q_first.clear()
 
+        self._rewards_buf.clear()
+        self._logprobs_buf.clear()
+        self._values_buf.clear()
+        self._steps_dirty = False
         self.rewards_raw = torch.empty(0, dtype=torch.float32)
         self.logprobs_sel = torch.empty(0, dtype=torch.float32)
         self.values_pred = torch.empty(0, dtype=torch.float32)
@@ -722,6 +733,7 @@ class TrajectoryBuffer:
           - target_pi split per node type (optional)
           - q_first (per-sample rollout scores)
         """
+        self._materialize_steps()
         N = len(self.states)
         if N == 0:
             raise ValueError("Buffer is empty; store()/finish() before get().")
@@ -754,7 +766,12 @@ class TrajectoryBuffer:
         # build HeteroData list
         data_list: List[HeteroData] = []
         for i, s in enumerate(states):
-            g: HeteroData = copy.deepcopy(s['graph'])
+            # Tier 2.2: per-sample, per-epoch copy used only to attach labels
+            # (y/advantage/value/logprobs/logpis) without mutating the stored
+            # graph. HeteroData.clone() copies the tensors at the torch level and
+            # is far cheaper than copy.deepcopy walking the Python object graph;
+            # the labels land on this clone, never on the buffered graph.
+            g: HeteroData = s['graph'].clone()
             g.y = torch.tensor(actions[i], dtype=torch.long)
             # Ensure scalar shapes for value and advantage
             g.advantage = adv[i].reshape(()).detach()

@@ -112,29 +112,15 @@ def make_parser():
                      help='whether to use causal RL (credit redistribution via causal traces)')
     alg.add_argument('--causal_scheme',
                      type=str,
-                     default='flow_dag',
-                     choices=['flow_dag', 'shapley_dag', 'rec', 'flow', 'exponential', 'linear', 'uniform', 'depth', 'hybrid'],
-                     help='redistribution scheme for causal RL (default: flow_dag, the conserved '
-                          'reverse-topological flow; "rec" is the Return-Equivalent Causal scheme '
-                          '(mass-conserving partition of unity + intra-sojourn discount; provably '
-                          'return-equivalent so it preserves the optimal policy — use causal_beta>0); '
-                          '"shapley_dag" is the Route-B per-reward '
-                          'Shapley decomposition with postpone as a negative timing player '
-                          '(pair with token-flow postpone; use causal_beta>0 like flow_dag — '
-                          'the Shapley credit and the SMDP continuation discount are '
-                          'complementary); "flow" is the legacy BFS+renormalize scheme)')
-    alg.add_argument('--causal_gamma',
-                     type=float,
-                     default=0.9,
-                     help='per-hop decay factor for causal RL redistribution (default: 0.9)')
-    alg.add_argument('--causal_lam',
-                     type=float,
-                     default=0.0,
-                     help='GAE lambda for the causal-RL advantage (credits-as-rewards, gamma=1). '
-                          '0.0 (default) = TD(0): clean per-action credit + one-step value '
-                          'bootstrap so postpone (zero causal credit) is still learnable; '
-                          'higher values add multi-step propagation at the cost of smearing '
-                          'per-action credit.')
+                     default='lrq',
+                     choices=['lrq'],
+                     help='causal credit scheme. Only "lrq" (Lineage-Restricted Q) is implemented: '
+                          'per-decision hindsight Q-samples (full discounted lineage reward, no '
+                          'split) consumed as A = Q - V with NO GAE over credits. Requires '
+                          'causal_postpone_tokenflow=True on the simulator whenever postpone '
+                          'actions are present (enforced at runtime). All other schemes '
+                          '(flow_dag/shapley_dag/rec/flow/...) were removed; see '
+                          'CAUSAL_LRQ_PROPOSAL.md.')
     alg.add_argument('--causal_beta',
                      type=float,
                      default=0.0,
@@ -142,13 +128,14 @@ def make_parser():
                           'after a decision is discounted by exp(-causal_beta * tau), tau = elapsed '
                           'time to the next decision. 0.0 (default) = no time discounting (legacy); '
                           '>0 gives time an opportunity cost so postpone is correctly penalised.')
-    alg.add_argument('--causal_self_credit',
+    alg.add_argument('--causal_mu',
                      type=float,
-                     default=1.0,
-                     help='flow_dag only: fraction [0,1] of a reward carried by an action '
-                          'transition credited to that acting decision itself; the remainder '
-                          'flows to enabling ancestors. 1.0 (default) = action owns its reward, '
-                          '0.0 = legacy ancestor-only behaviour.')
+                     default=0.0,
+                     help='lrq only: hybrid coefficient in [0,1] mixing the LRQ advantage with '
+                          'the standard SMDP-GAE advantage on raw temporal rewards, '
+                          'A = (1-mu)*A_LRQ + mu*A_GAE. 0.0 (default) = pure LRQ (no cross-case '
+                          'smearing, foreclosure-blind); raise it if the foreclosure diagnostic '
+                          'shows resource-contention effects LRQ cannot see (CAUSAL_LRQ_PROPOSAL.md §3).')
     alg.add_argument('--causal_pg',
                      type=lambda x: str(x).lower() == 'true',
                      default=False,
@@ -410,7 +397,7 @@ def make_policy_network(args, metadata=None):
         elif args.environment == 'ActionEvolutionPetriNetEnv':
             policy_network = HeteroActor(
                 input_size=args.policy_kwargs.get("input_size", -1),
-                hidden_size=args.policy_kwargs.get("hidden_size", 256),
+                hidden_size=args.policy_kwargs.get("hidden_size", 64),
                 num_layers=args.policy_kwargs.get("num_layers", 3),
                 metadata=metadata,
                 num_heads=args.policy_kwargs.get("num_heads", 1),
@@ -449,13 +436,18 @@ def make_value_network(args, metadata=None):
     elif args.environment == 'ActionEvolutionPetriNetEnv':
         value_network = HeteroCritic(
             input_size=args.value_kwargs.get("input_size", -1),
-            hidden_size=args.value_kwargs.get("hidden_size", 256),
+            hidden_size=args.value_kwargs.get("hidden_size", 64),
             output_size=args.value_kwargs.get("output_size", 64),
+            # num_layers/residual are the two biggest cost knobs for the HGT critic.
+            # Defaults match the historical hard-coded behaviour (L3, residual on) so
+            # existing configs are unchanged; pass value_kwargs to shrink the critic.
+            num_layers=args.value_kwargs.get("num_layers", 3),
             num_heads=args.value_kwargs.get("num_heads", 1),
             # Default 0.0 for the same eval/train consistency reason as the policy:
             # the critic's rollout values (eval, dropout off) feed GAE, but its
             # targets are regressed in train (dropout on). See INSTABILITY_ANALYSIS.md.
             dropout=args.value_kwargs.get("dropout", 0.0),
+            residual=args.value_kwargs.get("residual", True),
             metadata=metadata
         )
     else:
@@ -484,11 +476,9 @@ def make_agent(args, metadata=None):
     value_network = make_value_network(args, metadata=metadata)
 
     # Extract causal RL config (with safe defaults for backward compatibility)
-    causal_scheme = getattr(args, 'causal_scheme', 'flow_dag')
-    causal_gamma = getattr(args, 'causal_gamma', 0.9)
-    causal_self_credit = getattr(args, 'causal_self_credit', 1.0)
-    causal_lam = getattr(args, 'causal_lam', 0.0)
+    causal_scheme = getattr(args, 'causal_scheme', 'lrq')
     causal_beta = getattr(args, 'causal_beta', 0.0)
+    causal_mu = getattr(args, 'causal_mu', 0.0)
     # causal_pg (advantage replacement) is opt-in only.
     # Standard PPO with GAE + value baseline on redistributed credits
     # is more stable and converges better.
@@ -499,9 +489,9 @@ def make_agent(args, metadata=None):
         agent = PGAgent(policy_network=policy_network,policy_lr=args.policy_lr, policy_updates=args.policy_updates,
                         value_network=value_network, value_lr=args.value_lr, value_updates=args.value_updates,
                         gam=args.gam, lam=args.lam, kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus,
-                        causal_scheme=causal_scheme, causal_gamma=causal_gamma, causal_pg=causal_pg,
-                        causal_rl=causal_rl, causal_self_credit=causal_self_credit,
-                        causal_lam=causal_lam, causal_beta=causal_beta,
+                        causal_scheme=causal_scheme, causal_pg=causal_pg,
+                        causal_rl=causal_rl,
+                        causal_beta=causal_beta, causal_mu=causal_mu,
                         normalize_advantages=getattr(args, 'normalize_advantages', False),
                         lr_schedule=getattr(args, 'lr_schedule', True))
     elif args.algorithm == 'ppo-clip':
@@ -509,9 +499,9 @@ def make_agent(args, metadata=None):
                          policy_lr=args.policy_lr, policy_updates=args.policy_updates,
                          value_network=value_network, value_lr=args.value_lr, value_updates=args.value_updates,
                          gam=args.gam, lam=args.lam, kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus,
-                         causal_scheme=causal_scheme, causal_gamma=causal_gamma, causal_pg=causal_pg,
-                         causal_rl=causal_rl, causal_self_credit=causal_self_credit,
-                         causal_lam=causal_lam, causal_beta=causal_beta,
+                         causal_scheme=causal_scheme, causal_pg=causal_pg,
+                         causal_rl=causal_rl,
+                         causal_beta=causal_beta, causal_mu=causal_mu,
                          normalize_advantages=getattr(args, 'normalize_advantages', False),
                          lr_schedule=getattr(args, 'lr_schedule', True))
     elif args.algorithm == 'ppo-penalty':
@@ -519,9 +509,9 @@ def make_agent(args, metadata=None):
                          policy_lr=args.policy_lr, policy_updates=args.policy_updates,
                          value_network=value_network, value_lr=args.value_lr, value_updates=args.value_updates,
                          gam=args.gam, lam=args.lam, kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus,
-                         causal_scheme=causal_scheme, causal_gamma=causal_gamma, causal_pg=causal_pg,
-                         causal_rl=causal_rl, causal_self_credit=causal_self_credit,
-                         causal_lam=causal_lam, causal_beta=causal_beta,
+                         causal_scheme=causal_scheme, causal_pg=causal_pg,
+                         causal_rl=causal_rl,
+                         causal_beta=causal_beta, causal_mu=causal_mu,
                          normalize_advantages=getattr(args, 'normalize_advantages', False),
                          lr_schedule=getattr(args, 'lr_schedule', True))
 
