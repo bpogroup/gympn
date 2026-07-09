@@ -112,18 +112,20 @@ class Agent:
         If you need stable value training, prefer advantage normalization
         (``normalize_advantages=True``) — but note it can reintroduce post-peak drift.
     kld_limit : float or None, optional
-        The limit on KL divergence for early stopping policy updates.
-        Default is None (disabled).
+        Early-stopping limit on the mean per-state KL(pi_old || pi_new),
+        checked after each inner policy epoch. Default is None (disabled).
 
-        ⚠️  KLD early stopping is INAPPROPRIATE for variable-size action sets
-        (e.g., Petri net environments where enabled transitions change each step):
-          1. The per-sample "KLD" computed here is just the log importance ratio
-             log π_old(a|s) − log π_new(a|s) for the chosen action — NOT a true
-             KL divergence (which requires summing over ALL actions).
-          2. With variable action sets, log-prob magnitudes depend on |A(s)|,
-             making the metric incomparable across states.
-          3. PPO's clipped surrogate already provides a well-defined trust region
-             via the importance ratio clip [1−ε, 1+ε], regardless of |A(s)|.
+        The KL is computed EXACTLY per state, over that state's own (variable
+        size) action set: KL_s = sum_a p_old(a|s) (log p_old − log p_new),
+        then averaged over states — the standard PPO target_kl quantity, valid
+        for variable |A(s)| because old and new always share a state's support.
+        (Historical note: before 2026-07-09 this metric was the SIGNED
+        chosen-action log-ratio — cancellation-prone, high-variance and
+        |A(s)|-dependent — and early stopping was rightly discouraged. That no
+        longer applies.) PPO's clip bounds each surrogate term but NOT the
+        realized policy shift after multiple inner epochs; the KL brake is the
+        guard against the rare catastrophic update that collapses a
+        near-deterministic policy (observed as post-convergence drift).
     ent_bonus : float, optional
         Bonus factor for sampled policy entropy.
 
@@ -1157,8 +1159,9 @@ class Agent:
             history['ent'].append(ent / batches)
             history['policy_core_loss'].append(policy_core_acc / batches)
 
-            # KL early stopping: abort remaining inner updates if KLD exceeds limit
-            if self.kld_limit is not None and abs(history['kld'][-1]) > self.kld_limit:
+            # KL early stopping: abort remaining inner updates once the mean
+            # per-state KL(old || new) exceeds the limit (true KL, >= 0).
+            if self.kld_limit is not None and history['kld'][-1] > self.kld_limit:
                 break
 
         # --- Value: MSE regression on the (GAE) return targets for `value_updates`
@@ -1227,8 +1230,9 @@ class Agent:
             history['ent'].append(ent_acc / batches)
             history['policy_core_loss'].append(ploss_acc / batches)
 
-            # KL early stopping: abort remaining inner updates if KLD exceeds limit
-            if self.kld_limit is not None and abs(history['kld'][-1]) > self.kld_limit:
+            # KL early stopping: abort remaining inner updates once the mean
+            # per-state KL(old || new) exceeds the limit (true KL, >= 0).
+            if self.kld_limit is not None and history['kld'][-1] > self.kld_limit:
                 break
 
         # --- Value: MSE regression on the return-to-go-over-credits targets for
@@ -1300,32 +1304,48 @@ class Agent:
 
         for s in unique_samples:
             parts_new = []
+            parts_old = []
 
             if has_a:
                 mask_a = (idx_a == s)
                 ns_a = new_logpis_a[mask_a].reshape(-1)
                 if ns_a.numel():
                     parts_new.append(ns_a)
+                    if old_logpis_a is not None:
+                        parts_old.append(old_logpis_a[mask_a].reshape(-1))
+                    else:
+                        parts_old.append(ns_a.detach())
 
             if has_p and new_logpis_p is not None:
                 mask_p = (idx_p == s)
                 ns_p = new_logpis_p[mask_p].reshape(-1)
                 if ns_p.numel():
                     parts_new.append(ns_p)
+                    if old_logpis_p is not None:
+                        parts_old.append(old_logpis_p[mask_p].reshape(-1))
+                    else:
+                        # Missing old logpis contribute 0 to the KL (using the
+                        # new values); zeros_like would mean p_old = 1.
+                        parts_old.append(ns_p.detach())
 
             if len(parts_new) == 0:
                 continue
 
             ns_cat = torch.cat(parts_new, dim=0)
+            os_cat = torch.cat(parts_old, dim=0)
             a_idx = int(actions[s])
 
             sel_new.append(ns_cat[a_idx].reshape(()))
             sel_old.append(old_logprob[s].reshape(()))
             sel_adv.append(advantages[s].reshape(()))
 
-            # KLD per sample
-            kld_sample = old_logprob[s].item() - ns_cat[a_idx].item()
-            kld_terms.append(kld_sample)
+            # TRUE per-state KL(old || new) over this state's OWN action set
+            # (see _fit_policy_and_value_model_step for why the previous
+            # chosen-action log-ratio was not a usable trust-region signal).
+            with torch.no_grad():
+                p_old = torch.exp(os_cat)
+                p_old = p_old / p_old.sum().clamp_min(1e-8)
+                kld_terms.append(float((p_old * (os_cat - ns_cat)).sum().item()))
 
         # ----- Policy-only update (fix #1/#2) -----
         # The value net is trained separately for `value_updates` passes in
@@ -1437,8 +1457,10 @@ class Agent:
                 if old_logpis_p is not None:
                     os_p = old_logpis_p[mask_p].reshape(-1)  # 1-D slice
                 else:
-                    # Fallback if you didn’t store old logpis for postpone yet:
-                    os_p = torch.zeros_like(ns_p)
+                    # Old logpis not stored for postpone: use the new values so
+                    # this part contributes 0 to the KL (zeros_like would mean
+                    # log p_old = 0, i.e. p_old = 1 — corrupting the KL).
+                    os_p = ns_p.detach()
                 if ns_p.numel():
                     parts_new.append(ns_p)
                     parts_old.append(os_p)
@@ -1460,10 +1482,16 @@ class Agent:
             sel_old.append(old_logprob[s].reshape(()))
             sel_adv.append(advantages[s].reshape(()))
 
-            # KLD per sample: KL(old || new) = log(p_old) - log(p_new)
-            # This measures how much the new policy diverges from the old policy for this action
-            kld_sample = old_logprob[s].item() - ns_cat[a_idx].item()
-            kld_terms.append(kld_sample)
+            # TRUE per-state KL(old || new) over this state's OWN action set:
+            #   KL_s = sum_a p_old(a|s) * (log p_old(a|s) - log p_new(a|s)).
+            # Non-negative and well-defined for variable-size action sets (old
+            # and new share the state's support), unlike the previous
+            # chosen-action log-ratio, which was signed (batch mean cancels),
+            # single-sample (huge variance) and |A(s)|-dependent.
+            with torch.no_grad():
+                p_old = torch.exp(os_cat)
+                p_old = p_old / p_old.sum().clamp_min(1e-8)
+                kld_terms.append(float((p_old * (os_cat - ns_cat)).sum().item()))
 
         # ----- Policy-only update (fix #1/#2) -----
         # The value net is trained separately for `value_updates` passes in

@@ -1601,7 +1601,9 @@ class GymProblem(SimProblem):
         history = agent.train(env, episodes=args.episodes, epochs=args.epochs,
                     save_freq=args.save_freq, logdir=logdir, verbose=args.verbose,
                     max_episode_length=args.max_episode_length, batch_size=args.batch_size,
-                    test_env=test_env, test_freq=test_freq, wandb_logger=wandb_logger)
+                    test_env=test_env, test_freq=test_freq,
+                    test_episodes=getattr(args, 'test_episodes', 10),
+                    wandb_logger=wandb_logger)
 
         # Store training history for programmatic access
         self.training_history = history if history is not None else {}

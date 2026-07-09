@@ -84,6 +84,7 @@ class HGTStack(nn.Module):
         self.residual = bool(residual)
         self.metadata = metadata
         self.node_types = list(metadata[0])
+        self.hidden_channels = int(hidden_channels)
 
         # HGT layers
         self.convs = nn.ModuleList()
@@ -133,6 +134,16 @@ class HGTStack(nn.Module):
                 seen_dims=layer_dims,
             )
             y = conv(x_clean, edge_index_dict)  # dict -> dict
+
+            # HGTConv only emits node types that are a DESTINATION of some
+            # metadata edge type; a source-only place (e.g. fed purely by the
+            # initial marking, never by an event) vanishes from the dict after
+            # layer 1, and the next layer's k_dict[src] lookup crashes with a
+            # KeyError. Carry such types forward with the correct node count
+            # (zeros; the residual projection below re-injects their features).
+            for ntype, x_prev in x_clean.items():
+                if y.get(ntype) is None:
+                    y[ntype] = x_prev.new_zeros((x_prev.size(0), self.hidden_channels))
 
             # Residual (only if enabled)
             if self.residual:

@@ -136,6 +136,13 @@ def make_parser():
                           'A = (1-mu)*A_LRQ + mu*A_GAE. 0.0 (default) = pure LRQ (no cross-case '
                           'smearing, foreclosure-blind); raise it if the foreclosure diagnostic '
                           'shows resource-contention effects LRQ cannot see (CAUSAL_LRQ_PROPOSAL.md §3).')
+    alg.add_argument('--test_episodes',
+                     type=int,
+                     default=10,
+                     help='episodes averaged per greedy (deterministic) eval point during '
+                          'training (test_in_train). On deterministic envs all episodes are '
+                          'identical so this is a no-op; on stochastic envs raise it for '
+                          'paper-grade eval curves.')
     alg.add_argument('--causal_pg',
                      type=lambda x: str(x).lower() == 'true',
                      default=False,
@@ -163,8 +170,11 @@ def make_parser():
     policy.add_argument('--policy_kld_limit',
                         type=float,
                         default=None,
-                        help='KL divergence limit for early stopping (default: disabled). '
-                             'Not recommended for variable action sets — PPO clip handles trust region.')
+                        help='early-stopping limit on the mean per-state KL(old||new), computed '
+                             'exactly over each state\'s own action set (valid for variable '
+                             '|A(s)|; checked after each inner policy epoch). Default: disabled. '
+                             '~0.15 stops the rare catastrophic updates that collapse a '
+                             'converged policy without braking normal learning.')
     policy.add_argument('--lr_schedule',
                         type=lambda x: str(x).lower() == 'true',
                         default=False,
