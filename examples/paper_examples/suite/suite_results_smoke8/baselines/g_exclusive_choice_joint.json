@@ -1,0 +1,7 @@
+{
+  "env": "g_exclusive_choice_joint",
+  "random_mean": 15.0,
+  "random_std": 0.6324555320336759,
+  "heuristic_mean": 20.0,
+  "heuristic_std": 0.0
+}

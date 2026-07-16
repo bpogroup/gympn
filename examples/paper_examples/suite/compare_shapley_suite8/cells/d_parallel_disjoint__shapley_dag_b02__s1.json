@@ -1,0 +1,15 @@
+{
+  "greedy_curve": [
+    9.0,
+    10.0,
+    10.0,
+    8.0,
+    9.0
+  ],
+  "greedy_final": 9.0,
+  "greedy_best": 10.0,
+  "greedy_drift": 1.0,
+  "env": "d_parallel_disjoint",
+  "method": "shapley_dag_b02",
+  "seed": 1
+}

@@ -1,0 +1,15 @@
+{
+  "greedy_curve": [
+    17.0,
+    18.0,
+    22.0,
+    11.0,
+    11.0
+  ],
+  "greedy_final": 11.0,
+  "greedy_best": 22.0,
+  "greedy_drift": 11.0,
+  "env": "g_exclusive_choice_joint",
+  "method": "flow_dag",
+  "seed": 0
+}

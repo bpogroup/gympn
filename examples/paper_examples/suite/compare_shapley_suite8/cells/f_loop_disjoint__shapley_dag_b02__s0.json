@@ -1,0 +1,15 @@
+{
+  "greedy_curve": [
+    9.0,
+    9.0,
+    0.0,
+    6.0,
+    6.0
+  ],
+  "greedy_final": 6.0,
+  "greedy_best": 9.0,
+  "greedy_drift": 3.0,
+  "env": "f_loop_disjoint",
+  "method": "shapley_dag_b02",
+  "seed": 0
+}

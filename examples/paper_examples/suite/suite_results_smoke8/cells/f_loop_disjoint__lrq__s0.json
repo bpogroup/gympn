@@ -1,0 +1,34 @@
+{
+  "sampled_curve": [
+    3.5,
+    3.25
+  ],
+  "sampled_best": 3.5,
+  "sampled_final": 3.25,
+  "greedy_curve": [
+    0.0,
+    0.0
+  ],
+  "greedy_epochs": [
+    1,
+    2
+  ],
+  "greedy_best": 0.0,
+  "greedy_final": 0.0,
+  "greedy_drift": 0.0,
+  "entropy_curve": [
+    0.9999028245608012,
+    0.9996145168940226
+  ],
+  "entropy_final": 0.9996145168940226,
+  "env": "f_loop_disjoint",
+  "method": "lrq",
+  "seed": 0,
+  "baselines": {
+    "env": "f_loop_disjoint",
+    "random_mean": 5.0,
+    "random_std": 0.6324555320336759,
+    "heuristic_mean": 9.0,
+    "heuristic_std": 0.0
+  }
+}

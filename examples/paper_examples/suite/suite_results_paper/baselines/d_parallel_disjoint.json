@@ -1,0 +1,7 @@
+{
+  "env": "d_parallel_disjoint",
+  "random_mean": 9.0,
+  "random_std": 0.4472135954999579,
+  "heuristic_mean": 10.0,
+  "heuristic_std": 0.0
+}

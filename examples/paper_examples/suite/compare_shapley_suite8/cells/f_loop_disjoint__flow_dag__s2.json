@@ -1,0 +1,15 @@
+{
+  "greedy_curve": [
+    7.0,
+    5.0,
+    6.0,
+    6.4,
+    0.0
+  ],
+  "greedy_final": 0.0,
+  "greedy_best": 7.0,
+  "greedy_drift": 7.0,
+  "env": "f_loop_disjoint",
+  "method": "flow_dag",
+  "seed": 2
+}

@@ -1,0 +1,7 @@
+{
+  "env": "s2_stoch_scaled",
+  "random_mean": 82.05,
+  "random_std": 2.4387496796514396,
+  "heuristic_mean": 90.6,
+  "heuristic_std": 1.1135528725660042
+}

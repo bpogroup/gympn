@@ -1,0 +1,48 @@
+{
+  "a_sequence_joint": {
+    "baselines": {
+      "random": 7.4,
+      "heuristic": 10.0
+    },
+    "cells": {
+      "shapley_dag_b02": [
+        {
+          "greedy_curve": [
+            7.0,
+            7.0,
+            10.0,
+            10.0,
+            10.0
+          ],
+          "greedy_final": 10.0,
+          "greedy_best": 10.0,
+          "greedy_drift": 0.0
+        },
+        {
+          "greedy_curve": [
+            10.0,
+            10.0,
+            10.0,
+            10.0,
+            10.0
+          ],
+          "greedy_final": 10.0,
+          "greedy_best": 10.0,
+          "greedy_drift": 0.0
+        },
+        {
+          "greedy_curve": [
+            10.0,
+            10.0,
+            10.0,
+            10.0,
+            10.0
+          ],
+          "greedy_final": 10.0,
+          "greedy_best": 10.0,
+          "greedy_drift": 0.0
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "sampled_curve": [
+    7.0,
+    6.5
+  ],
+  "sampled_best": 7.0,
+  "sampled_final": 6.5,
+  "greedy_curve": [
+    0.0,
+    0.0
+  ],
+  "greedy_epochs": [
+    1,
+    2
+  ],
+  "greedy_best": 0.0,
+  "greedy_final": 0.0,
+  "greedy_drift": 0.0,
+  "entropy_curve": [
+    0.9999387264251709,
+    0.9994722207387289
+  ],
+  "entropy_final": 0.9994722207387289,
+  "env": "b_sequence_disjoint",
+  "method": "lrq",
+  "seed": 0,
+  "baselines": {
+    "env": "b_sequence_disjoint",
+    "random_mean": 7.4,
+    "random_std": 0.48989794855663565,
+    "heuristic_mean": 9.0,
+    "heuristic_std": 0.0
+  }
+}

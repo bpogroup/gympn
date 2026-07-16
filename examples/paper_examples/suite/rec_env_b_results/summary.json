@@ -1,0 +1,13 @@
+{
+  "env": "b_sequence_disjoint",
+  "scheme": "rec",
+  "causal_beta": 0.2,
+  "random": 7.4,
+  "optimum": 9.0,
+  "greedy_final": [
+    9.0
+  ],
+  "normalized_mean": 1.0,
+  "collapsed": 0,
+  "seeds": 1
+}

@@ -1,0 +1,7 @@
+{
+  "env": "f_loop_disjoint",
+  "random_mean": 5.0,
+  "random_std": 0.6324555320336759,
+  "heuristic_mean": 9.0,
+  "heuristic_std": 0.0
+}

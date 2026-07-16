@@ -1,0 +1,7 @@
+{
+  "env": "h_exclusive_choice_disjoint",
+  "random_mean": 18.4,
+  "random_std": 0.4898979485566356,
+  "heuristic_mean": 20.0,
+  "heuristic_std": 0.0
+}

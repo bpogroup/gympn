@@ -1,0 +1,7 @@
+{
+  "env": "b_sequence_disjoint",
+  "random_mean": 7.45,
+  "random_std": 0.5894913061275798,
+  "heuristic_mean": 9.0,
+  "heuristic_std": 0.0
+}

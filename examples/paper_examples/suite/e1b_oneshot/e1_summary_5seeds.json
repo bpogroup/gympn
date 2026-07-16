@@ -1,0 +1,51 @@
+{
+  "anchors": {
+    "optimum": 12.0,
+    "trap": 7.0,
+    "random": 9.0
+  },
+  "summary": {
+    "ppo": {
+      "greedy_final_per_seed": [
+        12.0,
+        12.0,
+        12.0,
+        12.0,
+        7.0
+      ],
+      "greedy_final_mean": 11.0,
+      "greedy_final_norm": 0.6666666666666667,
+      "sampled_tail_mean": 8.504,
+      "seeds_near_trap": 1,
+      "n": 5
+    },
+    "lrq": {
+      "greedy_final_per_seed": [
+        7.0,
+        12.0,
+        12.0,
+        12.0,
+        7.0
+      ],
+      "greedy_final_mean": 10.0,
+      "greedy_final_norm": 0.33333333333333337,
+      "sampled_tail_mean": 7.843999999999999,
+      "seeds_near_trap": 2,
+      "n": 5
+    },
+    "rec": {
+      "greedy_final_per_seed": [
+        7.0,
+        12.0,
+        12.0,
+        7.0,
+        7.0
+      ],
+      "greedy_final_mean": 9.0,
+      "greedy_final_norm": 4.4408920985006264e-17,
+      "sampled_tail_mean": 8.751999999999999,
+      "seeds_near_trap": 3,
+      "n": 5
+    }
+  }
+}

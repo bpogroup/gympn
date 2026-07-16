@@ -1,0 +1,34 @@
+{
+  "sampled_curve": [
+    76.75,
+    78.0
+  ],
+  "sampled_best": 78.0,
+  "sampled_final": 78.0,
+  "greedy_curve": [
+    79.33333333333333,
+    0.0
+  ],
+  "greedy_epochs": [
+    1,
+    2
+  ],
+  "greedy_best": 79.33333333333333,
+  "greedy_final": 0.0,
+  "greedy_drift": 79.33333333333333,
+  "entropy_curve": [
+    0.9999468863010407,
+    0.99986271424727
+  ],
+  "entropy_final": 0.99986271424727,
+  "env": "s2_stoch_scaled",
+  "method": "rudder",
+  "seed": 0,
+  "baselines": {
+    "env": "s2_stoch_scaled",
+    "random_mean": 82.33333333333333,
+    "random_std": 1.8856180831641267,
+    "heuristic_mean": 90.83333333333333,
+    "heuristic_std": 1.0671873729054748
+  }
+}

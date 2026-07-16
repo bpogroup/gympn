@@ -1,0 +1,34 @@
+{
+  "sampled_curve": [
+    6.25,
+    6.5
+  ],
+  "sampled_best": 6.5,
+  "sampled_final": 6.5,
+  "greedy_curve": [
+    6.0,
+    6.0
+  ],
+  "greedy_epochs": [
+    1,
+    2
+  ],
+  "greedy_best": 6.0,
+  "greedy_final": 6.0,
+  "greedy_drift": 0.0,
+  "entropy_curve": [
+    0.9996941685676575,
+    0.9981906712055206
+  ],
+  "entropy_final": 0.9981906712055206,
+  "env": "c_parallel_joint",
+  "method": "rudder",
+  "seed": 0,
+  "baselines": {
+    "env": "c_parallel_joint",
+    "random_mean": 7.6,
+    "random_std": 1.0198039027185568,
+    "heuristic_mean": 10.0,
+    "heuristic_std": 0.0
+  }
+}

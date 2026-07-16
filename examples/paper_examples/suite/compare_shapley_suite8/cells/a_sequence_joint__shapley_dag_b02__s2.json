@@ -1,0 +1,15 @@
+{
+  "greedy_curve": [
+    10.0,
+    10.0,
+    10.0,
+    10.0,
+    10.0
+  ],
+  "greedy_final": 10.0,
+  "greedy_best": 10.0,
+  "greedy_drift": 0.0,
+  "env": "a_sequence_joint",
+  "method": "shapley_dag_b02",
+  "seed": 2
+}

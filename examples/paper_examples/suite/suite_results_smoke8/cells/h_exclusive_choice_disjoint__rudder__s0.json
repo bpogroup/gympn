@@ -1,0 +1,34 @@
+{
+  "sampled_curve": [
+    18.0,
+    16.0
+  ],
+  "sampled_best": 18.0,
+  "sampled_final": 16.0,
+  "greedy_curve": [
+    9.0,
+    9.0
+  ],
+  "greedy_epochs": [
+    1,
+    2
+  ],
+  "greedy_best": 9.0,
+  "greedy_final": 9.0,
+  "greedy_drift": 0.0,
+  "entropy_curve": [
+    0.9999676545461019,
+    0.9998011390368143
+  ],
+  "entropy_final": 0.9998011390368143,
+  "env": "h_exclusive_choice_disjoint",
+  "method": "rudder",
+  "seed": 0,
+  "baselines": {
+    "env": "h_exclusive_choice_disjoint",
+    "random_mean": 18.4,
+    "random_std": 0.4898979485566356,
+    "heuristic_mean": 20.0,
+    "heuristic_std": 0.0
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "env": "c_parallel_joint",
+  "random_mean": 7.6,
+  "random_std": 1.0198039027185568,
+  "heuristic_mean": 10.0,
+  "heuristic_std": 0.0
+}

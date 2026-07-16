@@ -1,0 +1,15 @@
+{
+  "greedy_curve": [
+    4.0,
+    8.0,
+    6.0,
+    6.4,
+    8.3
+  ],
+  "greedy_final": 8.3,
+  "greedy_best": 8.3,
+  "greedy_drift": 0.0,
+  "env": "e_loop_joint",
+  "method": "shapley_dag_b02",
+  "seed": 0
+}

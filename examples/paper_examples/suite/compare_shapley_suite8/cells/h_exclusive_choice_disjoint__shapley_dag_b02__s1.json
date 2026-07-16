@@ -1,0 +1,15 @@
+{
+  "greedy_curve": [
+    22.0,
+    22.0,
+    22.0,
+    22.0,
+    22.0
+  ],
+  "greedy_final": 22.0,
+  "greedy_best": 22.0,
+  "greedy_drift": 0.0,
+  "env": "h_exclusive_choice_disjoint",
+  "method": "shapley_dag_b02",
+  "seed": 1
+}

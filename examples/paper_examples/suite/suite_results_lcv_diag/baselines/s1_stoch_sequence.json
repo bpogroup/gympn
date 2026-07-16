@@ -1,0 +1,7 @@
+{
+  "env": "s1_stoch_sequence",
+  "random_mean": 9.85,
+  "random_std": 1.2155245781143218,
+  "heuristic_mean": 14.775,
+  "heuristic_std": 0.8799857953399021
+}
