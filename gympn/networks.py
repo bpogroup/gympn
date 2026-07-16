@@ -308,6 +308,75 @@ class HeteroActor(ActorCritic):
 
 
 # ---------------------------------------------------------------------
+# Per-action-node off-lineage Q head (LRQ-v3)
+# ---------------------------------------------------------------------
+class HeteroQOff(ActorCritic):
+    """Per-action-node value head for the LRQ-v3 decomposition.
+
+    Emits one RAW scalar per action node (a_transition nodes then postpone),
+    in the same order as the actor's policy vector / actions_dict, with no
+    softmax: q_off(s, a) estimates the OFF-LINEAGE component of Q(s, a) —
+    E[discounted future rewards NOT caused by a | s, a] — and is regressed on
+    trace-computed samples (mc_q credit minus lrq2 credit of the taken
+    action). The diffuse part of Q is learned; the sharp lineage part stays
+    Monte-Carlo. See CAUSAL_LRQ_PROPOSAL (v3) / PAPER_PLAN_LRQ.md.
+    """
+
+    def __init__(
+        self,
+        input_size: int = -1,
+        hidden_size: int = 128,
+        num_layers: int = 3,
+        metadata=None,
+        num_heads: int = 1,
+        dropout: float = 0.0,
+        residual: bool = True,
+    ):
+        super().__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+
+        self.encoder = HGTStack(
+            in_channels=-1,
+            hidden_channels=self.hidden_size,
+            num_layers=num_layers,
+            metadata=metadata,
+            heads=num_heads,
+            dropout=dropout,
+            residual=residual,
+        )
+        self.decoder = nn.Sequential(
+            nn.LazyLinear(self.hidden_size),
+            nn.ReLU(),
+            nn.Linear(self.hidden_size, 1),
+        )
+
+    def forward(self, data) -> torch.Tensor:
+        graph = data['graph'] if isinstance(data, dict) and 'graph' in data else data
+        x_dict, edge_index_dict = graph.x_dict, graph.edge_index_dict
+        x_enc = self.encoder(
+            x_dict=x_dict,
+            edge_index_dict=edge_index_dict,
+            input_size=self.input_size,
+            graph=graph,
+            params_iter=iter(self.parameters()),
+        )
+        for k, v in x_enc.items():
+            if v is not None:
+                x_enc[k] = torch.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0)
+
+        device = next(self.parameters()).device
+        vals_a = torch.empty((0, 1), device=device, dtype=torch.float32)
+        vals_p = None
+        if 'a_transition' in x_enc and x_enc['a_transition'] is not None and x_enc['a_transition'].numel() > 0:
+            vals_a = self.decoder(x_enc['a_transition'])
+        if 'postpone' in x_enc and x_enc['postpone'] is not None and x_enc['postpone'].numel() > 0:
+            vals_p = self.decoder(x_enc['postpone'])
+        out = torch.cat((vals_a, vals_p), dim=0) if vals_p is not None else vals_a
+        return out.squeeze(-1)
+
+
+# ---------------------------------------------------------------------
 # Deeper Critic
 # ---------------------------------------------------------------------
 class HeteroCritic(ActorCritic):
@@ -326,6 +395,13 @@ class HeteroCritic(ActorCritic):
         num_heads: int = 2,
         dropout: float = 0.1,
         residual: bool = True,
+        # LVA (lineage value auxiliary): add a second scalar head on the SAME
+        # pooled encoding, regressed on the per-decision lineage credit
+        # (an auxiliary representation task; see PAPER_PLAN_LCV.md). The main
+        # value_head keeps its own unbiased GAE-return target, so the aux
+        # gradients shape the shared encoder but never the value output's
+        # target. False (default) = single-head critic, unchanged.
+        aux_head: bool = False,
         # Backwards compatibility: accept legacy kwargs (e.g. output_size)
         output_size: Optional[int] = None,
         **kwargs,
@@ -355,7 +431,17 @@ class HeteroCritic(ActorCritic):
             nn.Linear(self.hidden_size, 1),
         )
 
-    def forward(self, data):
+        self.lineage_aux_head = None
+        if aux_head:
+            self.lineage_aux_head = nn.Sequential(
+                nn.LazyLinear(self.hidden_size),
+                nn.ReLU(),
+                nn.Dropout(self.dropout),
+                nn.Linear(self.hidden_size, 1),
+            )
+
+    def _encode_pool(self, data):
+        """Shared encode+pool: one vector per graph in the batch."""
         graph = data['graph'] if isinstance(data, dict) and 'graph' in data else data
         x_dict, edge_index_dict = graph.x_dict, graph.edge_index_dict
 
@@ -395,4 +481,15 @@ class HeteroCritic(ActorCritic):
                 index = torch.zeros(x_enc['a_transition'].size(0), dtype=torch.int64, device=x_enc['a_transition'].device)
             pooled = global_max_pool(x_enc['a_transition'], index)
 
-        return self.value_head(pooled)
+        return pooled
+
+    def forward(self, data):
+        return self.value_head(self._encode_pool(data))
+
+    def forward_with_aux(self, data):
+        """LVA: (value, lineage-aux) predictions off the shared encoding.
+        Requires aux_head=True at construction."""
+        if self.lineage_aux_head is None:
+            raise RuntimeError("forward_with_aux requires HeteroCritic(aux_head=True)")
+        pooled = self._encode_pool(data)
+        return self.value_head(pooled), self.lineage_aux_head(pooled)

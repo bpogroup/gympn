@@ -228,6 +228,29 @@ class CausalTraces:
                 redistribution, beta, get_parents, include_postpone
             )
 
+        # LRQ-v2: same lineage Q-samples for PRODUCTION actions, but postpone
+        # receives NO lineage credit (the walk still passes through its
+        # re-emitted tokens to the upstream producers). Postpone's advantage
+        # is instead the SMDP-TD form e^{-beta*tau}V(s')-V(s), applied by
+        # data.py's finish() — the consistent-support fix for the
+        # postpone-aggregation collapse (a token-flow postpone re-emits the
+        # whole marking, so its v1 Q-sample equals the discounted BACKLOG MASS
+        # and dominates any single production action's reward in loaded,
+        # reward-dense systems).
+        if scheme == "lrq2":
+            return self._redistribute_lrq(
+                action_transitions, token_to_action, record_to_action,
+                redistribution, beta, get_parents, include_postpone,
+                exclude_postpone_credit=True
+            )
+
+        # MC-Q: the lineage ABLATION of LRQ. Same Q-sample estimator and
+        # consumption, but the lineage test is dropped — every decision's Q is
+        # the FULL discounted return-to-go from its own clock. Isolates what
+        # the lineage restriction itself contributes. See _redistribute_mcq.
+        if scheme == "mc_q":
+            return self._redistribute_mcq(action_transitions, redistribution, beta)
+
         raise ValueError(
             f"Unknown scheme: {scheme!r}. All redistribution schemes except 'lrq' "
             f"have been removed (flow_dag/shapley_dag/rec/flow/exponential/linear/"
@@ -235,12 +258,55 @@ class CausalTraces:
         )
 
     # ------------------------------------------------------------------ #
+    # MC-Q: the no-lineage ablation of LRQ                               #
+    # ------------------------------------------------------------------ #
+
+    def _redistribute_mcq(self, action_transitions, redistribution, beta):
+        """
+        MC-Q — LRQ with the lineage restriction removed (the ablation that
+        prices the lineage itself; see PAPER_PLAN_LRQ.md).
+
+        For each decision t:
+
+            Q_t = Σ_{j : t_j >= u_t}  r_j · e**(-beta * (t_j - u_t))
+
+        i.e. the plain Monte-Carlo SMDP return-to-go from the decision's own
+        clock — equivalently a PPO variant with lambda=1 (no bootstrap) and
+        wall-clock e^{-beta*tau} discounting. Every decision (postpone
+        included — there is no causal filtering, that is the point) sees every
+        subsequent reward, whether or not it caused it. Consumed identically
+        to LRQ (A_t = Q_t - V(s_t), value head regressed on Q_t). Needs no
+        token DAG and no token-flow postpone. Missing timestamps are included
+        undiscounted (conservative, same policy as LRQ's disc()).
+        """
+        import math
+
+        decision_time = {idx: act.get("time")
+                         for idx, act in enumerate(action_transitions)}
+
+        def disc(t_reward, u_dec):
+            if beta == 0.0 or t_reward is None or u_dec is None:
+                return 1.0
+            return math.exp(-beta * max(0.0, float(t_reward) - float(u_dec)))
+
+        for tr in self.transition_history.transitions:
+            reward = tr.get("reward", 0.0)
+            if reward == 0.0:
+                continue
+            t_j = tr.get("time")
+            for idx, u in decision_time.items():
+                if t_j is None or u is None or u <= t_j:
+                    redistribution[idx] += reward * disc(t_j, u)
+
+        return redistribution
+
+    # ------------------------------------------------------------------ #
     # LRQ: Lineage-Restricted Q (per-decision hindsight Q-sample)        #
     # ------------------------------------------------------------------ #
 
     def _redistribute_lrq(self, action_transitions, token_to_action,
                           record_to_action, redistribution, beta, get_parents,
-                          include_postpone):
+                          include_postpone, exclude_postpone_credit=False):
         """
         LRQ — the hindsight lineage return (see CAUSAL_LRQ_PROPOSAL.md).
 
@@ -278,22 +344,30 @@ class CausalTraces:
         import math
 
         postpone_idx = {idx for (idx, is_pp) in record_to_action.values() if is_pp}
-        if postpone_idx and not include_postpone:
+        if postpone_idx and not include_postpone and not exclude_postpone_credit:
+            # v1 only: v2 (exclude_postpone_credit) gives postpone its own
+            # SMDP-TD advantage downstream, so a zero lineage credit is by
+            # design, not a bug.
             raise ValueError(
                 "[LRQ] postpone actions are present but token-flow postpone is "
                 "disabled (causal_postpone_tokenflow=False). Under sink-less "
                 "postpone Q_postpone == 0 identically and A = -V(s) would "
                 "suppress waiting unconditionally. Enable "
-                "causal_postpone_tokenflow=True on the simulator."
+                "causal_postpone_tokenflow=True on the simulator (or use "
+                "scheme='lrq2')."
             )
 
         decision_time = {idx: act.get("time")
                          for idx, act in enumerate(action_transitions)}
 
         def lineage_decisions(input_ids, firing_idx):
-            """ALL decisions (incl. postpone) in a reward's causal lineage."""
+            """Decisions in a reward's causal lineage. v1 includes postpone;
+            v2 (exclude_postpone_credit) filters postpone out of the CREDITED
+            set while still traversing through its re-emitted tokens so the
+            upstream producers are found."""
             found = set()
-            if firing_idx is not None:
+            if firing_idx is not None and not (exclude_postpone_credit
+                                               and firing_idx in postpone_idx):
                 found.add(firing_idx)
             seen = set()
             stack = list(input_ids)
@@ -303,7 +377,8 @@ class CausalTraces:
                     continue
                 seen.add(tid)
                 hit = token_to_action.get(tid)
-                if hit is not None:
+                if hit is not None and not (exclude_postpone_credit
+                                            and hit[0] in postpone_idx):
                     found.add(hit[0])
                 for p in get_parents(tid):
                     if p not in seen:

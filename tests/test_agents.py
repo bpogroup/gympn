@@ -37,7 +37,7 @@ class TestRLAgent(unittest.TestCase):
 
     def test_agent_initialization(self):
         self.assertEqual(self.agent.policy_model.decoder[-1].out_features, 1)
-        self.assertEqual(self.agent.value_model.lin.out_features, 1)
+        self.assertEqual(self.agent.value_model.value_head[-1].out_features, 1)
 
     def test_agent_action(self):
         # Mock the agent's policy to return a fixed action
@@ -46,6 +46,19 @@ class TestRLAgent(unittest.TestCase):
         # Test the agent's action in the environment
         action = self.agent.act(obs)
         self.assertEqual(action, 0)
+
+    def test_critic_lineage_aux_head(self):
+        # LVA: aux_head=True adds a second scalar head on the shared encoder;
+        # forward() stays single-output, forward_with_aux() returns both.
+        obs = self.problem.get_graph_observation()
+        critic = HeteroCritic(metadata=self.problem.make_metadata(), aux_head=True)
+        v, aux = critic.forward_with_aux(obs)
+        self.assertEqual(v.shape[-1], 1)
+        self.assertEqual(aux.shape[-1], 1)
+        self.assertEqual(critic(obs).shape[-1], 1)
+        # A default (single-head) critic must refuse forward_with_aux loudly.
+        with self.assertRaises(RuntimeError):
+            self.agent.value_model.forward_with_aux(obs)
 
 if __name__ == '__main__':
     unittest.main()

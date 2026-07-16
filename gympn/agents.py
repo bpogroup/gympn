@@ -138,7 +138,9 @@ class Agent:
                  kld_limit=None, ent_bonus=0.0, test_in_train=True, vf_coeff=0.05,
                  normalize_returns=False, lr_schedule=False,
                  causal_scheme='lrq', causal_pg=False,
-                 causal_rl=False, causal_beta=0.0, causal_mu=0.0):
+                 causal_rl=False, causal_beta=0.0, causal_mu=0.0,
+                 smdp_discount=False, causal_aux_coef=0.5,
+                 qoff_network=None, qlin_network=None):
         self.policy_model = policy_network
         self.policy_loss = NotImplementedError
         self.policy_optimizer = torch.optim.Adam(params=list(policy_network.parameters()),
@@ -150,16 +152,33 @@ class Agent:
         self.value_optimizer = torch.optim.Adam(params=list(value_network.parameters()), lr=value_lr)
         self.value_updates = value_updates
 
+        # LRQ-v3 / LQI: learned per-action-node Q heads (see networks.
+        # HeteroQOff). qoff = off-lineage component (lrq3, lqi); qlin =
+        # lineage component (lqi only, where the FULL Q is learned and the
+        # policy is improved MPO/AWR-style instead of via PPO advantages).
+        self.causal_scheme = causal_scheme
+        self.qoff_model = qoff_network
+        self.qoff_optimizer = (torch.optim.Adam(qoff_network.parameters(), lr=value_lr)
+                               if qoff_network is not None else None)
+        self.qlin_model = qlin_network
+        self.qlin_optimizer = (torch.optim.Adam(qlin_network.parameters(), lr=value_lr)
+                               if qlin_network is not None else None)
+
         self.lam = lam
         self.gam = gam
         self.causal_pg = causal_pg
         self.causal_rl = bool(causal_rl)
+        # LVA: weight of the critic's auxiliary lineage-credit regression in
+        # the value loss (value_loss + coef * aux_loss). Only read when the
+        # value network was built with aux_head=True (scheme 'lva').
+        self.causal_aux_coef = float(causal_aux_coef)
         self.buffer = TrajectoryBuffer(gam=gam, lam=lam,
                                        causal_scheme=causal_scheme,
                                        causal_pg=causal_pg,
                                        causal_rl=causal_rl,
                                        causal_beta=causal_beta,
-                                       causal_mu=causal_mu)
+                                       causal_mu=causal_mu,
+                                       smdp_discount=smdp_discount)
         self.normalize_advantages = normalize_advantages
         self.normalize_returns = normalize_returns  # New parameter
         self.lr_schedule = lr_schedule  # New parameter
@@ -301,9 +320,9 @@ class Agent:
             return_history = self.run_episodes(env, episodes=episodes, max_episode_length=max_episode_length,
                                                store=True, num_workers=num_workers)
 
-            # === RUDDER Training and Reward Redistribution ===
-            if hasattr(self, 'rudder_agent') and self.rudder_agent is not None and self.rudder_agent.should_train():
-                self._apply_rudder_credit_assignment(return_history)
+            # === RUDDER: fit the return-predicting LSTM on this epoch's
+            # trajectories (added per-episode in run_episode) ===
+            if getattr(self, 'rudder_agent', None) is not None and self.rudder_agent.should_train():
                 rudder_loss = self.rudder_agent.train(num_epochs=5)
                 if wandb_logger and i % 10 == 0:
                     wandb_logger.log({'rudder/loss': rudder_loss}, step=i)
@@ -321,11 +340,39 @@ class Agent:
                                          batch_size=batch_size,
                                          sort=sort_states, drop_remainder=True)
 
+            # LCV mechanism telemetry: the epoch's adaptive CV coefficient and
+            # the fractional advantage-variance reduction it achieved (both
+            # computed in buffer.get(); zeros for every other scheme).
+            history.setdefault('cv_coef', np.zeros(epochs))
+            history.setdefault('cv_var_reduction', np.zeros(epochs))
+            history['cv_coef'][i] = getattr(self.buffer, 'last_cv_coef', 0.0)
+            history['cv_var_reduction'][i] = getattr(self.buffer, 'last_cv_var_reduction', 0.0)
+
             # Route to appropriate training method:
-            # - Causal RL/PG: uses credits-as-rewards with GAE(γ=1, λ),
-            #   V(s_t) predicts sum of future credits, multi-step advantages.
+            # - LQI (Q-native): fitted lineage-decomposed Q + advantage-
+            #   weighted policy iteration (no PPO clip, no advantages from
+            #   the buffer).
+            # - Causal RL/PG: per-decision Q-sample advantages (LRQ family).
             # - Standard PPO: uses GAE advantages and discounted returns.
-            if self.causal_rl or self.causal_pg:
+            if getattr(self, 'causal_scheme', None) == 'lqi' and self.causal_rl:
+                policy_history = self._fit_lqi_models(dataloader)
+            elif getattr(self, 'causal_scheme', None) == 'lcv' and self.causal_rl:
+                # LCV: 100% standard PPO on the CV-adjusted advantages (the
+                # adjustment happened in buffer.get()); plus the v_off state
+                # head regressed on the measured off-lineage returns.
+                policy_history = self._fit_policy_and_value_models(
+                    dataloader, epochs=self.policy_updates)
+                if getattr(self, 'qoff_model', None) is not None:
+                    self._fit_voff_model(dataloader, epochs=self.value_updates)
+            elif getattr(self, 'causal_scheme', None) == 'lva' and self.causal_rl:
+                # LVA: 100% standard PPO (plain SMDP-GAE advantages from the
+                # buffer, no CV, no credit advantages). The lineage enters only
+                # inside _fit_value_model_step, as the critic aux head's
+                # regression target (batch.qlin_target) — representation
+                # shaping, policy gradient untouched.
+                policy_history = self._fit_policy_and_value_models(
+                    dataloader, epochs=self.policy_updates)
+            elif self.causal_rl or self.causal_pg:
                 policy_history = self._fit_causal_policy_models(dataloader, epochs=self.policy_updates)
             else:
                 policy_history = self._fit_policy_and_value_models(dataloader, epochs=self.policy_updates)
@@ -502,6 +549,14 @@ class Agent:
         times_batch = []
         value_batch_size = 8  # Compute values for 8 states at a time
 
+        # RUDDER baseline: per-step (feature, reward) sequence for the LSTM
+        # return predictor; consumed at episode end.
+        rudder_on = getattr(self, 'rudder_agent', None) is not None and buffer is not None
+        rudder_feats, rudder_rewards = [], []
+
+        qoff_batch = []
+        qoff_on = getattr(self, 'qoff_model', None) is not None and buffer is not None
+
         while not done:
             action, logprob, logpis = self.act(state, return_logprob=True)
 
@@ -516,9 +571,26 @@ class Agent:
             logprobs_batch.append(logprob)
             logpis_batch.append(logpis)
             times_batch.append(decision_time)
+            if rudder_on:
+                rudder_feats.append(self._rudder_features(state))
+            if qoff_on:
+                # Rollout-time auxiliary prediction (old parameters, frozen at
+                # collection): q_off(s, a_taken) for lrq3/lqi; the state-only
+                # centering v_off(s) for lcv (scalar HeteroCritic head).
+                try:
+                    with torch.no_grad():
+                        qv = self.qoff_model(state).reshape(-1)
+                    if getattr(self, 'causal_scheme', None) == 'lcv':
+                        qoff_batch.append(float(qv[0]) if qv.numel() else 0.0)
+                    else:
+                        qoff_batch.append(float(qv[action]) if action < qv.numel() else 0.0)
+                except Exception:
+                    qoff_batch.append(0.0)
 
             next_state, reward, done, truncated, info = env.step(action)
             rewards_batch.append(reward)
+            if rudder_on:
+                rudder_rewards.append(float(reward))
 
             episode_length += 1
             total_reward += reward
@@ -533,7 +605,8 @@ class Agent:
                             states_batch, actions_batch, logprobs_batch,
                             logpis_batch, rewards_batch, times_batch)):
                         buffer.store(s, a, r, lp, values[i], lpis,
-                                     token_ids=None, time=tm)
+                                     token_ids=None, time=tm,
+                                     qoff=(qoff_batch[i] if qoff_on else None))
 
                 # Clear batches for next iteration
                 states_batch = []
@@ -542,13 +615,33 @@ class Agent:
                 logpis_batch = []
                 rewards_batch = []
                 times_batch = []
+                qoff_batch = []
 
             if max_episode_length is not None and episode_length > max_episode_length:
                 break
             state = next_state
 
         if buffer is not None:
-            if 'eligibility_credits' in info and info['eligibility_credits'] is not None:
+            if rudder_on and rudder_feats:
+                # RUDDER baseline: add this episode to the LSTM's training set,
+                # redistribute its rewards with the CURRENT predictor (early
+                # epochs => near-uniform, standard RUDDER warm-up behaviour;
+                # 'contribution' conserves the episode return exactly), and
+                # feed the redistributed rewards through the ORDINARY GAE path.
+                feats_np = np.asarray(rudder_feats, dtype=np.float32)
+                rews_np = np.asarray(rudder_rewards, dtype=np.float32)
+                self.rudder_agent.add_trajectory(
+                    states=feats_np, actions=None, rewards=rews_np,
+                    episode_return=float(rews_np.sum()))
+                try:
+                    red = self.rudder_agent.redistribute_rewards(feats_np, rews_np)
+                    buffer.finish(credits=[float(x) for x in red],
+                                  mode="replace_rewards")
+                except Exception as e:
+                    get_logger().warning(f"[RUDDER] redistribution failed ({e}); "
+                                         f"falling back to raw rewards")
+                    buffer.finish(credits=None)
+            elif 'eligibility_credits' in info and info['eligibility_credits'] is not None:
                 # Diagnostic: if environment signals debugging, print causal trace stats
                 try:
                     pn = getattr(env, 'pn', None) or getattr(env, 'problem', None)
@@ -899,6 +992,308 @@ class Agent:
         """
         self.policy_model.save_weights(filename)
 
+    # ==================================================================
+    # LQI: Lineage-Q Iteration (Q-native consumer of the trace credits)
+    # ==================================================================
+    # Motivation (see CAUSAL_LQI_QNATIVE.md): PPO's clip + multi-epoch reuse
+    # amplifies small-but-CONSISTENT advantages to epsilon-sized policy moves
+    # -> premature commitment (measured on s1); LRQ-v3's cold-start race
+    # corrupted advantages while its head was untrained. LQI removes the
+    # policy-gradient advantage entirely: fit the decomposed Q from trace
+    # targets FIRST each epoch, then improve the policy by advantage-weighted
+    # regression (AWR): maximize E[w * log pi(a|s)], w = exp(A_std / TAU)
+    # clipped at W_MAX, A = q(s,a) - mean_{a' available} q(s,a'). The
+    # weighted-BC form is KL-regularized policy iteration - proportionate
+    # moves, no clip saturation, and an untrained Q merely yields ~uniform
+    # weights (harmless warm-up) instead of corrupted gradients.
+    _LQI_TAU = 1.0        # temperature on per-batch STANDARDIZED advantages
+    _LQI_WMAX = 20.0      # AWR weight clip
+
+    def _fit_lqi_models(self, dataloader):
+        history = {'loss': [], 'kld': [], 'ent': [], 'policy_core_loss': [],
+                   'value_loss': [], 'qlin_loss': [], 'qoff_loss': []}
+
+        # 1. Q heads first (fresh Q before the policy is weighted by it).
+        #    q_lin target = full mc_q sample - off target (= lrq2 credit).
+        qlin_hist = self._fit_qhead(
+            self.qlin_model, self.qlin_optimizer, dataloader,
+            epochs=self.value_updates,
+            get_target=lambda b: b.value - b.qoff_target)
+        qoff_hist = self._fit_qhead(
+            self.qoff_model, self.qoff_optimizer, dataloader,
+            epochs=self.value_updates,
+            get_target=lambda b: b.qoff_target)
+        history['qlin_loss'] = qlin_hist['loss']
+        history['qoff_loss'] = qoff_hist['loss']
+
+        # 2. AWR policy epochs.
+        for epoch in range(self.policy_updates):
+            loss_acc = kld_acc = ent_acc = core_acc = 0.0
+            batches = 0
+            for batch in dataloader:
+                if not hasattr(batch, 'qoff_target'):
+                    continue
+                b_loss, b_kld, b_ent, b_core = self._fit_lqi_policy_step(batch)
+                loss_acc += b_loss
+                kld_acc += b_kld
+                ent_acc += b_ent
+                core_acc += b_core
+                batches += 1
+            if batches == 0:
+                get_logger().no_batches_warning()
+                continue
+            history['loss'].append(loss_acc / batches)
+            history['kld'].append(kld_acc / batches)
+            history['ent'].append(ent_acc / batches)
+            history['policy_core_loss'].append(core_acc / batches)
+            if self.kld_limit is not None and history['kld'][-1] > self.kld_limit:
+                break
+
+        return {k: np.array(v) for k, v in history.items()}
+
+    def _fit_qhead(self, model, optimizer, dataloader, epochs, get_target):
+        """Generic per-action-node regression: select the taken action's node
+        output per sample and MSE against get_target(batch)."""
+        history = {'loss': []}
+        if model is None:
+            return history
+        for epoch in range(epochs):
+            loss_acc, batches = 0.0, 0
+            for batch in dataloader:
+                if not hasattr(batch, 'qoff_target'):
+                    continue
+                model.train()
+                out = model(batch)
+                if out.dim() == 2 and out.size(-1) == 1:
+                    out = out.squeeze(-1)
+                sel, tgt = self._select_taken_nodes(batch, out, get_target(batch))
+                if sel is None:
+                    continue
+                loss = torch.mean((sel - tgt) ** 2)
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                loss_acc += float(loss.item())
+                batches += 1
+            if batches:
+                history['loss'].append(loss_acc / batches)
+        return history
+
+    @staticmethod
+    def _per_sample_slices(batch, vec):
+        """Yield (sample_id, concatenated per-node slice) in the policy's
+        [a_transition; postpone] node order, per sample of the batch."""
+        has_a = ('a_transition' in batch.x_dict)
+        has_p = ('postpone' in batch.x_dict)
+        nA = batch['a_transition'].x.size(0) if has_a else 0
+        nP = batch['postpone'].x.size(0) if has_p else 0
+        vec_a = vec[:nA] if nA else None
+        vec_p = vec[nA:nA + nP] if nP else None
+        idx_a = batch['a_transition'].batch.data if has_a else None
+        idx_p = batch['postpone'].batch.data if has_p else None
+        for s in (idx_a.unique() if has_a else idx_p.unique()):
+            parts = []
+            if has_a:
+                v = vec_a[idx_a == s].reshape(-1)
+                if v.numel():
+                    parts.append(v)
+            if has_p and vec_p is not None:
+                v = vec_p[idx_p == s].reshape(-1)
+                if v.numel():
+                    parts.append(v)
+            if parts:
+                yield int(s), torch.cat(parts, dim=0)
+
+    def _select_taken_nodes(self, batch, vec, targets):
+        """(taken-node outputs, aligned targets) across the batch's samples."""
+        actions = torch.as_tensor(batch.y)
+        if targets.dim() == 0:
+            targets = targets.unsqueeze(0)
+        sel, tgt = [], []
+        for s, cat in self._per_sample_slices(batch, vec):
+            a_idx = int(actions[s])
+            if 0 <= a_idx < cat.numel():
+                sel.append(cat[a_idx].reshape(()))
+                tgt.append(targets[s].reshape(()))
+        if not sel:
+            return None, None
+        return torch.stack(sel), torch.stack(tgt)
+
+    def _fit_lqi_policy_step(self, batch):
+        """One AWR step: w = exp(A_std / TAU) with A = q(s,a_taken) minus the
+        per-state mean of q over the AVAILABLE actions (availability-aware
+        centering), loss = -mean(w * log pi(a_taken|s)) - ent_bonus * H."""
+        self.policy_model.train()
+        epsilon = 1e-7
+        new_probs = self.policy_model(batch)
+        new_logpis = (new_probs + epsilon).log()
+        if new_probs.dim() == 2 and new_probs.size(-1) == 1:
+            new_probs = new_probs.squeeze(-1)
+        if new_logpis.dim() == 2 and new_logpis.size(-1) == 1:
+            new_logpis = new_logpis.squeeze(-1)
+
+        with torch.no_grad():
+            q_all = self.qlin_model(batch) + self.qoff_model(batch)
+            if q_all.dim() == 2 and q_all.size(-1) == 1:
+                q_all = q_all.squeeze(-1)
+
+        actions = torch.as_tensor(batch.y)
+        old_logprob = batch.logprobs.clone()
+
+        sel_logp, advs, kld_terms = [], [], []
+        # Old per-node logpis for the true per-state KL monitor.
+        has_a = ('a_transition' in batch.x_dict)
+        has_p = ('postpone' in batch.x_dict)
+        old_a = batch['a_transition'].logpis if has_a else None
+        if old_a is not None and old_a.dim() == 2 and old_a.size(-1) == 1:
+            old_a = old_a.squeeze(-1)
+        old_p = None
+        if has_p and hasattr(batch['postpone'], 'logpis'):
+            old_p = batch['postpone'].logpis
+            if old_p is not None and old_p.dim() == 2 and old_p.size(-1) == 1:
+                old_p = old_p.squeeze(-1)
+        old_vec = None
+        if old_a is not None:
+            old_vec = torch.cat([old_a, old_p], dim=0) if old_p is not None else old_a
+
+        new_slices = dict(self._per_sample_slices(batch, new_logpis))
+        q_slices = dict(self._per_sample_slices(batch, q_all))
+        old_slices = (dict(self._per_sample_slices(batch, old_vec))
+                      if old_vec is not None else {})
+
+        for s, ns_cat in new_slices.items():
+            q_cat = q_slices.get(s)
+            if q_cat is None or q_cat.numel() != ns_cat.numel():
+                continue
+            a_idx = int(actions[s])
+            if not (0 <= a_idx < ns_cat.numel()):
+                continue
+            sel_logp.append(ns_cat[a_idx].reshape(()))
+            advs.append((q_cat[a_idx] - q_cat.mean()).reshape(()))
+            os_cat = old_slices.get(s)
+            if os_cat is not None and os_cat.numel() == ns_cat.numel():
+                with torch.no_grad():
+                    p_old = torch.exp(os_cat)
+                    p_old = p_old / p_old.sum().clamp_min(1e-8)
+                    kld_terms.append(float((p_old * (os_cat - ns_cat)).sum().item()))
+
+        if not sel_logp:
+            return 0.0, 0.0, 0.0, 0.0
+
+        logp = torch.stack(sel_logp)
+        A = torch.stack(advs)
+        A = (A - A.mean()) / (A.std(unbiased=False) + 1e-8)
+        w = torch.clamp(torch.exp(A / self._LQI_TAU), max=self._LQI_WMAX).detach()
+
+        core = -torch.mean(w * logp)
+
+        _ent_parts = []
+        if has_a:
+            _ent_parts.append(batch['a_transition'].batch.data)
+        if has_p:
+            _ent_parts.append(batch['postpone'].batch.data)
+        ent = _normalized_entropy(new_probs, new_logpis, torch.cat(_ent_parts, dim=0))
+
+        loss = core - self.ent_bonus * ent
+        self.policy_optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.policy_model.parameters(), 1.0)
+        self.policy_optimizer.step()
+
+        kld = sum(kld_terms) / len(kld_terms) if kld_terms else 0.0
+        return float(loss.item()), kld, float(ent.item()), float(core.item())
+
+    def _fit_qoff_model(self, dataloader, epochs=1):
+        """LRQ-v3: fit the off-lineage per-action-node head on trace-computed
+        targets (mc_q credit − lrq2 credit of the TAKEN action per step)."""
+        history = {'loss': []}
+        for epoch in range(epochs):
+            loss_acc, batches = 0.0, 0
+            for batch in dataloader:
+                if not hasattr(batch, 'qoff_target'):
+                    continue
+                step_loss = self._fit_qoff_model_step(batch)
+                loss_acc += step_loss
+                batches += 1
+            if batches:
+                history['loss'].append(loss_acc / batches)
+        return history
+
+    def _fit_qoff_model_step(self, batch):
+        """One regression step: select the taken action's node output per
+        sample (same [a_transition; postpone] ordering as the policy) and MSE
+        it against the off-lineage target."""
+        self.qoff_model.train()
+        out = self.qoff_model(batch)
+        if out.dim() == 2 and out.size(-1) == 1:
+            out = out.squeeze(-1)
+
+        has_a = ('a_transition' in batch.x_dict)
+        has_p = ('postpone' in batch.x_dict)
+        nA = batch['a_transition'].x.size(0) if has_a else 0
+        nP = batch['postpone'].x.size(0) if has_p else 0
+        out_a = out[:nA] if nA else None
+        out_p = out[nA:nA + nP] if nP else None
+        idx_a = batch['a_transition'].batch.data if has_a else None
+        idx_p = batch['postpone'].batch.data if has_p else None
+
+        actions = torch.as_tensor(batch.y)
+        targets = batch.qoff_target
+        if targets.dim() == 0:
+            targets = targets.unsqueeze(0)
+
+        sel, tgt = [], []
+        for s in (idx_a.unique() if has_a else idx_p.unique()):
+            parts = []
+            if has_a:
+                v = out_a[idx_a == s].reshape(-1)
+                if v.numel():
+                    parts.append(v)
+            if has_p and out_p is not None:
+                v = out_p[idx_p == s].reshape(-1)
+                if v.numel():
+                    parts.append(v)
+            if not parts:
+                continue
+            cat = torch.cat(parts, dim=0)
+            a_idx = int(actions[s])
+            if 0 <= a_idx < cat.numel():
+                sel.append(cat[a_idx].reshape(()))
+                tgt.append(targets[s].reshape(()))
+        if not sel:
+            return 0.0
+
+        loss = torch.mean((torch.stack(sel) - torch.stack(tgt)) ** 2)
+        self.qoff_optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.qoff_model.parameters(), 1.0)
+        self.qoff_optimizer.step()
+        return float(loss.item())
+
+    def _fit_voff_model(self, dataloader, epochs=1):
+        """LCV: regress the state-only v_off head on the measured off-lineage
+        returns (batch.qoff_target). Better centering => more of the CV's
+        variance is removable; a bad head only shrinks c_hat, never biases."""
+        for epoch in range(epochs):
+            for batch in dataloader:
+                if not hasattr(batch, 'qoff_target'):
+                    continue
+                self.qoff_model.train()
+                pred = self.qoff_model(batch).squeeze()
+                tgt = batch.qoff_target
+                if pred.dim() == 0:
+                    pred = pred.unsqueeze(0)
+                if tgt.dim() == 0:
+                    tgt = tgt.unsqueeze(0)
+                if pred.numel() != tgt.numel():
+                    continue
+                loss = torch.mean((pred - tgt) ** 2)
+                self.qoff_optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.qoff_model.parameters(), 1.0)
+                self.qoff_optimizer.step()
+
     def _fit_value_model(self, dataloader, epochs=1):
         """Fit value model using data from dataset.
 
@@ -934,15 +1329,37 @@ class Agent:
         return {k: np.array(v) for k, v in history.items()}
 
     def _fit_value_model_step(self, batch):
-        """Fit value model on one batch of data."""
+        """Fit value model on one batch of data.
+
+        LVA: when the critic has a lineage aux head AND the batch carries
+        qlin_target (both only exist for causal_scheme='lva'), the loss is
+            MSE(V, gae_returns) + causal_aux_coef * MSE(V_aux, qlin_target).
+        The aux head predicts the per-decision lineage credit from the shared
+        encoding — an auxiliary representation task. V's own target stays the
+        unbiased GAE return, so any lineage bias stops at the encoder."""
         self.value_model.train()
 
         # indexes = batch['a_transition'].batch.data
         states = batch
         values = batch.value.clone()  # discounted returns
 
-        pred_values = self.value_model(states).squeeze()
-        loss = torch.mean(self.value_loss.forward(input=pred_values, target=values))
+        aux_on = (getattr(self.value_model, 'lineage_aux_head', None) is not None
+                  and hasattr(batch, 'qlin_target'))
+        if aux_on:
+            pred_values, pred_aux = self.value_model.forward_with_aux(states)
+            pred_values = pred_values.squeeze()
+            pred_aux = pred_aux.squeeze()
+            aux_tgt = batch.qlin_target
+            if pred_aux.dim() == 0:
+                pred_aux = pred_aux.unsqueeze(0)
+            if aux_tgt.dim() == 0:
+                aux_tgt = aux_tgt.unsqueeze(0)
+            loss = torch.mean(self.value_loss.forward(input=pred_values, target=values))
+            if pred_aux.numel() == aux_tgt.numel():
+                loss = loss + self.causal_aux_coef * torch.mean((pred_aux - aux_tgt) ** 2)
+        else:
+            pred_values = self.value_model(states).squeeze()
+            loss = torch.mean(self.value_loss.forward(input=pred_values, target=values))
 
         self.value_optimizer.zero_grad()
         try:
@@ -1049,63 +1466,19 @@ class Agent:
         """
         self.policy_model = torch.load(torch.load(filename))
 
-    def _apply_rudder_credit_assignment(self, return_history: Dict) -> None:
-        """
-        Apply RUDDER credit assignment to buffer trajectories.
-
-        This method is called during training to train the RUDDER network
-        and redistribute rewards based on learned importance weights.
-
-        Parameters
-        ----------
-        return_history : dict
-            Dictionary containing 'returns' and optionally state sequences
-        """
-        if not hasattr(self, 'rudder_agent') or self.rudder_agent is None:
-            return
-
-        try:
-            # Extract trajectories from buffer for RUDDER training
-            if hasattr(self.buffer, 'states') and len(self.buffer.states) > 0:
-                # Group buffer data by episode
-                trajectories = []
-                current_traj_idx = 0
-
-                for ep_idx in range(len(return_history['returns'])):
-                    traj_length = return_history['lengths'][ep_idx]
-
-                    # Extract trajectory data
-                    traj_states = self.buffer.states[current_traj_idx:current_traj_idx + traj_length]
-                    traj_rewards = self.buffer.rewards[current_traj_idx:current_traj_idx + traj_length]
-                    episode_return = return_history['returns'][ep_idx]
-
-                    # Convert to numpy
-                    if hasattr(traj_states, 'cpu'):
-                        states_np = traj_states.cpu().numpy()
-                    else:
-                        states_np = np.array(traj_states)
-
-                    if hasattr(traj_rewards, 'cpu'):
-                        rewards_np = traj_rewards.cpu().numpy()
-                    else:
-                        rewards_np = np.array(traj_rewards)
-
-                    # Flatten states if needed
-                    if states_np.ndim > 2:
-                        states_np = states_np.reshape(states_np.shape[0], -1)
-
-                    # Add trajectory to RUDDER buffer
-                    self.rudder_agent.add_trajectory(
-                        states=states_np,
-                        actions=None,  # Not used in contribution-based method
-                        rewards=rewards_np,
-                        episode_return=episode_return
-                    )
-
-                    current_traj_idx += traj_length
-
-        except Exception as e:
-            get_logger().warning(f"⚠ RUDDER credit assignment failed: {e}")
+    def _rudder_features(self, state):
+        """Featurize a graph observation for the RUDDER LSTM: the marking
+        vector (token count per node type, in the fixed metadata order set by
+        the rudder_config's 'node_types'). Cheap, Markov-ish and constant-dim
+        regardless of which places are currently occupied."""
+        g = state['graph'] if isinstance(state, dict) and 'graph' in state else state
+        feats = []
+        for nt in getattr(self, '_rudder_node_types', []) or []:
+            try:
+                feats.append(float(g[nt].x.size(0)) if nt in g.node_types else 0.0)
+            except Exception:
+                feats.append(0.0)
+        return feats
 
     def _fit_policy_and_value_models(self, dataloader, epochs=1):
         """Fit both policy and value models simultaneously using data from dataset.
@@ -1240,6 +1613,11 @@ class Agent:
         if self.value_model is not None and not isinstance(self.value_model, str):
             value_history = self._fit_value_model(dataloader, epochs=self.value_updates)
             history['value_loss'] = list(value_history.get('loss', []))
+
+        # --- LRQ-v3: off-lineage head regression on (mc_q - lrq2) targets. ---
+        if getattr(self, 'qoff_model', None) is not None:
+            qoff_hist = self._fit_qoff_model(dataloader, epochs=self.value_updates)
+            history['qoff_loss'] = list(qoff_hist.get('loss', []))
 
         return {k: np.array(v) for k, v in history.items()}
 
@@ -1680,10 +2058,13 @@ class PPOAgent(Agent):
                     redistribution_method=self.rudder_config.get('redistribution_method', 'contribution')
                 )
                 get_logger().info(
-                    f"✓ RUDDER agent initialized with state_dim={self.rudder_config.get('state_dim', 128)}")
+                    f"[RUDDER] agent initialized with state_dim={self.rudder_config.get('state_dim', 128)}")
             except ImportError:
-                get_logger().warning("⚠ RUDDER module not available, skipping RUDDER initialization")
+                get_logger().warning("[RUDDER] module not available, skipping initialization")
                 self.rudder_agent = None
+        # Fixed node-type order for the marking-vector featurization
+        # (must match state_dim; threaded by train.make_agent from metadata).
+        self._rudder_node_types = self.rudder_config.get('node_types', [])
 
         # Instantiate picklable loss classes
         if method == 'clip':

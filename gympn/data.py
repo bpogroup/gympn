@@ -310,7 +310,7 @@ class TrajectoryBuffer:
 
     def __init__(self, gam=1.0, lam=1.0, data_type='hetero', action_mode="node_selection",
                  causal_scheme='lrq', causal_pg=False, causal_rl=False,
-                 causal_beta=0.0, causal_mu=0.0):
+                 causal_beta=0.0, causal_mu=0.0, smdp_discount=False):
         self.gam = float(gam)
         self.lam = float(lam)
         self.data_type = data_type
@@ -324,6 +324,8 @@ class TrajectoryBuffer:
         # the next decision (from per-step clocks). 0.0 = no time discounting
         # (legacy gamma=1 behaviour). >0 gives time an opportunity cost, so a
         # decision that only spends time (postpone) is correctly penalised.
+        # Shared by the causal branch below AND the standard path when
+        # smdp_discount=True.
         self.causal_beta = float(causal_beta)
         # LRQ hybrid coefficient: A = (1-mu)*A_LRQ + mu*A_GAE, where A_GAE
         # is the standard SMDP-GAE advantage on the RAW temporal rewards. mu=0
@@ -334,6 +336,15 @@ class TrajectoryBuffer:
         self.causal_mu = float(causal_mu)
         self.causal_pg = causal_pg
         self.causal_rl = bool(causal_rl)
+        # Standard (non-causal) path only: replace the constant-gamma GAE with
+        # the per-sojourn SMDP form e^{-causal_beta*tau} (same clock/formula as
+        # the causal branch), with no CV/lineage term -- this is LCV's exact
+        # ĉ=0 limiting case ("lcv0"), used to factor the time-discount choice
+        # out of the LCV-vs-PPO comparison (CAUSAL_LCV_CONTROL_VARIATE.md).
+        # False (default) = legacy constant-gamma PPO, fully unaffected; `gam`
+        # becomes unused for advantage computation when this is True (by
+        # construction: see finish()).
+        self.smdp_discount = bool(smdp_discount)
 
         # rolling storage
         self.states: List[Dict[str, Any]] = []
@@ -359,6 +370,21 @@ class TrajectoryBuffer:
         # Used to derive sojourn times tau_t for SMDP discounting.
         self.times: List[float] = []
 
+        # LRQ-v3 / LQI / LCV: rollout-time auxiliary predictions (q_off(s,a)
+        # for lrq3/lqi; v_off(s) for lcv) and the trace-computed off-lineage
+        # targets (mc_q - lrq2 credit), aligned with steps.
+        self.qoff_pred: List[float] = []
+        self.qoff_targets_: Tensor = torch.empty(0, dtype=torch.float32)
+        # LCV: per-step control-variate terms R_off - v_off(s); the adaptive
+        # coefficient c_hat is estimated over the WHOLE epoch in get().
+        self.cvterms_: Tensor = torch.empty(0, dtype=torch.float32)
+        self.last_cv_coef: float = 0.0
+        self.last_cv_var_reduction: float = 0.0
+        # LVA: per-step lineage credits (lrq2 Q-samples) used as the critic's
+        # AUXILIARY regression target — representation shaping only; the value
+        # head keeps its own GAE-return target (see finish() 'lva' branch).
+        self.qlin_targets_: Tensor = torch.empty(0, dtype=torch.float32)
+
         # DCL fields (lists; must be aligned with states)
         self.target_pi: List[Tensor] = []
         self.q_first: List[Tensor] = []
@@ -379,9 +405,13 @@ class TrajectoryBuffer:
               token_ids: Optional[List[int]] = None,
               target_pi: Optional[Tensor] = None,
               q_first: Optional[Tensor] = None,
-              time: Optional[float] = None):
+              time: Optional[float] = None,
+              qoff: Optional[float] = None):
         """Append one interaction; always append placeholders for DCL fields to keep alignment."""
         self.times.append(0.0 if time is None else float(time))
+        # LRQ-v3: rollout-time off-lineage prediction q_off(s, a_taken)
+        # (0.0 when the q_off head is absent — only the lrq3 path reads it).
+        self.qoff_pred.append(0.0 if qoff is None else float(qoff))
         # Freeze the graph structure at storage time so later environment
         # mutations cannot change node counts and break alignment with the
         # stored logpis. The observation graph is rebuilt from scratch every step
@@ -475,6 +505,23 @@ class TrajectoryBuffer:
 
         return torch.tensor(new_rewards, dtype=torch.float32, requires_grad=True)
 
+    def _taus_from_times(self) -> Tensor:
+        """Elapsed sojourn tau_t = time_{t+1} - time_t for the CURRENT episode
+        slice [start:end); 0 at the last step (no continuation to discount).
+        Shared clock for every SMDP-discounted path (causal branch and the
+        standard path when smdp_discount=True)."""
+        times_ep = torch.tensor(self.times[self.start:self.end], dtype=torch.float32)
+        if times_ep.numel() >= 2:
+            taus = times_ep[1:] - times_ep[:-1]
+            taus = torch.cat([taus, torch.zeros(1, dtype=torch.float32)])
+        else:
+            taus = torch.zeros_like(times_ep)
+        return torch.clamp(taus, min=0.0)
+
+    def _smdp_discounts(self) -> Tensor:
+        """Per-step continuation discount e^{-causal_beta*tau}."""
+        return torch.exp(-self.causal_beta * self._taus_from_times())
+
     @torch.no_grad()
     def finish(self, credits: Optional[Any] = None, mode: str = "replace"):
         """
@@ -526,13 +573,28 @@ class TrajectoryBuffer:
         is_causal = self.causal_rl
 
         # --- Handle credits if provided ---
+        qoff_targets_ep = None
         if credits is not None:
             if hasattr(credits, "redistribute_rewards") and callable(credits.redistribute_rewards):
-                cr = credits.redistribute_rewards(
-                    scheme=self.causal_scheme,
-                    beta=self.causal_beta,
-                )
-                credits_vec = torch.as_tensor(cr, dtype=torch.float32)
+                if self.causal_scheme in ('lrq3', 'lqi', 'lcv', 'lva'):
+                    # LRQ-v3 / LQI / LCV / LVA need BOTH decompositions of Q from
+                    # the trace: the sharp lineage part (lrq2) and the full
+                    # return-to-go (mc_q); their difference is the off-lineage
+                    # regression target for the q_off head (lrq3/lqi/lcv), and
+                    # the lrq2 part is LVA's auxiliary critic target.
+                    cr_lin = credits.redistribute_rewards(scheme='lrq2',
+                                                          beta=self.causal_beta)
+                    cr_full = credits.redistribute_rewards(scheme='mc_q',
+                                                           beta=self.causal_beta)
+                    credits_vec = torch.as_tensor(cr_lin, dtype=torch.float32)
+                    cr_full = torch.as_tensor(cr_full, dtype=torch.float32)
+                    qoff_targets_ep = cr_full - credits_vec
+                else:
+                    cr = credits.redistribute_rewards(
+                        scheme=self.causal_scheme,
+                        beta=self.causal_beta,
+                    )
+                    credits_vec = torch.as_tensor(cr, dtype=torch.float32)
             else:
                 credits_vec = torch.as_tensor(credits, dtype=torch.float32)
 
@@ -548,6 +610,18 @@ class TrajectoryBuffer:
                     f"[CAUSAL-RL] Credits length ({cr_len}) != episode length ({ep_len}). "
                     f"This indicates a bug in the causal trace / simulator step alignment."
                 )
+
+            # LRQ-v2: postpone steps get the SMDP-TD advantage instead of a
+            # lineage Q-sample (consistent supports; see causal_traces "lrq2").
+            # Identify them from the trace's action records (1:1 with steps,
+            # asserted above). Plain-vector credits (tests) => no mask.
+            postpone_mask = None
+            if self.causal_scheme == 'lrq2' and hasattr(credits, 'transition_history'):
+                flags = []
+                for act in credits.transition_history.get_action_transitions():
+                    tid = getattr(act.get('transition'), '_id', None)
+                    flags.append(bool(isinstance(tid, str) and tid.startswith('postpone_')))
+                postpone_mask = torch.tensor(flags, dtype=torch.bool)
 
             # LRQ: the intra-lineage discount uses TRACE decision times u_t,
             # while the SMDP sojourns below use BUFFER times (pn.clock read
@@ -565,7 +639,16 @@ class TrajectoryBuffer:
                             f"and the SMDP sojourns must share one clock."
                         )
 
-            if mode == "replace":
+            if mode == "replace_rewards":
+                # RUDDER-style baseline: the credits are REDISTRIBUTED STEP
+                # REWARDS (prefix-measurable, return-conserving), so they are
+                # consumed through the ORDINARY GAE path exactly as if the
+                # environment had emitted them — unlike LRQ Q-samples, which
+                # must never be chained.
+                rewards_ep = credits_vec
+                credits_vec = None
+                returns_ep = None  # set by the standard branch (adv + V)
+            elif mode == "replace":
                 returns_ep = credits_vec
             else:
                 modified_rewards = rewards_ep + credits_vec
@@ -586,28 +669,126 @@ class TrajectoryBuffer:
             # NO return-to-go/GAE chaining over the credits — chaining hindsight
             # credits is exactly what produced the chain-dilution bias in the
             # removed credits-as-rewards schemes (CAUSAL_REC_CRITICAL_REVIEW.md §3).
-            returns_ep = credits_vec
-            adv_ep = credits_vec - values_ep
+            discounts = self._smdp_discounts()
+
+            if self.causal_scheme == 'lcv':
+                # LCV — adaptive measured control variate on the standard
+                # SMDP-GAE estimator (see CAUSAL_LCV_CONTROL_VARIATE.md):
+                #   A_cv = A_GAE - c_hat * (R_off - v_off(s))
+                # R_off = measured off-lineage return (mc_q - lrq2, exact from
+                # the trace); v_off = learned state-only centering; c_hat is
+                # estimated over the whole epoch in get() (classical optimal
+                # CV coefficient), so c_hat -> 0 recovers plain SMDP-GAE PPO
+                # exactly — the floor is built into the estimator. Value
+                # targets are the ordinary GAE returns (adv + V), NOT credit
+                # targets: the policy/critic path is 100% standard PPO.
+                adv_base = smdp_gae(rewards_ep, values_ep, discounts,
+                                    self.lam, dones=dones_ep)
+                returns_ep = adv_base + values_ep
+                adv_ep = adv_base
+                qoff_ep = torch.tensor(self.qoff_pred[self.start:self.end],
+                                       dtype=torch.float32)
+                cvterm_ep = qoff_targets_ep - qoff_ep
+                if self.cvterms_.numel() == 0:
+                    self.cvterms_ = cvterm_ep.clone()
+                else:
+                    self.cvterms_ = torch.cat([self.cvterms_, cvterm_ep], dim=0)
+                if self.qoff_targets_.numel() == 0:
+                    self.qoff_targets_ = qoff_targets_ep.clone()
+                else:
+                    self.qoff_targets_ = torch.cat(
+                        [self.qoff_targets_, qoff_targets_ep], dim=0)
+            elif self.causal_scheme == 'lva':
+                # LVA — Lineage Value Auxiliary: the policy path is 100%
+                # standard SMDP-GAE PPO on raw rewards (identical to lcv0 /
+                # LCV's c_hat=0 floor — no CV term, no credit advantages), and
+                # the lineage enters ONLY as the critic's auxiliary regression
+                # target: the per-decision lrq2 Q-sample, predicted by a second
+                # head on the critic's shared encoder (networks.HeteroCritic
+                # aux_head). Aux gradients shape the representation; the value
+                # head keeps its own unbiased GAE-return target, so the policy
+                # gradient stays exactly PPO's (floor by construction, like
+                # LCV — but consuming the full per-decision credit vector
+                # instead of one epoch-level scalar).
+                adv_ep = smdp_gae(rewards_ep, values_ep, discounts,
+                                  self.lam, dones=dones_ep)
+                returns_ep = adv_ep + values_ep
+                if self.qlin_targets_.numel() == 0:
+                    self.qlin_targets_ = credits_vec.clone()
+                else:
+                    self.qlin_targets_ = torch.cat(
+                        [self.qlin_targets_, credits_vec], dim=0)
+            elif self.causal_scheme in ('lrq3', 'lqi'):
+                # LRQ-v3 / LQI — exact decomposition (for 'lqi' the buffer
+                # advantage is a PLACEHOLDER: the AWR path recomputes per-state
+                # advantages from the fresh Q heads at training time), no mixing knob:
+                #   A_t = c_lineage(a_t) + q_off(s_t, a_t) - V(s_t)
+                # where c_lineage is the MC lineage Q-sample (lrq2 credits,
+                # postpone = 0), q_off is the rollout-time prediction of the
+                # learned off-lineage head, and V regresses the FULL
+                # return-to-go (mc_q sample = c_lineage + off target), giving
+                # one coherent semantics: V(s) ~ E[Q_full(s, a~pi)]. Postpone
+                # needs no special branch — its Q is entirely off-lineage and
+                # the head carries it.
+                qoff_ep = torch.tensor(self.qoff_pred[self.start:self.end],
+                                       dtype=torch.float32)
+                returns_ep = credits_vec + qoff_targets_ep  # = mc_q sample
+                adv_ep = credits_vec + qoff_ep - values_ep
+                if self.qoff_targets_.numel() == 0:
+                    self.qoff_targets_ = qoff_targets_ep.clone()
+                else:
+                    self.qoff_targets_ = torch.cat(
+                        [self.qoff_targets_, qoff_targets_ep], dim=0)
+            else:
+                returns_ep = credits_vec
+                adv_ep = credits_vec - values_ep
+
+            if postpone_mask is not None and postpone_mask.any():
+                # LRQ-v2: postpone gates nothing, so its true Q IS the delayed
+                # continuation — use the SMDP-TD form on the same critic:
+                #   A(postpone) = e^{-beta*tau} V(s') - V(s)
+                # and regress V toward that same (detached) target at postpone
+                # steps, keeping one coherent value semantics: V(s) ~ E[Q̂|s].
+                # This is the consistent-support fix for the v1 collapse where
+                # postpone's lineage swallowed the discounted backlog mass.
+                next_v = torch.cat([values_ep[1:],
+                                    torch.zeros(1, dtype=values_ep.dtype)])
+                pp_target = discounts * next_v
+                adv_ep = torch.where(postpone_mask, pp_target - values_ep, adv_ep)
+                returns_ep = torch.where(postpone_mask, pp_target, returns_ep)
+
             if self.causal_mu > 0.0:
                 # Foreclosure hedge: mix in the standard SMDP-GAE advantage on
-                # the RAW temporal rewards, with the per-sojourn discount
-                # d_t = e^{-beta*tau_t} from the buffer clocks. Caveat: it
-                # bootstraps with the same critic, which is trained on LRQ
-                # targets, so the hybrid term is approximate — keep mu small.
-                times_ep = torch.tensor(self.times[self.start:self.end], dtype=torch.float32)
-                if times_ep.numel() >= 2:
-                    taus = times_ep[1:] - times_ep[:-1]
-                    taus = torch.cat([taus, torch.zeros(1, dtype=torch.float32)])
-                else:
-                    taus = torch.zeros_like(credits_vec)
-                taus = torch.clamp(taus, min=0.0)
-                discounts = torch.exp(-self.causal_beta * taus)
+                # the RAW temporal rewards. Caveat: it bootstraps with the same
+                # critic, which is trained on LRQ targets, so the hybrid term
+                # is approximate — keep mu small.
                 adv_gae = smdp_gae(rewards_ep, values_ep, discounts,
                                    self.lam, dones=dones_ep)
                 adv_ep = (1.0 - self.causal_mu) * adv_ep + self.causal_mu * adv_gae
         else:
             # STANDARD RL MODE: temporal rewards → GAE advantages
-            adv_ep = compute_advantages(rewards_ep, values_ep, self.gam, self.lam, dones=dones_ep)
+            if self.smdp_discount:
+                # lcv0 (LCV's ĉ=0 twin): same per-sojourn discount as the
+                # causal branch, no CV/lineage term -- plain SMDP-GAE PPO.
+                # `gam` is deliberately unused on this path (the discount
+                # comes from elapsed time, not a per-decision constant).
+                taus = self._taus_from_times()
+                if (taus.numel() > 1 and self.causal_beta > 0.0
+                        and float(taus.abs().sum()) < 1e-9):
+                    # All-zero sojourns on a multi-step episode means decision
+                    # times were never recorded upstream (buffer.store(...,
+                    # time=...) missing) -- fail loudly rather than silently
+                    # degenerating to an undiscounted (beta-inert) GAE.
+                    raise RuntimeError(
+                        "[smdp_discount] all sojourn times are 0 for a "
+                        f"{taus.numel()}-step episode with causal_beta="
+                        f"{self.causal_beta} > 0; decision times were not "
+                        "recorded (buffer.store(..., time=...) missing)."
+                    )
+                discounts = torch.exp(-self.causal_beta * taus)
+                adv_ep = smdp_gae(rewards_ep, values_ep, discounts, self.lam, dones=dones_ep)
+            else:
+                adv_ep = compute_advantages(rewards_ep, values_ep, self.gam, self.lam, dones=dones_ep)
             # Fix #3: value target = GAE / TD(λ) return (advantage + V), which is
             # lower-variance than the Monte-Carlo return-to-go set above. Applied
             # only to the genuine standard-PPO path (no credits); the causal /
@@ -691,6 +872,10 @@ class TrajectoryBuffer:
         self.values_pred = torch.empty(0, dtype=torch.float32)
         self.returns_ = torch.empty(0, dtype=torch.float32)
         self.advantages_ = torch.empty(0, dtype=torch.float32)
+        self.qoff_pred.clear()
+        self.qoff_targets_ = torch.empty(0, dtype=torch.float32)
+        self.cvterms_ = torch.empty(0, dtype=torch.float32)
+        self.qlin_targets_ = torch.empty(0, dtype=torch.float32)
         self.start = 0
         self.end = 0
 
@@ -753,9 +938,39 @@ class TrajectoryBuffer:
         returns = self.returns_[idx_tensor]
         adv = self.advantages_[idx_tensor]
         logprob_s = self.logprobs_sel[idx_tensor]
+        # LRQ-v3: off-lineage regression targets ride along when present.
+        qoff_t = (self.qoff_targets_[idx_tensor]
+                  if self.qoff_targets_.numel() == self.returns_.numel() else None)
+        # LVA: lineage-credit auxiliary targets for the critic's aux head.
+        qlin_t = (self.qlin_targets_[idx_tensor]
+                  if self.qlin_targets_.numel() == self.returns_.numel() else None)
         logpis = [self.logpis_nodes[i] for i in idx]  # per-step old-policy vector
         target_pi = [self.target_pi[i] for i in idx]
         q_first = [self.q_first[i] for i in idx]
+
+        # LCV: apply the adaptive measured control variate BEFORE any
+        # normalization, with the classical optimal coefficient estimated over
+        # the whole epoch: c_hat = Cov(A, cv) / Var(cv), clipped to [0, 2].
+        # Var(cv) ~ 0 or negative correlation => c_hat = 0 => plain SMDP-GAE
+        # PPO exactly (the floor property).
+        if (self.causal_scheme == 'lcv'
+                and self.cvterms_.numel() == self.advantages_.numel()
+                and adv.numel() > 1):
+            cv = self.cvterms_[idx_tensor]
+            cv = cv - cv.mean()
+            var_cv = float((cv * cv).mean())
+            if var_cv > 1e-12:
+                c_hat = float(((adv - adv.mean()) * cv).mean()) / var_cv
+                c_hat = max(0.0, min(c_hat, 2.0))
+                var_before = float(adv.var(unbiased=False))
+                adv = adv - c_hat * cv
+                var_after = float(adv.var(unbiased=False))
+                self.last_cv_coef = c_hat
+                # Fractional advantage-variance reduction achieved by the CV
+                # this epoch — the quantity the CV theorem is about (and the
+                # "mirage-critique" reporting standard for CV papers).
+                self.last_cv_var_reduction = (
+                    (var_before - var_after) / var_before if var_before > 1e-12 else 0.0)
 
         if normalize_advantages:
             adv = self._normalize_advantages(adv)
@@ -777,6 +992,10 @@ class TrajectoryBuffer:
             g.advantage = adv[i].reshape(()).detach()
             g.value = returns[i].reshape(()).detach()
             g.logprobs = logprob_s[i].reshape(()).detach()
+            if qoff_t is not None:
+                g.qoff_target = qoff_t[i].reshape(()).detach()
+            if qlin_t is not None:
+                g.qlin_target = qlin_t[i].reshape(()).detach()
 
             # --- Standardize lp to 1-D
             lp = logpis[i] if isinstance(logpis[i], torch.Tensor) else torch.tensor([], dtype=torch.float32)

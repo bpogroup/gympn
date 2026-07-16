@@ -74,10 +74,15 @@ class AEPN_Env(Env):
         else:
             info = {'pn_reward': self.pn.reward}
 
-        if not self.pn.causal_rl:
-            reward = (self.pn.reward - old_rewards)
-        else:
-            reward = 0.0  # episode-level credit assignment via causal traces
+        # Always return the true per-step reward. Historically this was zeroed
+        # in causal mode ("episode-level credit assignment via causal traces"),
+        # which silently starved every consumer of rewards_raw: the causal-mu
+        # hybrid never mixed raw-reward GAE (it actually mixed a value-TD
+        # term), and the LCV control-variate base was pure value noise. The
+        # causal credit paths ignore step rewards by construction
+        # (finish(mode='replace')), so restoring them changes nothing for
+        # lrq/lrq2/mc_q at mu=0.
+        reward = (self.pn.reward - old_rewards)
 
         return observation, reward, terminated, False, info
 

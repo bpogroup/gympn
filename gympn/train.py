@@ -47,7 +47,7 @@ import time
 import os
 import torch
 from gympn.environment import AEPN_Env
-from gympn.networks import HeteroActor, HeteroCritic
+from gympn.networks import HeteroActor, HeteroCritic, HeteroQOff
 from gympn.agents import PGAgent, PPOAgent
 
 from gympn.dcl_planner import PlannerConfig
@@ -113,8 +113,16 @@ def make_parser():
     alg.add_argument('--causal_scheme',
                      type=str,
                      default='lrq',
-                     choices=['lrq'],
-                     help='causal credit scheme. Only "lrq" (Lineage-Restricted Q) is implemented: '
+                     choices=['lrq', 'lrq2', 'lrq3', 'lqi', 'lcv', 'lva', 'mc_q'],
+                     help='causal credit scheme. "lrq2" is lrq with the consistent-support postpone '
+                          'fix: production actions keep the lineage Q-sample, postpone gets the '
+                          'SMDP-TD advantage e^(-beta*tau)V(s\')-V(s) instead of a lineage credit '
+                          '(fixes the postpone-aggregation collapse in loaded, reward-dense envs). '
+                          '"mc_q" is the no-lineage ablation of lrq: the '
+                          'Q-sample is the full discounted SMDP return-to-go from each decision '
+                          '(= PPO at lambda=1 with wall-clock discounting), isolating what the '
+                          'lineage restriction contributes. '
+                          '"lrq" (Lineage-Restricted Q) is the method: '
                           'per-decision hindsight Q-samples (full discounted lineage reward, no '
                           'split) consumed as A = Q - V with NO GAE over credits. Requires '
                           'causal_postpone_tokenflow=True on the simulator whenever postpone '
@@ -128,6 +136,23 @@ def make_parser():
                           'after a decision is discounted by exp(-causal_beta * tau), tau = elapsed '
                           'time to the next decision. 0.0 (default) = no time discounting (legacy); '
                           '>0 gives time an opportunity cost so postpone is correctly penalised.')
+    alg.add_argument('--causal_aux_coef',
+                     type=float,
+                     default=0.5,
+                     help='lva only: weight of the critic\'s auxiliary lineage-credit regression '
+                          'in the value loss, MSE(V, gae_returns) + coef * MSE(V_aux, lrq2 credit). '
+                          'The aux head shares the critic encoder (representation shaping); the '
+                          'value head keeps its unbiased GAE target and the policy gradient is '
+                          'exactly standard SMDP-GAE PPO (floor by construction).')
+    alg.add_argument('--smdp_discount',
+                     type=lambda x: str(x).lower() == 'true',
+                     default=False,
+                     help='STANDARD (non-causal_rl) path only: replace the constant-gamma GAE '
+                          'with the per-sojourn SMDP discount exp(-causal_beta * tau), the same '
+                          'clock/formula used by the causal schemes, with no CV/lineage term. '
+                          'This is LCV\'s exact c_hat=0 limiting case ("lcv0"): plain SMDP-GAE '
+                          'PPO, used to factor the time-discount choice out of the LCV-vs-PPO '
+                          'comparison. False (default) = legacy constant `gam` GAE.')
     alg.add_argument('--causal_mu',
                      type=float,
                      default=0.0,
@@ -458,6 +483,9 @@ def make_value_network(args, metadata=None):
             # targets are regressed in train (dropout on). See INSTABILITY_ANALYSIS.md.
             dropout=args.value_kwargs.get("dropout", 0.0),
             residual=args.value_kwargs.get("residual", True),
+            # LVA: second scalar head on the shared encoder, regressed on the
+            # per-decision lineage credit (set by make_agent for scheme 'lva').
+            aux_head=args.value_kwargs.get("aux_head", False),
             metadata=metadata
         )
     else:
@@ -482,18 +510,83 @@ def make_agent(args, metadata=None):
     agent : PGAgent (experimental) or PPOAgent
         The agent.
     """
-    policy_network = make_policy_network(args, metadata=metadata)
-    value_network = make_value_network(args, metadata=metadata)
-
     # Extract causal RL config (with safe defaults for backward compatibility)
     causal_scheme = getattr(args, 'causal_scheme', 'lrq')
     causal_beta = getattr(args, 'causal_beta', 0.0)
+
+    # LVA: the critic needs its lineage aux head built in at construction.
+    if causal_scheme == 'lva' and getattr(args, 'causal_rl', False):
+        if not isinstance(getattr(args, 'value_kwargs', None), dict):
+            args.value_kwargs = {}
+        args.value_kwargs['aux_head'] = True
+
+    policy_network = make_policy_network(args, metadata=metadata)
+    value_network = make_value_network(args, metadata=metadata)
+
+    # LRQ-v3: learned off-lineage per-action-node Q head (sized like the
+    # policy net; same metadata).
+    qoff_network = None
+    qlin_network = None
+    if causal_scheme in ('lrq3', 'lqi') and getattr(args, 'causal_rl', False):
+        qoff_network = HeteroQOff(
+            input_size=args.policy_kwargs.get("input_size", -1),
+            hidden_size=args.policy_kwargs.get("hidden_size", 64),
+            num_layers=args.policy_kwargs.get("num_layers", 3),
+            metadata=metadata,
+            num_heads=args.policy_kwargs.get("num_heads", 1),
+            dropout=args.policy_kwargs.get("dropout", 0.0),
+            residual=args.policy_kwargs.get("residual", True),
+        )
+        if causal_scheme == 'lqi':
+            qlin_network = HeteroQOff(
+                input_size=args.policy_kwargs.get("input_size", -1),
+                hidden_size=args.policy_kwargs.get("hidden_size", 64),
+                num_layers=args.policy_kwargs.get("num_layers", 3),
+                metadata=metadata,
+                num_heads=args.policy_kwargs.get("num_heads", 1),
+                dropout=args.policy_kwargs.get("dropout", 0.0),
+                residual=args.policy_kwargs.get("residual", True),
+            )
     causal_mu = getattr(args, 'causal_mu', 0.0)
+    smdp_discount = getattr(args, 'smdp_discount', False)
+    causal_aux_coef = getattr(args, 'causal_aux_coef', 0.5)
     # causal_pg (advantage replacement) is opt-in only.
     # Standard PPO with GAE + value baseline on redistributed credits
     # is more stable and converges better.
     causal_pg = getattr(args, 'causal_pg', False)
     causal_rl = getattr(args, 'causal_rl', False)
+
+    # RUDDER baseline: LSTM return predictor over marking vectors. state_dim
+    # and the feature order are derived from the env metadata (one token-count
+    # feature per node type), so --rudder_state_dim is ignored.
+    rudder_config = None
+    if getattr(args, 'rudder_enabled', False):
+        node_types = list(metadata[0]) if metadata else []
+        rudder_config = {
+            'enabled': True,
+            'state_dim': len(node_types),
+            'node_types': node_types,
+            'hidden_dim': getattr(args, 'rudder_hidden_dim', 128),
+            'learning_rate': getattr(args, 'rudder_learning_rate', 1e-3),
+            'training_frequency': getattr(args, 'rudder_training_freq', 1),
+            'redistribution_method': getattr(args, 'rudder_redistribution_method', 'contribution'),
+            'device': getattr(args, 'rudder_device', 'cpu'),
+        }
+
+    if causal_scheme == 'lcv' and getattr(args, 'causal_rl', False):
+        # LCV: state-only centering head v_off(s) ~ E[R_off | s] (a scalar
+        # HeteroCritic, sized like the value net). Passed through the generic
+        # qoff_network slot; agents branch on causal_scheme for its use.
+        qoff_network = HeteroCritic(
+            input_size=args.value_kwargs.get("input_size", -1),
+            hidden_size=args.value_kwargs.get("hidden_size", 64),
+            output_size=args.value_kwargs.get("output_size", 64),
+            num_layers=args.value_kwargs.get("num_layers", 3),
+            num_heads=args.value_kwargs.get("num_heads", 1),
+            dropout=args.value_kwargs.get("dropout", 0.0),
+            residual=args.value_kwargs.get("residual", True),
+            metadata=metadata
+        )
 
     if args.algorithm == 'pg':
         agent = PGAgent(policy_network=policy_network,policy_lr=args.policy_lr, policy_updates=args.policy_updates,
@@ -502,26 +595,36 @@ def make_agent(args, metadata=None):
                         causal_scheme=causal_scheme, causal_pg=causal_pg,
                         causal_rl=causal_rl,
                         causal_beta=causal_beta, causal_mu=causal_mu,
+                        smdp_discount=smdp_discount,
+                         causal_aux_coef=causal_aux_coef,
                         normalize_advantages=getattr(args, 'normalize_advantages', False),
                         lr_schedule=getattr(args, 'lr_schedule', True))
     elif args.algorithm == 'ppo-clip':
         agent = PPOAgent(policy_network=policy_network, method='clip', eps=args.eps,
+                         rudder_config=rudder_config, qoff_network=qoff_network,
+                         qlin_network=qlin_network,
                          policy_lr=args.policy_lr, policy_updates=args.policy_updates,
                          value_network=value_network, value_lr=args.value_lr, value_updates=args.value_updates,
                          gam=args.gam, lam=args.lam, kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus,
                          causal_scheme=causal_scheme, causal_pg=causal_pg,
                          causal_rl=causal_rl,
                          causal_beta=causal_beta, causal_mu=causal_mu,
+                         smdp_discount=smdp_discount,
+                         causal_aux_coef=causal_aux_coef,
                          normalize_advantages=getattr(args, 'normalize_advantages', False),
                          lr_schedule=getattr(args, 'lr_schedule', True))
     elif args.algorithm == 'ppo-penalty':
         agent = PPOAgent(policy_network=policy_network, method='penalty', c=args.c,
+                         rudder_config=rudder_config, qoff_network=qoff_network,
+                         qlin_network=qlin_network,
                          policy_lr=args.policy_lr, policy_updates=args.policy_updates,
                          value_network=value_network, value_lr=args.value_lr, value_updates=args.value_updates,
                          gam=args.gam, lam=args.lam, kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus,
                          causal_scheme=causal_scheme, causal_pg=causal_pg,
                          causal_rl=causal_rl,
                          causal_beta=causal_beta, causal_mu=causal_mu,
+                         smdp_discount=smdp_discount,
+                         causal_aux_coef=causal_aux_coef,
                          normalize_advantages=getattr(args, 'normalize_advantages', False),
                          lr_schedule=getattr(args, 'lr_schedule', True))
 
