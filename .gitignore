@@ -1,1 +1,29 @@
 /examples/data/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+
+# IDE / tooling
+.idea/
+
+# Experiment tracking / debug artifacts (regenerable)
+.wandb_offline/
+causal_debug.jsonl
+causal_episode_map.jsonl
+*.log
+
+# Heavy training outputs: checkpoints and tensorboard event files live next
+# to the suite's cell JSONs (which ARE committed — they're the paper data).
+# The suite's per-cell train/ dirs hold only checkpoints/events/args and are
+# fully reproducible from config.py + the cell id, so they stay out wholesale.
+*.pth
+events.out.tfevents.*
+examples/paper_examples/suite/**/train/
+
+# LaTeX build artifacts
+*.aux
+*.out
+*.toc
+*.synctex.gz
