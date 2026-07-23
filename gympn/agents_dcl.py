@@ -93,9 +93,24 @@ class DCLAgent(Agent):
         Compute target_pi using the DCL planner, choose an action, and
         build per-node target tensor + a q_first vector for logging/critic target.
         """
-        target_pi, stats, enabled = compute_target_pi(
-            env, state_graph, self.policy_model, self.planner_cfg, lineage=lineage
-        )
+        # use_lineage selects the structurally lineage-aware planner (sharing,
+        # pruning, coupling truncation, optional restricted tallies). It was a
+        # dead config flag before: _shape_reward ignored `lineage` entirely.
+        critic = (self.value_model
+                  if (self.value_model is not None
+                      and not isinstance(self.value_model, str)) else None)
+        if getattr(self.planner_cfg, 'use_lineage', False):
+            from gympn.dcl_planner import compute_target_pi_lineage
+            target_pi, stats, enabled = compute_target_pi_lineage(
+                env, state_graph, self.policy_model, self.planner_cfg,
+                lineage=lineage, critic=critic
+            )
+        else:
+            target_pi, stats, enabled = compute_target_pi(
+                env, state_graph, self.policy_model, self.planner_cfg,
+                lineage=lineage, critic=critic
+            )
+        self._last_plan_stats = stats
 
         if len(enabled) == 0:
             return -1, torch.tensor([]), torch.tensor([])
@@ -196,6 +211,33 @@ class DCLAgent(Agent):
         return total_reward, episode_length
 
     # --- Training step: CE to target_pi + optional value loss ------------------
+
+    def _fit_policy_and_value_models(self, dataloader, epochs=1):
+        """DCL fitting loop. Overrides the base (PPO) loop because the DCL
+        step returns a 3-tuple (loss, ce_as_kld, ent) and trains policy+value
+        jointly inline, rather than the base's decoupled 4-tuple + separate
+        value pass. Same return contract (dict of arrays) as the base."""
+        history = {'loss': [], 'kld': [], 'ent': [], 'policy_core_loss': [],
+                   'value_loss': []}
+        for _ in range(max(1, int(epochs))):
+            loss = kld = ent = 0.0
+            batches = 0
+            for batch in dataloader:
+                bl, bk, be = self._fit_policy_and_value_model_step(batch)
+                if bl != bl:            # NaN guard (step returns nan on error)
+                    continue
+                loss += bl; kld += bk; ent += be
+                batches += 1
+            if batches == 0:
+                get_logger().no_batches_warning()
+                continue
+            history['loss'].append(loss / batches)
+            history['kld'].append(kld / batches)
+            history['ent'].append(ent / batches)
+            history['policy_core_loss'].append(loss / batches)
+            if self.kld_limit is not None and history['kld'][-1] > self.kld_limit:
+                break
+        return {k: np.array(v) for k, v in history.items()}
 
     def _fit_policy_and_value_model_step(self, batch):
         """

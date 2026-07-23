@@ -140,7 +140,7 @@ class Agent:
                  causal_scheme='lrq', causal_pg=False,
                  causal_rl=False, causal_beta=0.0, causal_mu=0.0,
                  smdp_discount=False, causal_aux_coef=0.5,
-                 qoff_network=None, qlin_network=None):
+                 qoff_network=None, qlin_network=None, cf_config=None):
         self.policy_model = policy_network
         self.policy_loss = NotImplementedError
         self.policy_optimizer = torch.optim.Adam(params=list(policy_network.parameters()),
@@ -194,6 +194,15 @@ class Agent:
         self.test_during_train = test_in_train
         self.eps = eps
         self.vf_coeff = vf_coeff
+
+        # G1 forked counterfactual preferences (gympn/counterfactual.py,
+        # CAUSAL_LINEAGE_RETHINK.md §7.2). None => disabled (exact PPO floor:
+        # no forks, no aux loss, nothing else changes). Keys: fork_prob,
+        # reps, gate, lookahead, max_forks, coef, updates, beta.
+        self.cf_config = cf_config
+        self._cf_prefs = []
+        self._cf_diag = []   # per-fork {'gap','se','passed'} mechanism telemetry
+        self._cf_records = []  # decomposed mode: unresolved fork records
 
     def act(self, state, return_logprob=False, deterministic=False):
         """Return an action for the given state using the policy model.
@@ -315,6 +324,9 @@ class Agent:
             self.ent_bonus = self._ent_bonus_initial * max(0.0, 1.0 - i / max(1, epochs - 1))
 
             self.buffer.clear()
+            self._cf_prefs = []
+            self._cf_diag = []
+            self._cf_records = []
             # Use parallel episode collection with dill (4-8x speedup on collection, 2-4x overall)
             # Dill can serialize lambda functions and complex objects like SimVar
             return_history = self.run_episodes(env, episodes=episodes, max_episode_length=max_episode_length,
@@ -376,6 +388,49 @@ class Agent:
                 policy_history = self._fit_causal_policy_models(dataloader, epochs=self.policy_updates)
             else:
                 policy_history = self._fit_policy_and_value_models(dataloader, epochs=self.policy_updates)
+
+            # G1: SNR-gated counterfactual preference aux pass (after the
+            # PPO epochs; coefficient annealed to 0 over training = floor).
+            if getattr(self, 'cf_config', None) is not None:
+                cf_stats = self._fit_cf_preferences()
+                # Mechanism telemetry: the paired SE and the gate-pass rate are
+                # where the lineage-restriction claim lives (a tighter SE at
+                # equal gap => more forks clear the gate for the same compute).
+                diag = getattr(self, '_cf_diag', [])
+                n_forks = len(diag)
+                mean_se = float(np.mean([d['se'] for d in diag])) if diag else 0.0
+                mean_gap = float(np.mean([abs(d['gap']) for d in diag])) if diag else 0.0
+                pass_rate = float(np.mean([d['passed'] for d in diag])) if diag else 0.0
+                for key in ('cf_prefs', 'cf_loss', 'cf_forks', 'cf_se',
+                            'cf_gap', 'cf_pass_rate'):
+                    history.setdefault(key, np.zeros(epochs))
+                history['cf_prefs'][i] = cf_stats['n']
+                history['cf_loss'][i] = cf_stats['loss']
+                history['cf_forks'][i] = n_forks
+                history['cf_se'][i] = mean_se
+                history['cf_gap'][i] = mean_gap
+                history['cf_pass_rate'][i] = pass_rate
+                rs = getattr(self, '_cf_resolve_stats', None)
+                if rs is not None:
+                    # decomposed mode: the honest numbers are the regression's
+                    # held-out R^2 (does the lineage feature actually predict
+                    # the opportunity-cost channel?) and the resolved SE
+                    history.setdefault('cf_r2', np.zeros(epochs))
+                    history['cf_r2'][i] = (rs['r2'] if np.isfinite(rs['r2'])
+                                           else 0.0)
+                    history['cf_se'][i] = rs['se']
+                    history['cf_pass_rate'][i] = rs['pass_rate']
+                    get_logger().info(
+                        f"  [CF] forks={n_forks} prefs={cf_stats['n']} "
+                        f"mode={rs['mode']} r2={rs['r2']:.3f} "
+                        f"nfit={rs.get('n_fit', 0)} "
+                        f"pass={rs['pass_rate']:.0%} se={rs['se']:.4f} "
+                        f"coef={cf_stats['coef']:.3f} loss={cf_stats['loss']:.4f}")
+                else:
+                    get_logger().info(
+                        f"  [CF] forks={n_forks} prefs={cf_stats['n']} "
+                        f"pass={pass_rate:.0%} |gap|={mean_gap:.3f} se={mean_se:.3f} "
+                        f"coef={cf_stats['coef']:.3f} loss={cf_stats['loss']:.4f}")
 
             # Update training history
             history['mean_returns'][i] = np.mean(return_history['returns'])
@@ -557,6 +612,12 @@ class Agent:
         qoff_batch = []
         qoff_on = getattr(self, 'qoff_model', None) is not None and buffer is not None
 
+        # G1 counterfactual forking: training rollouts only (buffer present),
+        # capped per episode. Forks snapshot/restore env.pn, so the main
+        # trajectory is untouched.
+        cf_on = getattr(self, 'cf_config', None) is not None and buffer is not None
+        cf_forks_done = 0
+
         while not done:
             action, logprob, logpis = self.act(state, return_logprob=True)
 
@@ -564,6 +625,23 @@ class Agent:
             # SMDP sojourn tau_t = u_{i+1} - u_i in causal time-discounting).
             pn = getattr(env, 'pn', None) or getattr(env, 'problem', None)
             decision_time = float(getattr(pn, 'clock', 0.0)) if pn is not None else 0.0
+
+            if cf_on and cf_forks_done < self.cf_config['max_forks']:
+                from gympn.counterfactual import maybe_fork
+                forked, pref, diag = maybe_fork(self, env, state, action,
+                                                logpis, self.cf_config)
+                if forked:
+                    cf_forks_done += 1
+                if diag is not None:
+                    self._cf_diag.append(diag)
+                if pref is not None:
+                    # decomposed mode yields fork RECORDS (resolved into
+                    # preferences at epoch end, once the indirect-channel
+                    # regression can be pooled); other modes yield preferences
+                    if self.cf_config.get('decompose', False):
+                        self._cf_records.append(pref)
+                    else:
+                        self._cf_prefs.append(pref)
 
             # Collect for batch processing
             states_batch.append(state)
@@ -641,7 +719,14 @@ class Agent:
                     get_logger().warning(f"[RUDDER] redistribution failed ({e}); "
                                          f"falling back to raw rewards")
                     buffer.finish(credits=None)
-            elif 'eligibility_credits' in info and info['eligibility_credits'] is not None:
+            elif (self.causal_rl and 'eligibility_credits' in info
+                  and info['eligibility_credits'] is not None):
+                # NOTE the self.causal_rl guard: the ENV may record causal
+                # traces while the AGENT stays on the standard SMDP-GAE path
+                # (scheme 'cfpl' does exactly this — it needs the lineage DAG
+                # for its forked counterfactual returns, but its policy
+                # gradient must remain plain PPO). Behaviour-preserving for
+                # every other method, where agent.causal_rl == env.causal_rl.
                 # Diagnostic: if environment signals debugging, print causal trace stats
                 try:
                     pn = getattr(env, 'pn', None) or getattr(env, 'problem', None)
@@ -1371,6 +1456,69 @@ class Agent:
         self.value_optimizer.step()
 
         return loss.item()
+
+    def _fit_cf_preferences(self):
+        """G1 aux pass: pairwise logistic loss on the policy's log-probs for
+        this epoch's SNR-gated counterfactual preferences.
+
+        loss = -log sigmoid(logpi(winner) - logpi(loser)) per preference
+        (the softmax normalization cancels in the difference, so this is the
+        logit-difference DPO-style objective). Coefficient = cf coef *
+        linear anneal to 0 over training: the floor is exact PPO by
+        construction once the anneal completes. Runs AFTER the PPO policy
+        epochs, so it is outside the KL early stop — kept safe by the small
+        preference count, the gate, and the anneal.
+        """
+        cfg = self.cf_config
+        # Decomposed mode: resolve this epoch's fork records into preferences
+        # first — the indirect channel is a regression pooled over all of
+        # them, so it cannot be decided fork-by-fork.
+        self._cf_resolve_stats = None
+        if cfg.get('decompose', False):
+            from gympn.counterfactual import resolve_decomp_preferences
+            recs = getattr(self, '_cf_records', [])
+            # Rolling cross-epoch window: one epoch's forks cannot validate a
+            # 5-parameter fit, and the occupancy->opportunity-cost relation
+            # drifts slowly enough to pool.
+            if not hasattr(self, '_cf_pool'):
+                from collections import deque
+                self._cf_pool = deque(maxlen=int(cfg.get('fit_window', 400)))
+            self._cf_pool.extend(recs)
+            resolved, rstats = resolve_decomp_preferences(
+                recs, cfg['gate'], min_r2=cfg.get('min_r2', 0.05),
+                fit_pool=self._cf_pool)
+            self._cf_prefs = resolved
+            self._cf_resolve_stats = rstats
+        prefs = getattr(self, '_cf_prefs', [])
+        if cfg.get('anneal', True):
+            total = max(1, (self._total_epochs or 1) - 1)
+            coef = cfg['coef'] * max(0.0, 1.0 - self._current_epoch / total)
+        else:
+            # X10 falsifier follow-up (mechanism probe): constant pressure,
+            # floor knowingly sacrificed — tests the ceiling hypothesis
+            # against the strongest version of G1.
+            coef = cfg['coef']
+        if not prefs or coef <= 0.0:
+            return {'n': len(prefs), 'loss': 0.0, 'coef': coef}
+        self.policy_model.train()
+        last_loss = 0.0
+        for _ in range(cfg['updates']):
+            self.policy_optimizer.zero_grad()
+            losses = []
+            for p in prefs:
+                pi = self.policy_model(p['state'])
+                logp = pi.log().reshape(-1)
+                if p['winner'] >= logp.numel() or p['loser'] >= logp.numel():
+                    continue
+                losses.append(-torch.nn.functional.logsigmoid(
+                    logp[p['winner']] - logp[p['loser']]))
+            if not losses:
+                return {'n': len(prefs), 'loss': 0.0, 'coef': coef}
+            loss = coef * torch.stack(losses).mean()
+            loss.backward()
+            self.policy_optimizer.step()
+            last_loss = float(loss.item())
+        return {'n': len(prefs), 'loss': last_loss, 'coef': coef}
 
     def test_in_train(self, env, episodes=100, max_episode_length=None, deterministic=True, logdir=None):
         """Evaluate the agent on a test environment during training.

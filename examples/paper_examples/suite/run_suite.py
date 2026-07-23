@@ -130,7 +130,21 @@ def _make_args(env_name: str, method: str, seed: int, cfg: SuiteConfig, logdir_b
     # lcv0: LCV's exact c_hat=0 limiting case -- plain SMDP-GAE PPO (the
     # STANDARD, non-causal_rl path with the per-sojourn discount switched on).
     # No lineage machinery at all, so it stays OUT of the causal_rl set above.
-    smdp_discount = (method == "lcv0")
+    # cfp (G1): lcv0 base + forked counterfactual preferences
+    # (CAUSAL_LINEAGE_RETHINK.md §7.2; gympn/counterfactual.py) -- also
+    # standard-path, non-causal. cfpk = cfp with the preference coefficient
+    # held CONSTANT (no anneal): the X10 mechanism probe (ceiling test),
+    # floor knowingly sacrificed.
+    # Counterfactual-preference family, ablation chain:
+    #   cfp  = annealed coefficient, raw return-to-go + value tail
+    #   cfpk = cfp with a CONSTANT coefficient
+    #   cfpn = cfpk with the value tail DROPPED (isolates the tail)
+    #   cfpl = cfpn with the LINEAGE restriction added (isolates the lineage)
+    #   cfpd = lineage DECOMPOSITION: direct channel sampled, indirect channel
+    #          Rao-Blackwellized on lineage occupancy features (keeps cfpl's
+    #          variance win without cfpl's foreclosure bias)
+    # so cfpl-vs-cfpn is the clean lineage ablation.
+    smdp_discount = method in ("lcv0", "cfp", "cfpk", "cfpn", "cfpl", "cfpd")
     net_kw = _net_kwargs(cfg)
     extra = {}
     if net_kw:
@@ -159,6 +173,20 @@ def _make_args(env_name: str, method: str, seed: int, cfg: SuiteConfig, logdir_b
         "causal_mu": getattr(cfg, "causal_mu", 0.0),
         "causal_aux_coef": getattr(cfg, "causal_aux_coef", 0.5),
         "smdp_discount": smdp_discount,
+        "cf_fork_prob": (getattr(cfg, "cf_fork_prob", 0.25)
+                         if method in ("cfp", "cfpk", "cfpn", "cfpl", "cfpd")
+                         else 0.0),
+        "cf_anneal": (method not in ("cfpk", "cfpn", "cfpl", "cfpd")),
+        "cf_lineage": (method == "cfpl"),
+        "cf_decompose": (method == "cfpd"),
+        "cf_min_r2": getattr(cfg, "cf_min_r2", 0.05),
+        "cf_value_tail": (method not in ("cfpn", "cfpl", "cfpd")),
+        "cf_reps": getattr(cfg, "cf_reps", 3),
+        "cf_gate": getattr(cfg, "cf_gate", 2.0),
+        "cf_lookahead": getattr(cfg, "cf_lookahead", 6.0),
+        "cf_max_forks": getattr(cfg, "cf_max_forks", 2),
+        "cf_coef": getattr(cfg, "cf_coef", 1.0),
+        "cf_updates": getattr(cfg, "cf_updates", 2),
         "rudder_enabled": (method == "rudder"),
         "rudder_hidden_dim": getattr(cfg, "rudder_hidden_dim", 64),
         "rudder_training_freq": getattr(cfg, "rudder_training_freq", 1),
@@ -194,6 +222,13 @@ def _extract_metrics(history: dict, cfg: SuiteConfig) -> dict:
         # LCV mechanism telemetry (zeros / absent for other schemes).
         "cv_coef_curve": arr("cv_coef"),
         "cv_var_reduction_curve": arr("cv_var_reduction"),
+        # Counterfactual-fork telemetry (absent for non-cf methods): the
+        # paired SE and gate-pass rate are where the lineage claim is tested.
+        "cf_forks_curve": arr("cf_forks"),
+        "cf_prefs_curve": arr("cf_prefs"),
+        "cf_se_curve": arr("cf_se"),
+        "cf_gap_curve": arr("cf_gap"),
+        "cf_pass_rate_curve": arr("cf_pass_rate"),
         "sampled_curve": sampled,
         "sampled_best": max(sampled) if sampled else None,
         "sampled_final": sampled[-1] if sampled else None,
@@ -231,13 +266,23 @@ def _train_cell_worker(payload):
 def train_cell(env_name: str, method: str, seed: int, cfg: SuiteConfig, logdir_base: str) -> dict:
     _set_seed(seed)
     causal = method in ("lrq", "lrq2", "lrq3", "lqi", "lcv", "lva", "mc_q")
+    # cfpl needs the ENV to record the causal trace (its forked branch returns
+    # are lineage-restricted) while its AGENT stays on the standard SMDP-GAE
+    # path -- _make_args keeps causal_rl False for it, and run_episode's
+    # credit-replacement branch is guarded on the agent's flag. Trace
+    # recording is gated on the env's causal_rl in simulator.fire/postpone;
+    # tokenflow routes lineage through postpone. Decision structure is
+    # unaffected because allow_postpone=True (the causal_rl-dependent
+    # single-binding branch in run_evolutions applies only when postpone is
+    # off).
+    env_causal = causal or method in ("cfpl", "cfpd")
     # LRQ requires token-flow postpone (postpone must be a lineage member).
     # lrq2/mc_q don't need it, but get the IDENTICAL env config so the
     # variants differ in the credit computation only. Plain PPO/RUDDER ignore
     # the flag.
-    env = make_env(env_name, causal_rl=causal,
+    env = make_env(env_name, causal_rl=env_causal,
                    allow_postpone=cfg.allow_postpone,
-                   causal_postpone_tokenflow=causal)
+                   causal_postpone_tokenflow=env_causal)
     args = _make_args(env_name, method, seed, cfg, logdir_base)
 
     # training_run internally calls parse_args(); neutralize our own argv so it

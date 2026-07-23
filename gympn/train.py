@@ -161,6 +161,79 @@ def make_parser():
                           'A = (1-mu)*A_LRQ + mu*A_GAE. 0.0 (default) = pure LRQ (no cross-case '
                           'smearing, foreclosure-blind); raise it if the foreclosure diagnostic '
                           'shows resource-contention effects LRQ cannot see (CAUSAL_LRQ_PROPOSAL.md §3).')
+    cf = parser.add_argument_group('counterfactual', 'G1 forked counterfactual '
+                                   'preferences (CAUSAL_LINEAGE_RETHINK.md §7.2)')
+    cf.add_argument('--cf_fork_prob',
+                    type=float,
+                    default=0.0,
+                    help='Per-decision probability of forking the simulator into (taken, '
+                         'alternative) CRN sibling suffixes during training rollouts. '
+                         '0.0 (default) = G1 disabled entirely (exact PPO floor).')
+    cf.add_argument('--cf_reps',
+                    type=int,
+                    default=3,
+                    help='CRN replications per branch action; the paired std over reps '
+                         'prices the noise for the SNR gate.')
+    cf.add_argument('--cf_gate',
+                    type=float,
+                    default=2.0,
+                    help='Emit a preference only when |mean paired gap| > gate * paired SE.')
+    cf.add_argument('--cf_lookahead',
+                    type=float,
+                    default=6.0,
+                    help='Truncate branch suffixes once the clock advances this far past '
+                         'the fork (value-tail bootstrapped; with causal_beta=0.5 a '
+                         'lookahead of 6 keeps ~95%% of the discounted mass).')
+    cf.add_argument('--cf_max_forks',
+                    type=int,
+                    default=2,
+                    help='Maximum forks executed per episode (cost cap).')
+    cf.add_argument('--cf_coef',
+                    type=float,
+                    default=1.0,
+                    help='Initial coefficient of the pairwise logistic preference loss; '
+                         'linearly annealed to 0 over training (floor by construction).')
+    cf.add_argument('--cf_updates',
+                    type=int,
+                    default=2,
+                    help='Gradient passes over the epoch\'s preferences per epoch.')
+    cf.add_argument('--cf_lineage',
+                    type=lambda x: str(x).lower() == 'true',
+                    default=False,
+                    help='Restrict each forked branch return to rewards causally DESCENDED '
+                         'from the forked decision (the lineage test applied inside the '
+                         'counterfactual), instead of summing the raw return-to-go. Removes '
+                         'concurrent-activity reward that CRN pairing cannot cancel; needs '
+                         'the ENV built with causal_rl=True for trace recording (the agent '
+                         'stays non-causal). Drops the value tail at truncation by design.')
+    cf.add_argument('--cf_decompose',
+                    type=lambda x: str(x).lower() == 'true',
+                    default=False,
+                    help='Lineage-DECOMPOSED counterfactual: split each forked gap into the '
+                         'direct effect (rewards descended from the decision, low variance, '
+                         'used as sampled) and the indirect/opportunity-cost effect (high '
+                         'variance, replaced by a ridge regression on lineage-derived '
+                         'occupancy features pooled over the epoch). Falls back to the raw '
+                         'total gap when the regression fails to generalize (see --cf_min_r2).')
+    cf.add_argument('--cf_min_r2',
+                    type=float,
+                    default=0.05,
+                    help='Held-out R^2 the indirect-channel regression must reach before it '
+                         'is trusted; below this the raw total gap is used instead (the '
+                         'safety floor against a misspecified correction).')
+    cf.add_argument('--cf_value_tail',
+                    type=lambda x: str(x).lower() == 'true',
+                    default=True,
+                    help='Bootstrap the truncated branch suffix with V(s) (True, default). '
+                         'False = plain truncation. Independent of --cf_lineage so the '
+                         'lineage ablation can be isolated (lineage mode ignores this and '
+                         'never adds the tail: V predicts the full, unrestricted return).')
+    cf.add_argument('--cf_anneal',
+                    type=lambda x: str(x).lower() == 'true',
+                    default=True,
+                    help='Linearly anneal the preference-loss coefficient to 0 over training '
+                         '(True, default = exact PPO floor at the end). False = constant '
+                         'coefficient: the X10 mechanism probe, floor knowingly sacrificed.')
     alg.add_argument('--test_episodes',
                      type=int,
                      default=10,
@@ -319,6 +392,25 @@ def make_parser():
     dcl.add_argument('--dcl_horizon', type=int, default=5)
     dcl.add_argument('--dcl_rollouts', type=int, default=32)
     dcl.add_argument('--dcl_temp', type=float, default=1.0)
+    dcl.add_argument('--dcl_lineage',
+                     type=lambda x: str(x).lower() == 'true',
+                     default=False,
+                     help='Use the structurally lineage-aware planner (sharing across '
+                          'independent candidates, budget pruning, coupling truncation). '
+                          'Requires the ENV to record causal traces (causal_rl=True).')
+    dcl.add_argument('--dcl_lineage_tally',
+                     type=lambda x: str(x).lower() == 'true',
+                     default=False,
+                     help='Score candidates by their lineage-RESTRICTED return. Lower '
+                          'variance and it is what enables rollout sharing, but biased on '
+                          'foreclosure-dominated envs (X13: -8%% finals on s1). Safe on '
+                          'direct-dominated envs (grid/E1).')
+    dcl.add_argument('--dcl_lineage_share',
+                     type=lambda x: str(x).lower() == 'true', default=True)
+    dcl.add_argument('--dcl_lineage_prune',
+                     type=lambda x: str(x).lower() == 'true', default=True)
+    dcl.add_argument('--dcl_lineage_truncate',
+                     type=lambda x: str(x).lower() == 'true', default=True)
 
     rudder = parser.add_argument_group('rudder', 'RUDDER credit assignment parameters')
     rudder.add_argument('--rudder_enabled',
@@ -588,6 +680,26 @@ def make_agent(args, metadata=None):
             metadata=metadata
         )
 
+    # G1 forked counterfactual preferences: config dict for the agent
+    # (gympn/counterfactual.py); None = disabled, exact PPO floor.
+    cf_config = None
+    if getattr(args, 'cf_fork_prob', 0.0) > 0.0:
+        cf_config = {
+            'fork_prob': float(args.cf_fork_prob),
+            'reps': int(getattr(args, 'cf_reps', 3)),
+            'gate': float(getattr(args, 'cf_gate', 2.0)),
+            'lookahead': float(getattr(args, 'cf_lookahead', 6.0)),
+            'max_forks': int(getattr(args, 'cf_max_forks', 2)),
+            'coef': float(getattr(args, 'cf_coef', 1.0)),
+            'updates': int(getattr(args, 'cf_updates', 2)),
+            'anneal': bool(getattr(args, 'cf_anneal', True)),
+            'lineage': bool(getattr(args, 'cf_lineage', False)),
+            'value_tail': bool(getattr(args, 'cf_value_tail', True)),
+            'decompose': bool(getattr(args, 'cf_decompose', False)),
+            'min_r2': float(getattr(args, 'cf_min_r2', 0.05)),
+            'beta': float(causal_beta),
+        }
+
     if args.algorithm == 'pg':
         agent = PGAgent(policy_network=policy_network,policy_lr=args.policy_lr, policy_updates=args.policy_updates,
                         value_network=value_network, value_lr=args.value_lr, value_updates=args.value_updates,
@@ -597,6 +709,7 @@ def make_agent(args, metadata=None):
                         causal_beta=causal_beta, causal_mu=causal_mu,
                         smdp_discount=smdp_discount,
                          causal_aux_coef=causal_aux_coef,
+                        cf_config=cf_config,
                         normalize_advantages=getattr(args, 'normalize_advantages', False),
                         lr_schedule=getattr(args, 'lr_schedule', True))
     elif args.algorithm == 'ppo-clip':
@@ -611,6 +724,7 @@ def make_agent(args, metadata=None):
                          causal_beta=causal_beta, causal_mu=causal_mu,
                          smdp_discount=smdp_discount,
                          causal_aux_coef=causal_aux_coef,
+                         cf_config=cf_config,
                          normalize_advantages=getattr(args, 'normalize_advantages', False),
                          lr_schedule=getattr(args, 'lr_schedule', True))
     elif args.algorithm == 'ppo-penalty':
@@ -625,6 +739,7 @@ def make_agent(args, metadata=None):
                          causal_beta=causal_beta, causal_mu=causal_mu,
                          smdp_discount=smdp_discount,
                          causal_aux_coef=causal_aux_coef,
+                         cf_config=cf_config,
                          normalize_advantages=getattr(args, 'normalize_advantages', False),
                          lr_schedule=getattr(args, 'lr_schedule', True))
 
@@ -637,7 +752,12 @@ def make_agent(args, metadata=None):
             gamma=args.gam,
             temperature=args.dcl_temp,
             use_crn=True,
-            use_lineage=True
+            beta=float(getattr(args, 'causal_beta', 0.0)),
+            use_lineage=bool(getattr(args, 'dcl_lineage', False)),
+            lineage_tally=bool(getattr(args, 'dcl_lineage_tally', False)),
+            lineage_share=bool(getattr(args, 'dcl_lineage_share', True)),
+            lineage_prune=bool(getattr(args, 'dcl_lineage_prune', True)),
+            lineage_truncate=bool(getattr(args, 'dcl_lineage_truncate', True)),
         )
 
         agent = DCLAgent(
