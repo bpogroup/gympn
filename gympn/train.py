@@ -52,6 +52,8 @@ from gympn.agents import PGAgent, PPOAgent
 
 from gympn.dcl_planner import PlannerConfig
 from gympn.agents_dcl import DCLAgent
+from gympn.mcts_planner import MCTSConfig
+from gympn.agents_mcts import MCTSAgent
 
 
 #train = True
@@ -74,7 +76,7 @@ def make_parser():
     alg = parser.add_argument_group('algorithm', 'algorithm parameters')
 
     alg.add_argument('--algorithm',
-                     choices=['ppo-clip', 'ppo-penalty', 'pg', 'dcl'],
+                     choices=['ppo-clip', 'ppo-penalty', 'pg', 'dcl', 'mcts'],
                      default='ppo-clip',
                      help='training algorithm')
 
@@ -411,6 +413,40 @@ def make_parser():
                      type=lambda x: str(x).lower() == 'true', default=True)
     dcl.add_argument('--dcl_lineage_truncate',
                      type=lambda x: str(x).lower() == 'true', default=True)
+
+    mcts = parser.add_argument_group('mcts', 'AlphaZero-over-AEPN (Direction A) parameters')
+    mcts.add_argument('--mcts_sims', type=int, default=64,
+                      help='PUCT simulations per decision')
+    mcts.add_argument('--mcts_c_puct', type=float, default=1.5)
+    mcts.add_argument('--mcts_lookahead', type=float, default=8.0,
+                      help='search horizon in CLOCK units; value net bootstraps beyond')
+    mcts.add_argument('--mcts_max_depth', type=int, default=64,
+                      help='hard recursion-depth safety cap (real horizon is --mcts_lookahead)')
+    mcts.add_argument('--mcts_temp', type=float, default=1.0,
+                      help='visit-count temperature for the distilled target')
+    mcts.add_argument('--mcts_coupling_truncate',
+                      type=lambda x: str(x).lower() == 'true', default=True,
+                      help='coupling truncation: share tree nodes by state fingerprint '
+                           '(branches that coincide are searched once)')
+    mcts.add_argument('--mcts_couple_min_visits', type=int, default=0,
+                      help='>0 also short-circuits re-entry into a resolved coupled state '
+                           '(returns cached value, saves env steps). Raise on stochastic envs.')
+    mcts.add_argument('--mcts_rollout_backup',
+                      type=lambda x: str(x).lower() == 'true', default=False,
+                      help='rollout-based per-decision backup (whole return-to-go = mc_q '
+                           'inside the tree; the fair baseline for the lineage A/B). '
+                           'Requires causal_rl=True env.')
+    mcts.add_argument('--mcts_lineage_backup',
+                      type=lambda x: str(x).lower() == 'true', default=False,
+                      help='THE LINEAGE CONTRIBUTION: credit each decision edge only by its '
+                           'causal-descendant rewards (lrq inside the tree). Implies '
+                           'rollout backup; needs causal_rl=True env.')
+    mcts.add_argument('--mcts_dirichlet_alpha', type=float, default=0.0,
+                      help='root Dirichlet exploration noise weight (0=off)')
+    mcts.add_argument('--mcts_conflict_gate',
+                      type=lambda x: str(x).lower() == 'true', default=True,
+                      help='Direction B: collapse structurally-forced (all-commuting) '
+                           'nodes so search concentrates on genuine contested decisions')
 
     rudder = parser.add_argument_group('rudder', 'RUDDER credit assignment parameters')
     rudder.add_argument('--rudder_enabled',
@@ -764,6 +800,32 @@ def make_agent(args, metadata=None):
             policy_network=policy_network,
             value_network=value_network,
             planner_cfg=planner_cfg,
+            policy_lr=args.policy_lr,
+            policy_updates=args.policy_updates,
+            value_lr=args.value_lr,
+            value_updates=args.value_updates,
+            gam=args.gam, lam=args.lam,
+            kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus)
+
+    elif args.algorithm == 'mcts':
+        mcts_cfg = MCTSConfig(
+            n_simulations=int(getattr(args, 'mcts_sims', 64)),
+            c_puct=float(getattr(args, 'mcts_c_puct', 1.5)),
+            lookahead=float(getattr(args, 'mcts_lookahead', 8.0)),
+            max_depth=int(getattr(args, 'mcts_max_depth', 64)),
+            temperature=float(getattr(args, 'mcts_temp', 1.0)),
+            beta=float(getattr(args, 'causal_beta', 0.0)),
+            dirichlet_alpha=float(getattr(args, 'mcts_dirichlet_alpha', 0.0)),
+            conflict_gate=bool(getattr(args, 'mcts_conflict_gate', True)),
+            coupling_truncate=bool(getattr(args, 'mcts_coupling_truncate', True)),
+            couple_min_visits=int(getattr(args, 'mcts_couple_min_visits', 0)),
+            rollout_backup=bool(getattr(args, 'mcts_rollout_backup', False)),
+            lineage_backup=bool(getattr(args, 'mcts_lineage_backup', False)),
+        )
+        agent = MCTSAgent(
+            policy_network=policy_network,
+            value_network=value_network,
+            mcts_cfg=mcts_cfg,
             policy_lr=args.policy_lr,
             policy_updates=args.policy_updates,
             value_lr=args.value_lr,

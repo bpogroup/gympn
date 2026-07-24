@@ -13,6 +13,11 @@ class AEPN_Env(Env):
     Gym environment for training a Deep Reinforcement Learning agent on the AEPN simulator.
     """
 
+    # Use the lightweight PN snapshot in get_state/set_state (markings + scalars
+    # + shared trace) instead of a full deepcopy of the net structure. Set False
+    # to fall back to the deepcopy path (equivalence testing / safety).
+    LIGHT_SNAPSHOT = True
+
     def __init__(self, aepn):
         """"Initialize the environment with a GymProblem instance."""
         super().__init__()
@@ -38,10 +43,18 @@ class AEPN_Env(Env):
         # debugging
         self.debug = False
 
-    def step(self, action: int):
+    def step(self, action: int, build_obs: bool = True):
         """
         Execute one step in the environment.
         Returns (observation, reward, terminated, truncated, info)
+
+        ``build_obs=False`` skips constructing the (expensive) HeteroData graph
+        observation and returns ``None`` in its place. Building the graph is
+        ~80% of a step's cost (profiled), so planners that only need the reward,
+        the ``done`` flag and the updated ``pn.pn_actions`` — e.g. MCTS descent
+        and rollout steps that continue with a cheap policy — pass False and
+        build the graph on demand only where a network forward is actually
+        required (node expansion).
         """
         old_rewards = self.pn.reward
         if action < 0 or action >= len(self.pn.pn_actions):
@@ -64,7 +77,8 @@ class AEPN_Env(Env):
             self.pn.update_reward(binding, result_tokens)
             self.pn.bindings()  # updates the network tag if needed
 
-        observation, terminated, self.i = self.pn.run_evolutions(self.run, self.i, self.active_model)
+        observation, terminated, self.i = self.pn.run_evolutions(
+            self.run, self.i, self.active_model, build_obs=build_obs)
 
         # Prepare info dict
         if self.pn.causal_rl:
@@ -143,7 +157,12 @@ class AEPN_Env(Env):
             }
         """
         snapshot = {
-            "pn": copy.deepcopy(self.pn),
+            # Lightweight PN snapshot (markings + scalars + shared trace) instead
+            # of a full deepcopy of the net structure — ~20% of a search, profiled.
+            # LIGHT_SNAPSHOT=False falls back to the old deepcopy (used to verify
+            # behavioural equivalence).
+            "pn_state": (self.pn.save_state() if AEPN_Env.LIGHT_SNAPSHOT else None),
+            "pn": (None if AEPN_Env.LIGHT_SNAPSHOT else copy.deepcopy(self.pn)),
             "run": copy.deepcopy(self.run),
             "i": self.i,
             "active_model": self.active_model,
@@ -166,7 +185,10 @@ class AEPN_Env(Env):
             A dictionary produced by get_state().
         """
         # Simulator state
-        self.pn = copy.deepcopy(snapshot["pn"])
+        if snapshot.get("pn_state") is not None:
+            self.pn.restore_state(snapshot["pn_state"])
+        else:
+            self.pn = copy.deepcopy(snapshot["pn"])
         self.run = copy.deepcopy(snapshot["run"])
         self.i = int(snapshot["i"])
         self.active_model = bool(snapshot["active_model"])

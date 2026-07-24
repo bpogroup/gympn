@@ -13,8 +13,12 @@ from torch_geometric.data import HeteroData
 from torch_geometric.transforms import BaseTransform
 
 from simpn.simulator import SimProblem, SimEvent, SimVar, SimVarQueue, SimToken
+try:
+    from simpn.simulator import SimVarTime
+except Exception:  # pragma: no cover
+    SimVarTime = ()
 
-from gympn.causal_traces import CausalTraces
+from gympn.causal_traces import CausalTraces, TokenHistory, TransitionHistory
 from gympn.environment import AEPN_Env
 from gympn.solvers import BaseSolver, GymSolver
 from gympn.train import make_agent, make_parser, make_logdir, launch_tensorboard
@@ -186,7 +190,7 @@ class GymProblem(SimProblem):
 
 
 
-    def add_action(self, inflow, outflow, behavior, name=None, guard=None, reward_function=None, solver=None):
+    def add_action(self, inflow, outflow, behavior, name=None, guard=None, reward_function=None, solver=None, _fast=False):
         """
                 Creates a new SimEvent with the specified parameters (also see SimEvent). Adds the SimEvent to the problem and returns it.
 
@@ -199,6 +203,17 @@ class GymProblem(SimProblem):
                 :param solver: a solver that decides which specific binding to use for firing.
                 :return: a SimAction with the specified parameters.
                 """
+
+        if _fast:
+            # Trusted internal path (expand_no_future_tokens): inputs are correct
+            # by construction, so skip all validation — the arity check via
+            # inspect.signature (~0.3s/search, profiled), the SimVar type checks,
+            # the id2node uniqueness check, and the postpone-guard exec. The
+            # expanded net is a throwaway structural artifact rebuilt every step.
+            result = SimAction(name, guard=guard, behavior=behavior,
+                               incoming=inflow, outgoing=outflow, solver=solver)
+            self.actions.append(result)
+            return result
 
         # Check name
         t_name = name
@@ -550,6 +565,36 @@ class GymProblem(SimProblem):
 
         ret.clock = self.clock
         return ret
+
+    def compute_pn_actions(self):
+        """Refresh ``self.pn_actions`` (the firable binding list) WITHOUT building
+        the HeteroData tensor graph.
+
+        This is the cheap path for planners that only need to pick and fire
+        actions (MCTS descent + rollout), skipping the ~66% of
+        ``get_graph_observation`` spent on tensor/HeteroData construction. It
+        reproduces exactly the binding-map that ``get_graph_observation`` builds
+        in its ``a_transition`` branch — same ``expand_no_future_tokens``, same
+        iteration order over ``expanded_pn.actions``, same ``b_time <= clock``
+        filter, same trailing postpone entry — so action indices stay identical
+        to those the graph path produces (the network prior/eval alignment).
+        """
+        self.expanded_pn, _ = self.expand_no_future_tokens()
+        transition_binding_map = []
+        for t in self.expanded_pn.actions:
+            b_list = [el.marking[0] for el in t.incoming]
+            binds = [([place for place in self.places
+                       if place._id == GymProblem._get_string_before_last_dot(el._id)][0],
+                      el.marking[0]) for el in t.incoming]
+            b_time = max([tok.time for tok in b_list])
+            original_transition = [action for action in self.actions
+                                   if action._id == GymProblem._get_string_before_last_dot(t._id)][0]
+            if b_time <= self.clock:
+                transition_binding_map.append((binds, b_time, original_transition))
+        if self.allow_postpone:
+            transition_binding_map.append((['postpone'], self.clock, None))
+        self.pn_actions = transition_binding_map
+        return transition_binding_map
 
     def get_graph_observation(self, minimal_obs=False, normalize=False, remove_empty_nodes=True, add_self_loops=True):
         """
@@ -953,7 +998,7 @@ class GymProblem(SimProblem):
                 #dummy behavior takes as many arguments as there are input places of the new transition
                 dummy_behavior = self._make_dummy_behavior(len(new_inflow))
 
-                new_tr = expanded_pn.add_action(new_inflow, new_outflow, behavior=dummy_behavior, name=f"{t._id}.{index_new_action}")
+                new_tr = expanded_pn.add_action(new_inflow, new_outflow, behavior=dummy_behavior, name=f"{t._id}.{index_new_action}", _fast=True)
                 for el in new_tr.incoming:
                     expanded_pn.arcs.append((el, new_tr))
                 for el in new_tr.outgoing:
@@ -961,13 +1006,99 @@ class GymProblem(SimProblem):
 
         return expanded_pn, transition_binding_map
 
+    def save_state(self):
+        """Lightweight snapshot of the MUTABLE simulation state, avoiding the
+        deep-copy of the (immutable-during-a-search) net STRUCTURE — SimVars,
+        transitions, arcs, id2node, metadata. Profiled: the full-pn deepcopy in
+        env.set_state was ~20% of a search; this copies only markings + a few
+        scalars and shares the causal-trace histories (safe: the search FLUSHES
+        the trace, replacing the history objects, so the saved references are
+        never mutated in place).
+
+        Restores identically via ``restore_state``. Token values are dicts that
+        behaviors may mutate in place, so marking tokens are deep-copied.
+        """
+        markings = {}
+        for p in self.places:
+            if SimVarTime and isinstance(p, SimVarTime):
+                continue
+            if isinstance(p, SimVarQueue):
+                continue
+            markings[p._id] = [copy.deepcopy(tok) for tok in p.marking]
+        state = {
+            "markings": markings,
+            "clock": self.clock,
+            "reward": self.reward,
+            "tag": self.network_tag.tag,
+            "just_postponed": self.just_postponed,
+        }
+        ct = getattr(self, "causal_trace", None)
+        if ct is not None:
+            state["trace"] = self._snapshot_trace(ct)
+        return state
+
+    @staticmethod
+    def _snapshot_trace(ct):
+        """Cheap, SAFE trace snapshot: shallow-copy the containers. Trace record
+        dicts are immutable after ``add_transition``/``add_token`` create them,
+        so sharing their references is safe; only the mutable lists/dicts are
+        copied, so later appends (or a flush replacing the whole object) cannot
+        reach the snapshot. Much cheaper than deepcopy (no token duplication)
+        and — unlike sharing the whole history object — has no
+        append-after-restore footgun."""
+        th, tr = ct.token_history, ct.transition_history
+        return (dict(th.tokens),
+                {k: list(v) for k, v in th.transition_to_tokens.items()},
+                list(tr.transitions))
+
+    def restore_state(self, state):
+        """Restore a snapshot from ``save_state`` in place (self.pn stays the
+        same object; only mutable state is rewritten)."""
+        for p in self.places:
+            if SimVarTime and isinstance(p, SimVarTime):
+                continue
+            if isinstance(p, SimVarQueue):
+                continue
+            saved = state["markings"].get(p._id)
+            if saved is None:
+                continue
+            p.marking.clear()
+            for tok in saved:
+                p.marking.add(copy.deepcopy(tok))
+        self.clock = state["clock"]
+        self.reward = state["reward"]
+        self.network_tag.tag = state["tag"]
+        self.just_postponed = state["just_postponed"]
+        ct = getattr(self, "causal_trace", None)
+        if ct is not None and "trace" in state:
+            tokens, t2t, transitions = state["trace"]
+            th = TokenHistory()
+            th.tokens = dict(tokens)
+            th.transition_to_tokens = {k: list(v) for k, v in t2t.items()}
+            tr = TransitionHistory()
+            tr.transitions = list(transitions)
+            ct.token_history = th
+            ct.transition_history = tr
+        # pn_actions references tokens; the restored tokens are fresh copies, so
+        # rebuild the binding list to point at them (cheap path, no tensor graph).
+        self.compute_pn_actions()
+
+    _dummy_behavior_cache = {}
+
     def _make_dummy_behavior(self, num_args):
-        # Create a dummy function with the correct number of arguments
-        arg_list = ', '.join([f'arg{i}' for i in range(num_args)])
-        func_code = f"def dummy_behavior({arg_list}):\n    return [None] * {num_args}"
-        local_vars = {}
-        exec(func_code, {}, local_vars)
-        return local_vars['dummy_behavior']
+        # Cache by arity: the dummy behavior is stateless (returns [None]*n and
+        # takes n args), so one function per distinct arity is reused everywhere.
+        # expand_no_future_tokens builds one per expanded action in the hot
+        # planning loop; without the cache that was ~14k exec() calls/search
+        # (profiled the #1 cost after the graph-skip refactor).
+        fn = GymProblem._dummy_behavior_cache.get(num_args)
+        if fn is None:
+            arg_list = ', '.join([f'arg{i}' for i in range(num_args)])
+            func_code = f"def dummy_behavior({arg_list}):\n    return [None] * {num_args}"
+            local_vars = {}
+            exec(func_code, {}, local_vars)
+            fn = GymProblem._dummy_behavior_cache[num_args] = local_vars['dummy_behavior']
+        return fn
 
     def expand(self):
         """
@@ -1122,18 +1253,27 @@ class GymProblem(SimProblem):
         return new_ret_graph
 
 
+    _sbd_cache = {}
+
     @staticmethod
     def _get_string_before_last_dot(s: str) -> str:
         """
         Extracts the substring before the last dot in a string.
 
+        Memoized: this is a pure function of ``s`` called ~660k times/search in
+        the expansion/binding hot loop (profiled), over a small set of repeating
+        place/transition ids.
+
         :param s: The input string.
         :return: The substring before the last dot.
         """
-        last_dot_index = s.rfind('.')
-        if last_dot_index == -1:
-            return s  # Return the whole string if no dot is found
-        return s[:last_dot_index]
+        cache = GymProblem._sbd_cache
+        out = cache.get(s)
+        if out is None:
+            last_dot_index = s.rfind('.')
+            out = s if last_dot_index == -1 else s[:last_dot_index]
+            cache[s] = out
+        return out
 
     @staticmethod
     def tokens_combinations(event):
@@ -1236,10 +1376,22 @@ class GymProblem(SimProblem):
         return self
 
 
-    def run_evolutions(self, run, i, active_model):
+    def run_evolutions(self, run, i, active_model, build_obs=True):
         """
         Function invoked by Gym environment to let the network perform evolutions when no actions are required
+
+        ``build_obs=False`` returns ``None`` instead of the HeteroData graph
+        observation at each return point (the graph build is ~80% of step cost;
+        cheap planner rollouts don't need it). ``pn.pn_actions`` is still updated
+        by ``bindings()``, so callers can pick/fire actions without the graph.
         """
+        def _obs():
+            if build_obs:
+                return self.get_graph_observation()
+            # cheap path: refresh pn_actions (needed to fire) without the tensor
+            # graph, and return no observation.
+            self.compute_pn_actions()
+            return None
 
         while self.clock <= self.length and active_model:
             bindings, active_model = self.bindings()
@@ -1264,7 +1416,7 @@ class GymProblem(SimProblem):
                 if not self.allow_postpone:
                     condition = True if self.causal_rl else len(bindings) > 1
                     if condition:  # only consult the agent when there is a real choice
-                        return self.get_graph_observation(), self.clock > self.length or not active_model, i
+                        return _obs(), self.clock > self.length or not active_model, i
                     else:
                         binding = bindings[0]
                         run.append(binding)
@@ -1273,11 +1425,11 @@ class GymProblem(SimProblem):
                         i += 1
                 else:
                     # allow_postpone: the agent may also choose to postpone.
-                    return self.get_graph_observation(), self.clock > self.length or not active_model, i
+                    return _obs(), self.clock > self.length or not active_model, i
             else:
                 active_model = False
 
-        return self.get_graph_observation(), self.clock > self.length or not active_model, i
+        return _obs(), self.clock > self.length or not active_model, i
 
     def update_reward(self, timed_binding, result_tokens=None):
         binding, time, transition = timed_binding

@@ -263,17 +263,38 @@ class DCLAgent(Agent):
             probs = self.policy_model(batch)                  # per-node probabilities (concat across samples)
             logprobs = (probs + eps).log()
 
-            # Required: target_pi in batch
-            if not hasattr(batch, 'target_pi'):
+            # Build the CE target in the SAME node order the actor emits:
+            # [all a_transition nodes, all postpone nodes] (see HeteroActor.forward,
+            # networks.py: logits = cat(logits_a, logits_p)). The FLAT
+            # ``batch.target_pi`` is a per-GRAPH concatenation [g0_a,g0_p,g1_a,...]
+            # which PyG batching leaves misaligned with the by-TYPE node order —
+            # that misalignment trained the wrong nodes and collapsed the policy
+            # to always-postpone (the X15 distillation bug). The buffer already
+            # stores per-node-type targets on the node stores, which PyG batches
+            # by type, so they line up with the actor output exactly.
+            graph = batch['graph'] if (isinstance(batch, dict) and 'graph' in batch) else batch
+            tpi_parts = []
+            node_types = getattr(graph, 'node_types', [])
+            for nt in ('a_transition', 'postpone'):
+                if nt in node_types and hasattr(graph[nt], 'target_pi'):
+                    tp = graph[nt].target_pi
+                    if tp is not None and tp.numel() > 0:
+                        tpi_parts.append(tp.reshape(-1))
+            if tpi_parts:
+                tpi = torch.cat(tpi_parts)
+            elif hasattr(batch, 'target_pi'):
+                tpi = batch.target_pi.reshape(-1)   # last-resort fallback
+            else:
                 raise RuntimeError("Batch missing 'target_pi' for DCL training.")
 
-            tpi = batch.target_pi
-            # Align shapes for CE
-            if tpi.shape != probs.shape:
+            # Align shapes for CE (should already match after the by-type build)
+            probs = probs.reshape(-1)
+            logprobs = logprobs.reshape(-1)
+            if tpi.numel() != probs.numel():
                 m = min(tpi.numel(), probs.numel())
-                tpi = tpi.view(-1)[:m]
-                logprobs = logprobs.view(-1)[:m]
-                probs = probs.view(-1)[:m]
+                tpi = tpi[:m]
+                logprobs = logprobs[:m]
+                probs = probs[:m]
 
             # Cross-entropy toward the planner-improved target
             ce = -(tpi * logprobs).sum() / max(1.0, float(tpi.numel()))
