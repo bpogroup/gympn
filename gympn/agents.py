@@ -615,8 +615,25 @@ class Agent:
         # G1 counterfactual forking: training rollouts only (buffer present),
         # capped per episode. Forks snapshot/restore env.pn, so the main
         # trajectory is untouched.
-        cf_on = getattr(self, 'cf_config', None) is not None and buffer is not None
+        cf_on = (getattr(self, 'cf_config', None) is not None and buffer is not None
+                 and getattr(self, 'causal_scheme', None) != 'lrq2c')
         cf_forks_done = 0
+
+        # lrq2c: PPO + lrq2 lineage advantage + sparse EXACT indirect correction
+        # (CRN forks at foreclosure-gated decisions only). See
+        # LINEAGE_SPARSE_CORRECTION.md. Uses its own fork path (router-gated,
+        # applied per-decision) rather than the cfpk/cfp preference path above.
+        lrq2c_on = (getattr(self, 'causal_scheme', None) == 'lrq2c'
+                    and buffer is not None and getattr(self, 'cf_config', None) is not None)
+        cf_indirect = []
+        lrq2c_forks = 0
+        if lrq2c_on and getattr(self, '_lrq2c_router', None) is None:
+            try:
+                from gympn.conflict_graph import conflicted_transition_ids
+                self._lrq2c_router = conflicted_transition_ids(env.pn)
+                get_logger().info(f"[lrq2c] foreclosure router: {self._lrq2c_router}")
+            except Exception:
+                self._lrq2c_router = set()
 
         while not done:
             action, logprob, logpis = self.act(state, return_logprob=True)
@@ -642,6 +659,38 @@ class Agent:
                         self._cf_records.append(pref)
                     else:
                         self._cf_prefs.append(pref)
+
+            # lrq2c: fork ONLY at foreclosure-gated (structurally-contested) real
+            # decisions; add the exact indirect gap to this decision's advantage
+            # if it clears its own SNR gate (else the fork self-cancels — no new
+            # bias). Non-gated decisions get pure lrq2 (correction 0).
+            corr = 0.0
+            if lrq2c_on:
+                tr_id = None
+                binds = getattr(env.pn, 'pn_actions', [])
+                if 0 <= action < len(binds):
+                    b = binds[action]
+                    if not (isinstance(b[0], list) and b[0] == ['postpone']):
+                        try:
+                            tr_id = getattr(b[2], '_id', None)
+                        except Exception:
+                            tr_id = None
+                if tr_id in self._lrq2c_router and lrq2c_forks < self.cf_config['max_forks']:
+                    from gympn.counterfactual import maybe_fork
+                    forked, rec, diag = maybe_fork(
+                        self, env, state, action, logpis,
+                        dict(self.cf_config, decompose=True))
+                    if forked:
+                        lrq2c_forks += 1
+                    if rec is not None and 'gap_ind' in rec:
+                        gi = float(rec['gap_ind'])
+                        se = float(rec.get('se_ind', float('inf')))
+                        if abs(gi) > self.cf_config['gate'] * se:
+                            corr = gi
+                    if diag is not None:
+                        self._cf_diag.append(diag)
+            if lrq2c_on:
+                cf_indirect.append(corr)
 
             # Collect for batch processing
             states_batch.append(state)
@@ -743,6 +792,10 @@ class Agent:
                                 f"[CAUSAL-DIAG] tokens={tok_count}, transitions={trans_count}, ep_steps={episode_length}, redis_len={len(sample_cr) if sample_cr is not None else 'ERR'}, redis_sum={sum(sample_cr) if sample_cr is not None else 'ERR'}")
                 except Exception:
                     pass
+                if lrq2c_on:
+                    # per-decision indirect corrections, aligned 1:1 with steps;
+                    # finish() adds them to the lrq2 credits for scheme 'lrq2c'.
+                    buffer._lrq2c_indirect = cf_indirect
                 buffer.finish(credits=info['eligibility_credits'], mode="replace")
             else:
                 buffer.finish(credits=None)

@@ -403,7 +403,7 @@ def maybe_fork(agent, env, state, action, logpis, cfg, rng=_random):
 
             rec = {'state': state, 'action': action, 'alt': alt,
                    'gap_direct': float(d_dir.mean()), 'se_direct': _se(d_dir),
-                   'gap_ind': float(d_ind.mean()),
+                   'gap_ind': float(d_ind.mean()), 'se_ind': _se(d_ind),
                    'gap_total': float(d_tot.mean()), 'se_total': _se(d_tot),
                    'phi': phi}
             return True, rec, {'gap': float(d_tot.mean()), 'se': _se(d_tot),

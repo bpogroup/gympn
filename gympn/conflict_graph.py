@@ -222,6 +222,26 @@ def extract_transitions(
     return transitions, kept_place_ids, sorted(excluded), warnings
 
 
+def conflicted_transition_ids(pn) -> set:
+    """The set of ACTION transition ids that appear in some action-vs-action
+    structural conflict (compete for a shared input place) — the
+    foreclosure-CAPABLE decisions.
+
+    This is the router for `lrq2c` (LINEAGE_SPARSE_CORRECTION.md §3): a decision
+    is foreclosure-suspect only if its action can contend with another action for
+    a resource. On DISJOINT envs this set is EMPTY → the sparse counterfactual
+    correction never fires → pure lrq2 (grid stays perfect). On contested envs
+    (s1: start1/start2 share the employee pool) it flags exactly those
+    decisions. Reads only the PN formalism (shared input places) — no
+    token-value semantics."""
+    a = analyze(pn)
+    ids = set()
+    for x, y in a.action_conflict_edges:
+        ids.add(x)
+        ids.add(y)
+    return ids
+
+
 def analyze(
     pn,
     exclude_place_ids: Sequence[str] = (),

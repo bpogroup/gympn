@@ -589,6 +589,21 @@ class TrajectoryBuffer:
                     credits_vec = torch.as_tensor(cr_lin, dtype=torch.float32)
                     cr_full = torch.as_tensor(cr_full, dtype=torch.float32)
                     qoff_targets_ep = cr_full - credits_vec
+                elif self.causal_scheme == 'lrq2c':
+                    # lrq2 + sparse counterfactual correction: the cheap
+                    # lineage-restricted Q (direct channel), plus the EXACT
+                    # indirect (opportunity-cost) term measured by CRN forks at
+                    # foreclosure-gated decisions (stored on the buffer by
+                    # run_episode as `_lrq2c_indirect`, aligned 1:1 with steps).
+                    # See LINEAGE_SPARSE_CORRECTION.md.
+                    cr = credits.redistribute_rewards(scheme='lrq2',
+                                                      beta=self.causal_beta)
+                    credits_vec = torch.as_tensor(cr, dtype=torch.float32)
+                    ind = getattr(self, '_lrq2c_indirect', None)
+                    if ind is not None:
+                        iv = torch.as_tensor(ind, dtype=torch.float32)
+                        if iv.numel() == credits_vec.numel():
+                            credits_vec = credits_vec + iv
                 else:
                     cr = credits.redistribute_rewards(
                         scheme=self.causal_scheme,
@@ -616,7 +631,7 @@ class TrajectoryBuffer:
             # Identify them from the trace's action records (1:1 with steps,
             # asserted above). Plain-vector credits (tests) => no mask.
             postpone_mask = None
-            if self.causal_scheme == 'lrq2' and hasattr(credits, 'transition_history'):
+            if self.causal_scheme in ('lrq2', 'lrq2c', 'ccf') and hasattr(credits, 'transition_history'):
                 flags = []
                 for act in credits.transition_history.get_action_transitions():
                     tid = getattr(act.get('transition'), '_id', None)

@@ -115,7 +115,7 @@ def make_parser():
     alg.add_argument('--causal_scheme',
                      type=str,
                      default='lrq',
-                     choices=['lrq', 'lrq2', 'lrq3', 'lqi', 'lcv', 'lva', 'mc_q'],
+                     choices=['lrq', 'lrq2', 'lrq2c', 'ccf', 'lrq3', 'lqi', 'lcv', 'lva', 'mc_q'],
                      help='causal credit scheme. "lrq2" is lrq with the consistent-support postpone '
                           'fix: production actions keep the lineage Q-sample, postpone gets the '
                           'SMDP-TD advantage e^(-beta*tau)V(s\')-V(s) instead of a lineage credit '

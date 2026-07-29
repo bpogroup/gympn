@@ -251,6 +251,21 @@ class CausalTraces:
         if scheme == "mc_q":
             return self._redistribute_mcq(action_transitions, redistribution, beta)
 
+        # CCF: Causal-Component-Factored return-to-go (LINEAGE_SPARSE_CORRECTION
+        # follow-up). Partition decisions into causally-connected COMPONENTS
+        # (union-find over reward lineages — captures both token-flow AND
+        # resource contention, since a freed resource re-emits into the DAG),
+        # then give each decision the return-to-go RESTRICTED TO ITS COMPONENT.
+        # UNBIASED within a component (full return-to-go, sees foreclosure) and
+        # variance-filtered across components (cross-component reward is
+        # independent of the action, a valid baseline). One component => full
+        # return-to-go (= mc_q, matches PPO, no lineage bias); independent
+        # components => per-case filter (= lrq's win). Strictly dominates lrq.
+        if scheme == "ccf":
+            return self._redistribute_ccf(action_transitions, token_to_action,
+                                          record_to_action, redistribution, beta,
+                                          get_parents)
+
         raise ValueError(
             f"Unknown scheme: {scheme!r}. All redistribution schemes except 'lrq' "
             f"have been removed (flow_dag/shapley_dag/rec/flow/exponential/linear/"
@@ -297,6 +312,101 @@ class CausalTraces:
             for idx, u in decision_time.items():
                 if t_j is None or u is None or u <= t_j:
                     redistribution[idx] += reward * disc(t_j, u)
+
+        return redistribution
+
+    # ------------------------------------------------------------------ #
+    # CCF: Causal-Component-Factored return-to-go                        #
+    # ------------------------------------------------------------------ #
+
+    def _redistribute_ccf(self, action_transitions, token_to_action,
+                          record_to_action, redistribution, beta, get_parents):
+        """Component-factored return-to-go (see the dispatch comment).
+
+        Step 1: for each reward, find the decisions in its causal lineage and
+                UNION them into one component (a reward's causes interact).
+        Step 2: each decision's credit = sum of its component's rewards at or
+                after its decision clock, discounted.
+
+        Cross-component rewards are causally independent of the action (they
+        share no lineage), so omitting them is a valid, variance-reducing
+        baseline — the estimator stays unbiased. Postpone is left as a singleton
+        component (no reward-causing descendants under token-flow-off); finish()
+        gives it the SMDP-TD advantage via the postpone mask, as for lrq2.
+        """
+        import math
+
+        n = len(action_transitions)
+        parent = list(range(n))
+
+        def find(x):
+            r = x
+            while parent[r] != r:
+                r = parent[r]
+            while parent[x] != r:
+                parent[x], x = r, parent[x]
+            return r
+
+        def union(a, b):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        decision_time = {idx: act.get("time")
+                         for idx, act in enumerate(action_transitions)}
+
+        def lineage_decisions(input_ids, firing_idx):
+            found = set()
+            if firing_idx is not None:
+                found.add(firing_idx)
+            seen = set()
+            stack = list(input_ids)
+            while stack:
+                tid = stack.pop()
+                if tid in seen:
+                    continue
+                seen.add(tid)
+                hit = token_to_action.get(tid)
+                if hit is not None:
+                    found.add(hit[0])
+                for p in get_parents(tid):
+                    if p not in seen:
+                        stack.append(p)
+            return found
+
+        # Step 1: collect rewards with their lineage decisions; union components.
+        rewards_list = []  # (reward, t_j, representative_decision_idx or None)
+        for tr in self.transition_history.transitions:
+            reward = tr.get("reward", 0.0)
+            if reward == 0.0:
+                continue
+            t_j = tr.get("time")
+            firing_idx = None
+            se = record_to_action.get(id(tr))
+            if se is not None:
+                firing_idx = se[0]
+            decs = list(lineage_decisions(tr.get("input_tokens", ()), firing_idx))
+            for i in range(1, len(decs)):
+                union(decs[0], decs[i])
+            rewards_list.append((reward, t_j, decs[0] if decs else None))
+
+        def disc(t_reward, u_dec):
+            if beta == 0.0 or t_reward is None or u_dec is None:
+                return 1.0
+            return math.exp(-beta * max(0.0, float(t_reward) - float(u_dec)))
+
+        # Step 2: component return-to-go per decision.
+        for idx in range(n):
+            ci = find(idx)
+            u = decision_time.get(idx)
+            for (reward, t_j, rep) in rewards_list:
+                if rep is None or find(rep) != ci:
+                    continue
+                # return-to-go: reward at/after the decision (missing clocks
+                # included, same conservative convention as mc_q/lrq).
+                if u is not None and t_j is not None and t_j < u:
+                    continue
+                redistribution[idx] += reward * disc(t_j, u)
 
         return redistribution
 

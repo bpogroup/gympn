@@ -579,7 +579,7 @@ class GymProblem(SimProblem):
         filter, same trailing postpone entry — so action indices stay identical
         to those the graph path produces (the network prior/eval alignment).
         """
-        self.expanded_pn, _ = self.expand_no_future_tokens()
+        self.expanded_pn, _ = self.expand_no_future_tokens(actions_only=True)
         transition_binding_map = []
         for t in self.expanded_pn.actions:
             b_list = [el.marking[0] for el in t.incoming]
@@ -900,10 +900,19 @@ class GymProblem(SimProblem):
 
         return updated_graph
 
-    def expand_no_future_tokens(self):
+    def expand_no_future_tokens(self, actions_only=False):
         """
         Expands the attributed A-E PN into a 1-bounded attributed A-E PN.
         Filters out tokens and bindings with time > self.clock.
+
+        ``actions_only=True`` builds only the expanded PLACES and ACTIONS
+        (skipping the expanded events and all arc bookkeeping). ``pn_actions``
+        is derived solely from ``expanded_pn.actions`` and their input places, so
+        the events/arcs are dead weight for ``compute_pn_actions`` — this is the
+        cheap path in the planning hot loop and produces an IDENTICAL action
+        order/content to the full expansion (verified), so alignment with the
+        graph's a_transition nodes is preserved.
+
         :return: A tuple containing:
         - The expanded `GymProblem` instance.
         - A mapping of transitions to their bindings in the expanded problem.
@@ -930,8 +939,19 @@ class GymProblem(SimProblem):
                 new_place_id = f"{p._id}.0"
                 expanded_pn.add_var(name=new_place_id, var_attributes=self.var_attributes[p._id])
 
-        # Expand events (evolutions)
-        for t in self.events:
+        # original place id -> its expanded copies, IN place order. Precomputed
+        # once so the actions loop below does O(1) lookups instead of rescanning
+        # every expanded place (with a _get_string call) per binding — that scan
+        # was ~672k _get_string calls/search, profiled. Order is preserved, so
+        # the expanded-action order (hence pn_actions↔graph alignment) is intact.
+        expanded_by_original = {}
+        for pl in expanded_pn.places:
+            expanded_by_original.setdefault(
+                self._get_string_before_last_dot(pl._id), []).append(pl)
+
+        # Expand events (evolutions) — skipped for actions_only (unused by
+        # compute_pn_actions, which reads only expanded_pn.actions).
+        for t in ([] if actions_only else self.events):
             new_inflow = []
             for p in t.incoming:
                 if isinstance(p, SimVar):
@@ -977,8 +997,7 @@ class GymProblem(SimProblem):
                 new_outflows = {}
 
                 for place, token in binding:
-                    for new_place in [pl for pl in expanded_pn.places if
-                                      self._get_string_before_last_dot(pl._id) == place._id]:
+                    for new_place in expanded_by_original.get(place._id, []):
                         new_inflows.setdefault(place._id, []).append(new_place)
 
                 for p in t.outgoing:
@@ -999,10 +1018,11 @@ class GymProblem(SimProblem):
                 dummy_behavior = self._make_dummy_behavior(len(new_inflow))
 
                 new_tr = expanded_pn.add_action(new_inflow, new_outflow, behavior=dummy_behavior, name=f"{t._id}.{index_new_action}", _fast=True)
-                for el in new_tr.incoming:
-                    expanded_pn.arcs.append((el, new_tr))
-                for el in new_tr.outgoing:
-                    expanded_pn.arcs.append((new_tr, el))
+                if not actions_only:
+                    for el in new_tr.incoming:
+                        expanded_pn.arcs.append((el, new_tr))
+                    for el in new_tr.outgoing:
+                        expanded_pn.arcs.append((new_tr, el))
 
         return expanded_pn, transition_binding_map
 

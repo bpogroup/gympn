@@ -533,18 +533,19 @@ def mcts_target_pi(env, state_graph, actor, cfg: MCTSConfig,
             _, r, done, _, _ = env.step(a, build_obs=False)
             counters["steps"] += 1
             guard += 1
-        # per-decision backup from the completed trace. In lineage mode EVERY
-        # edge is scored by its lineage-restricted return, so the sibling
-        # comparison is on one consistent scale. Postpone must therefore run
-        # with token-flow OFF (causal_postpone_tokenflow=False): then it produces
-        # no reward-causing tokens and its lineage return is ~0 — the correct
-        # causal value of a pure timing action, and NOT the whole backlog (which
-        # token-flow postpone would make it an ancestor of: the E5/LRQ
-        # postpone-aggregation attractor). Scoring postpone by whole return-to-go
-        # instead puts it on a different (larger) scale than the single-case
-        # lineage returns and makes the search postpone everything — measured.
+        # per-decision backup from the completed trace.
+        #
+        # POSTPONE is scored by its (near-zero, token-flow-OFF) lineage return in
+        # BOTH backups — it is a pure timing action with no causal descendants.
+        # This is essential for a controlled lineage-vs-whole comparison: whole
+        # return-to-go credits postpone with ALL the reward it merely delayed
+        # (postpone ≈ acting), which swamps the search into always-postponing
+        # (measured: the whole arm collapsed to greedy 0.0 at every epoch on s1).
+        # Suppressing postpone identically in both arms leaves the ONLY
+        # difference as how REAL decisions are scored — whole (mc_q-in-tree) vs
+        # lineage (lrq-in-tree) — which is exactly the effect the A/B isolates.
         for (node_i, sig_i, roots_i, rrid_i, idx_i) in path:
-            if cfg.lineage_backup:
+            if sig_i == _POSTPONE or cfg.lineage_backup:
                 val = _lineage_return(ct, roots_i, rrid_i, t0, cfg.beta)
             else:
                 val = _whole_return_to_go(ct, idx_i, t0, cfg.beta)
