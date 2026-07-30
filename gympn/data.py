@@ -631,7 +631,7 @@ class TrajectoryBuffer:
             # Identify them from the trace's action records (1:1 with steps,
             # asserted above). Plain-vector credits (tests) => no mask.
             postpone_mask = None
-            if self.causal_scheme in ('lrq2', 'lrq2c', 'ccf') and hasattr(credits, 'transition_history'):
+            if self.causal_scheme in ('lrq2', 'lrq2c', 'ccf', 's_ccf') and hasattr(credits, 'transition_history'):
                 flags = []
                 for act in credits.transition_history.get_action_transitions():
                     tid = getattr(act.get('transition'), '_id', None)

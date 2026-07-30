@@ -1680,6 +1680,11 @@ class GymProblem(SimProblem):
                     for token in place.marking:
                         setattr(token, '_id', str(uuid.uuid4()))
                 print("Causal RL enabled: each token has been assigned a unique identifier.")
+                # Give the causal trace a back-reference to this (fully-built) net,
+                # so the s_ccf scheme can read the static topology for its
+                # action-invariant components. Reset the cached component map.
+                self.causal_trace._pn = self
+                self.causal_trace._static_comp_cache = None
                 # Ensure causal trace starts empty at the beginning of training
                 try:
                     self.causal_trace.flush()

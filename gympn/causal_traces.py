@@ -115,6 +115,13 @@ class CausalTraces:
         # causal_postpone_tokenflow flag). redistribute_rewards() defaults
         # include_postpone to this when the caller does not specify it.
         self.postpone_tokenflow = False
+        # Back-reference to the GymProblem, set by the simulator once the net is
+        # fully built. Used only by the s_ccf scheme, which needs the STATIC net
+        # topology (actions/events/reward transitions and their arcs) to compute
+        # action-invariant causal components. The static-component map is cached
+        # since the topology does not change during training.
+        self._pn = None
+        self._static_comp_cache = None
 
     def flush(self):
         # Preserve config flags (postpone_tokenflow) across episode resets;
@@ -266,6 +273,20 @@ class CausalTraces:
                                           record_to_action, redistribution, beta,
                                           get_parents)
 
+        # S-CCF: STATIC-component-factored return-to-go. Same idea as ccf, but the
+        # component partition is computed ONCE from the net TOPOLOGY (which
+        # decisions could co-cause a reward under ANY action, grouping a
+        # decision's competing actions), not the realized trajectory. Because
+        # membership is action-invariant, the excluded (cross-component) rewards
+        # are unreachable from the decision under any action -> action-independent
+        # -> a valid baseline -> UNBIASED BY CONSTRUCTION (assumption A1 holds
+        # automatically). Fixes ccf's action-dependent-membership bias at
+        # AND-joins / shared-resource handoffs while keeping the variance
+        # reduction on statically-independent structure. See assembly_probe.py.
+        if scheme == "s_ccf":
+            return self._redistribute_s_ccf(action_transitions, record_to_action,
+                                            redistribution, beta)
+
         raise ValueError(
             f"Unknown scheme: {scheme!r}. All redistribution schemes except 'lrq' "
             f"have been removed (flow_dag/shapley_dag/rec/flow/exponential/linear/"
@@ -408,6 +429,116 @@ class CausalTraces:
                     continue
                 redistribution[idx] += reward * disc(t_j, u)
 
+        return redistribution
+
+    # ------------------------------------------------------------------ #
+    # S-CCF: static (action-invariant) component-factored credit          #
+    # ------------------------------------------------------------------ #
+
+    def _static_component_reward_types(self):
+        """Map each action-type to the set of reward-transition-types in its
+        STATIC causal component. Two decisions are in one component when they can
+        statically reach a common reward transition (topological reachability of
+        the net, over ALL of a decision's competing actions -- grouped by shared
+        input place -- so membership is action-invariant). Cached; the net
+        topology is fixed during training."""
+        if self._static_comp_cache is not None:
+            return self._static_comp_cache
+        pn = self._pn
+        if pn is None:
+            raise ValueError(
+                "s_ccf requires the net topology: set causal_trace._pn = <GymProblem> "
+                "(the simulator does this in training_run) before redistribute.")
+
+        trans = list(pn.actions) + list(pn.events)
+        consumers = {}
+        for t in trans:
+            for p in t.incoming:
+                consumers.setdefault(p._id, []).append(t)
+        reward_types = set(pn.reward_functions.keys())
+
+        def reaches(t):
+            reached, seen_t, seen_p, stack = set(), set(), set(), list(t.outgoing)
+            if t._id in reward_types:
+                reached.add(t._id)
+            while stack:
+                p = stack.pop()
+                if p._id in seen_p:
+                    continue
+                seen_p.add(p._id)
+                for ct in consumers.get(p._id, []):
+                    if ct._id in reward_types:
+                        reached.add(ct._id)
+                    if ct._id not in seen_t:
+                        seen_t.add(ct._id); stack.extend(ct.outgoing)
+            return reached
+
+        reach_by_action = {a._id: reaches(a) for a in pn.actions}
+
+        # Group competing actions (shared input place) into one decision point.
+        ap = {a._id: a._id for a in pn.actions}
+        def af(x):
+            while ap[x] != x:
+                ap[x] = ap[ap[x]]; x = ap[x]
+            return x
+        place_to_actions = {}
+        for a in pn.actions:
+            for p in a.incoming:
+                place_to_actions.setdefault(p._id, []).append(a._id)
+        for aids in place_to_actions.values():
+            for k in range(1, len(aids)):
+                ap[af(aids[0])] = af(aids[k])
+        dp_reach = {}
+        for aid, rr in reach_by_action.items():
+            dp_reach.setdefault(af(aid), set()).update(rr)
+
+        # Union decision points that can reach a common reward -> components.
+        dps = list(dp_reach)
+        dp = {d: d for d in dps}
+        def df(x):
+            while dp[x] != x:
+                dp[x] = dp[dp[x]]; x = dp[x]
+            return x
+        for i in range(len(dps)):
+            for j in range(i + 1, len(dps)):
+                if dp_reach[dps[i]] & dp_reach[dps[j]]:
+                    dp[df(dps[i])] = df(dps[j])
+        comp = {}
+        for d in dps:
+            comp.setdefault(df(d), set()).update(dp_reach[d])
+        self._static_comp_cache = {aid: comp[df(af(aid))] for aid in reach_by_action}
+        return self._static_comp_cache
+
+    def _redistribute_s_ccf(self, action_transitions, record_to_action,
+                            redistribution, beta):
+        """Credit each decision with the realized rewards of its STATIC component,
+        at/after its decision clock, discounted. Unbiased by construction; see the
+        dispatch comment and assembly_probe.py."""
+        import math
+        comp_rw = self._static_component_reward_types()
+        base = self._pn._get_string_before_last_dot
+        rewards = []
+        for tr in self.transition_history.transitions:
+            rv = tr.get("reward", 0.0)
+            if rv == 0.0:
+                continue
+            tobj = tr.get("transition")
+            rtype = base(getattr(tobj, "_id", "")) if tobj is not None else None
+            rewards.append((rv, tr.get("time"), rtype))
+
+        for idx, act in enumerate(action_transitions):
+            rec = record_to_action.get(id(act))
+            if rec is not None and rec[1]:      # postpone sentinel -> no lineage credit
+                continue
+            tobj = act.get("transition")
+            a_type = base(getattr(tobj, "_id", "")) if tobj is not None else None
+            allowed = comp_rw.get(a_type, set())
+            u = act.get("time")
+            c = 0.0
+            for (rv, t_j, rtype) in rewards:
+                if rtype in allowed and t_j is not None and u is not None and t_j >= u:
+                    c += rv * math.exp(-beta * max(0.0, float(t_j) - float(u)))
+            redistribution[idx] = c
         return redistribution
 
     # ------------------------------------------------------------------ #
