@@ -223,39 +223,32 @@ class AEPN_Env(Env):
         except Exception:
             pass
 
-    def set_seed(self, seed: int) -> None:
+    def set_seed(self, seed: int, *, deterministic: bool = True) -> None:
         """
-        Seed *all* stochastic elements (Python, NumPy, PyTorch CPU/GPU, and Petri net if available).
+        Seed *all* stochastic elements for a reproducible run: Python, NumPy,
+        PyTorch (CPU/GPU), cuDNN, and the underlying Petri net if it exposes a
+        seed hook. Delegates to :func:`gympn.seed_everything` so there is a
+        single source of truth for seeding across the library.
 
         Parameters
         ----------
         seed : int
             The seed to set.
+        deterministic : bool, default True
+            Request deterministic PyTorch kernels (see ``seed_everything``).
         """
-        # Python & NumPy
-        random.seed(seed)
-        np.random.seed(seed)
+        from .seeding import seed_everything
+        seed_everything(seed, deterministic=deterministic)
 
-        # PyTorch CPU/GPU
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-
-        # Ensure deterministic settings (optional, might affect performance)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-
-        # Petri net internal seeding, if provided by your implementation
-        if hasattr(self.pn, "seed") and callable(getattr(self.pn, "seed")):
-            try:
-                self.pn.seed(seed)
-            except Exception:
-                print(f"Warning: pn.seed() failed for seed {seed}.")
-                pass
-        if hasattr(self.pn, "set_seed") and callable(getattr(self.pn, "set_seed")):
-            try:
-                self.pn.set_seed(seed)
-            except Exception:
-                pass
+        # Petri net internal seeding, if the problem exposes one.
+        for hook in ("set_seed", "seed"):
+            fn = getattr(self.pn, hook, None)
+            if callable(fn):
+                try:
+                    fn(seed)
+                    break
+                except Exception:
+                    pass
 
     def enabled_actions(self, state):
         # Return positions in the current enabled list (exact indices env.step expects)

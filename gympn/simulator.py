@@ -1589,6 +1589,14 @@ class GymProblem(SimProblem):
 
         return tuple([nodes_meta, edges_meta])
 
+    def set_seed(self, seed, *, deterministic: bool = True):
+        """Seed every stochastic source (Python, NumPy, PyTorch, cuDNN) for a
+        reproducible run. Single source of truth is :func:`gympn.seed_everything`.
+        Environment stochasticity (arrivals, delays) uses the global ``random`` /
+        ``numpy`` modules, so this also makes the net's dynamics reproducible."""
+        from .seeding import seed_everything
+        return seed_everything(seed, deterministic=deterministic)
+
     def training_run(self, length = 10, args_dict=None):
         """
         Runs the petri net as a reinforcement learning environment.
@@ -1657,11 +1665,10 @@ class GymProblem(SimProblem):
         if not args.use_gpu:
             os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
         if args.agent_seed is not None:
-            np.random.seed(args.agent_seed)
-            random.seed(args.agent_seed)
-            torch.manual_seed(args.agent_seed)
-            torch.cuda.manual_seed(args.agent_seed)
-            # TODO: two more lines for cuda
+            # Single source of truth: seeds Python/NumPy/PyTorch/cuDNN and sets
+            # deterministic kernels, so the whole run is reproducible.
+            from .seeding import seed_everything
+            seed_everything(args.agent_seed)
 
         #EXPERIMENTAL: if causal_rl, every token in the network is complemented with a unique identifier
         if self.causal_rl:
@@ -1920,7 +1927,7 @@ class GymProblem(SimProblem):
         """
         self.solver = solver
 
-    def testing_run(self, solver, length=10, reporter=None, visualize=False):
+    def testing_run(self, solver, length=10, reporter=None, visualize=False, seed=None):
         """
         Test run aligned with AEPN_Env semantics:
           1) Ensure we start in ACTION phase (like env.reset()).
@@ -1930,8 +1937,13 @@ class GymProblem(SimProblem):
                - Run all evolutions: obs, terminated, _ = run_evolutions(...)
                - Stop when 'terminated' is True (same as AEPN_Env.step).
           3) Return total accumulated reward (same scalar your env exposes in info['pn_reward']).
+
+        :param seed: if given, seed all stochastic sources first (via
+            :func:`gympn.seed_everything`) so the evaluation episode is reproducible.
         """
         # ---- Setup identical to environment.reset() ----
+        if seed is not None:
+            self.set_seed(seed)
         self.length = length
         if visualize:
             # Keep your existing visualization path if needed

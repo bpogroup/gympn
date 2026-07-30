@@ -54,8 +54,18 @@ def _prepare_x_dict_for_conv(x_dict, input_size, graph=None, params_iter=None,
     for ntype in node_types:
         x = (x_dict or {}).get(ntype)
         if x is None or x.size(0) == 0:
-            # Use the per-type dim if known, otherwise fall back to the global dim
-            dim = (seen_dims or {}).get(ntype, input_dim)
+            # Prefer the width already carried by an empty-but-present tensor: an
+            # empty node type arrives as [0, W] with its CORRECT feature width W.
+            # Only fall back to the per-type seen dim, then the global dim, when no
+            # width is available. Using the global fallback for a present [0, W]
+            # type was the bug: it gave e.g. busy_s ([0, 3]) a width-2 dummy,
+            # locking its lazily-sized input Linear to 2, which then crashed when a
+            # populated busy_s ([N, 3]) arrived. Seed-dependent because it hinged on
+            # whether a type was first seen empty or populated.
+            if x is not None and x.dim() == 2 and x.size(-1) > 0:
+                dim = x.size(-1)
+            else:
+                dim = (seen_dims or {}).get(ntype, input_dim)
             x_fixed[ntype] = torch.zeros((1, dim), device=device, dtype=dtype)
             dummies.add(ntype)
         else:
