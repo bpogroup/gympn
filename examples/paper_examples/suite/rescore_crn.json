@@ -1,0 +1,23 @@
+{
+  "env": "s1_stoch_sequence",
+  "episodes": 200,
+  "eval_seed": 555000,
+  "crn_precheck_match": true,
+  "scores": {
+    "ppo_clip__s0": 14.225,
+    "ppo_clip__s1": 14.495,
+    "ppo_clip__s2": 14.63,
+    "ppo_clip__s3": 14.305,
+    "ppo_clip__s4": 13.59,
+    "cgae__s0": 13.975,
+    "cgae__s1": 13.975,
+    "cgae__s2": 13.975,
+    "cgae__s3": 14.225,
+    "cgae__s4": 14.215,
+    "cfgae__s0": 14.515,
+    "cfgae__s1": 14.06,
+    "cfgae__s2": 14.015,
+    "cfgae__s3": 13.695,
+    "cfgae__s4": 13.865
+  }
+}

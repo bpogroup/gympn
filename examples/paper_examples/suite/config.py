@@ -14,7 +14,7 @@ so 0 = random, 1 = optimal, and results aggregate across environments.
 """
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
 # All 8 environments (keys must match envs.ENV_BUILDERS).
@@ -55,6 +55,24 @@ ALL_ENVS: List[str] = [
 #            the CV alone, [lcv0-ppo_clip] = the discount alone. Not in
 #            ALL_METHODS by default — add explicitly where needed (see
 #            PAPER_PLAN_LCV.md §5 X0/X1/X6).
+# "ccf"    = Causal-Component-Factored return-to-go: union-find the REALIZED
+#            lineage of each reward into components, credit each decision its
+#            component's full return-to-go. Unbiased ONLY when a component's
+#            membership doesn't depend on the action taken (fails at AND-joins/
+#            shared-resource handoffs — see assembly_probe.py M1/M2, proven in
+#            EJOR_PROPOSITIONS.md) — kept for the ablation, not recommended.
+# "s_ccf"  = the fix: STATIC (topology-only, action-invariant) component
+#            partition instead of ccf's realized one — unbiased BY
+#            CONSTRUCTION (assumption A1 holds automatically), proven +
+#            variance-reduced by a provable factor on genuinely decomposable
+#            envs (N-copies, multi-site: beats PPO decisively, p=.005), honest
+#            NULL (reduces exactly to mc_q/PPO) on single-component envs like
+#            s1/the grid. Conservative on some motifs (keeps action-independent
+#            reward a finer estimator could factor out — see M4 in
+#            assembly_probe.py) by design, not a bug — see CCF_EXPLAINED.md.
+#            THE MAIN RESULT of this whole causal-RL arc; every other scheme
+#            here is either an ablation of it or a documented attempt to do
+#            better on its honest null that didn't generalize.
 ALL_METHODS: List[str] = ["ppo_clip", "lrq", "rudder", "mc_q"]
 
 
@@ -72,6 +90,15 @@ class SuiteConfig:
     test_freq: int = 5          # deterministic (greedy) eval every N epochs
     test_episodes: int = 10     # episodes averaged per eval point (no-op on
                                 # deterministic envs; matters for stochastic ones)
+    # Common random numbers for the greedy eval: with a base seed set, eval
+    # episode i always runs scenario eval_seed+i, so every method and every
+    # epoch is scored on the SAME fixed scenario set and the arms differ only
+    # by policy. None = historical behaviour (fresh draws off the live RNG),
+    # which on s1 costs +-0.231 SD per 20-episode point, +-0.327 on a paired
+    # difference, and inflates greedy_drift by ~0.40 even for a flat policy.
+    # NOTE results produced with this set are NOT comparable point-for-point
+    # with cells on disk that were produced without it.
+    eval_seed: Optional[int] = None
     length: int = 10            # simulation horizon (timesteps)
     # Per-env horizon overrides (the stochastic tier runs longer horizons);
     # envs not listed fall back to `length`.
@@ -112,6 +139,36 @@ class SuiteConfig:
     causal_beta: float = 0.5
     # LRQ foreclosure hedge: A = (1-mu)*A_LRQ + mu*A_GAE on raw rewards.
     causal_mu: float = 0.0
+    # Potential-based reward shaping (gympn/potential.py; Ng, Harada & Russell
+    # 1999): F=e^{-causal_beta*tau}*Phi(s')-Phi(s), Phi from pure PN topology.
+    # 0.0 (default) = disabled. Provably cannot change the optimal policy for
+    # ANY value; layers on top of any method (not gated on `method` in
+    # run_suite._make_args).
+    phi_coef: float = 0.0
+    phi_decay: float = 0.9
+    # None (default) = uncapped Phi; a small int caps each place's own
+    # token-count contribution (min(count, phi_cap)) -- see potential.py's
+    # topology_potential docstring (exogenous-arrival queue-depth variance).
+    phi_cap: Optional[float] = None
+    # Structural (conflict-graph-derived) INPUT features to the actor/critic
+    # (gympn/simulator.py's GymProblem.use_structural_features): per action-
+    # type, (in_conflict, conflict_degree) appended to its node feature.
+    # False (default) = byte-identical observation shape to before. Unlike
+    # phi_coef/causal_mu/etc this is plain network input, not a credit or
+    # reward term -- no bias-variance or GAE-bootstrap concerns apply.
+    use_structural_features: bool = False
+    # Actor architecture fix (gympn/networks.py's HeteroActor global_context):
+    # concatenates the SAME pooled action/postpone context HeteroCritic
+    # already builds onto each action's own embedding before decoding its
+    # logit. False (default) = byte-identical, matches the pre-existing
+    # actor exactly. Motivation: HeteroActor decodes purely from a node's
+    # own final embedding, and get_graph_observation's edges are directed
+    # strictly along token flow (no reverse edges anywhere in real use), so
+    # an action can be provably blind (proven via exact-invariance test, not
+    # just empirically neutral) to state outside its forward-reachable
+    # neighborhood within net_num_layers hops -- see
+    # suite/_test_actor_global_context.py.
+    actor_global_context: bool = False
     # LVA: weight of the critic's auxiliary lineage-credit regression
     # (value_loss + coef * MSE(V_aux, lrq2 credit)); only read by method "lva".
     causal_aux_coef: float = 0.5

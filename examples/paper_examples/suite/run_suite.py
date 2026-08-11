@@ -28,6 +28,12 @@ for _v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
            "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
     os.environ.setdefault(_v, "1")
 
+# Fix hash randomisation for reproducibility. This must be set BEFORE the
+# interpreter starts to take effect, so we pin it here at import: spawned worker
+# processes inherit it at their own interpreter start, giving every cell a
+# deterministic hash seed (setdefault => an explicit value in the env still wins).
+os.environ.setdefault("PYTHONHASHSEED", "0")
+
 import numpy as np
 import torch
 
@@ -74,6 +80,12 @@ from config import (SuiteConfig, smoke_config, smoke8_config, seeds5_config,  # 
                     paper_config, stoch_config)
 from envs import make_env, perfect_heuristic, HEURISTICS           # noqa: E402
 
+# Method names that are also credit schemes, i.e. train.py's --causal_scheme
+# choices. A method in here is forwarded as its own scheme; anything else runs
+# the default lrq credit. Mirrors gympn/train.py -- add new schemes to both.
+CAUSAL_SCHEMES = ("lrq", "lrq2", "lrq2c", "ccf", "s_ccf", "lrq3", "lqi", "lcv",
+                  "lva", "mc_q", "cf", "ls_hca", "alin", "cgae", "cgae_flow", "cfgae")
+
 
 def _env_length(cfg: SuiteConfig, env_name: str) -> int:
     """Per-env horizon override (stochastic tier), else the global default."""
@@ -81,10 +93,9 @@ def _env_length(cfg: SuiteConfig, env_name: str) -> int:
 
 
 def _set_seed(seed: int):
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+    """Reproducible seeding via the single library entry point."""
+    from gympn import seed_everything
+    seed_everything(seed)
 
 
 def compute_baselines(env_name: str, cfg: SuiteConfig) -> dict:
@@ -126,7 +137,7 @@ def _net_kwargs(cfg: SuiteConfig) -> dict:
 
 
 def _make_args(env_name: str, method: str, seed: int, cfg: SuiteConfig, logdir_base: str) -> dict:
-    causal = method in ("lrq", "lrq2", "lrq3", "lqi", "lcv", "lva", "mc_q")
+    causal = method in ("lrq", "lrq2", "lrq3", "lqi", "lcv", "lva", "mc_q", "cf", "ls_hca", "ccf", "s_ccf", "alin", "cgae", "cgae_flow", "cfgae")
     # lcv0: LCV's exact c_hat=0 limiting case -- plain SMDP-GAE PPO (the
     # STANDARD, non-causal_rl path with the per-sojourn discount switched on).
     # No lineage machinery at all, so it stays OUT of the causal_rl set above.
@@ -151,6 +162,11 @@ def _make_args(env_name: str, method: str, seed: int, cfg: SuiteConfig, logdir_b
         # Same size for actor and critic keeps the comparison fair and cheap.
         extra["policy_kwargs"] = dict(net_kw)
         extra["value_kwargs"] = dict(net_kw)
+    if getattr(cfg, "actor_global_context", False):
+        # Actor-only (HeteroCritic already pools unconditionally -- passing
+        # this into value_kwargs would just be silently absorbed by its
+        # **kwargs, so keep it out to avoid implying it does something there).
+        extra.setdefault("policy_kwargs", {})["global_context"] = True
     return {
         **extra,
         "episodes": cfg.episodes_per_epoch,
@@ -168,9 +184,19 @@ def _make_args(env_name: str, method: str, seed: int, cfg: SuiteConfig, logdir_b
         "ent_bonus": cfg.ent_bonus,
         "policy_kld_limit": getattr(cfg, "policy_kld_limit", None),
         "causal_rl": causal,
-        "causal_scheme": method if method in ("lrq2", "lrq3", "lqi", "lcv", "lva", "mc_q") else "lrq",
+        # Any method name train.py accepts as a scheme is passed through
+        # verbatim; anything else (ppo_clip, cfp*, ...) trains plain lrq.
+        # Keep this in sync with train.py's --causal_scheme choices: it was
+        # previously a hand-listed subset, and cgae/cfgae/alin/lrq2c fell
+        # through the gap and silently trained lrq instead (two "cgae vs ppo"
+        # and "cfgae vs ppo" paired runs on s1 produced bit-identical curves
+        # because BOTH were lrq).
+        "causal_scheme": method if method in CAUSAL_SCHEMES else "lrq",
         "causal_beta": cfg.causal_beta,
         "causal_mu": getattr(cfg, "causal_mu", 0.0),
+        "phi_coef": getattr(cfg, "phi_coef", 0.0),
+        "phi_decay": getattr(cfg, "phi_decay", 0.9),
+        "phi_cap": getattr(cfg, "phi_cap", None),
         "causal_aux_coef": getattr(cfg, "causal_aux_coef", 0.5),
         "smdp_discount": smdp_discount,
         "cf_fork_prob": (getattr(cfg, "cf_fork_prob", 0.25)
@@ -185,6 +211,7 @@ def _make_args(env_name: str, method: str, seed: int, cfg: SuiteConfig, logdir_b
         "cf_gate": getattr(cfg, "cf_gate", 2.0),
         "cf_lookahead": getattr(cfg, "cf_lookahead", 6.0),
         "cf_max_forks": getattr(cfg, "cf_max_forks", 2),
+        "cf_coupling_truncate": getattr(cfg, "cf_coupling_truncate", False),
         "cf_coef": getattr(cfg, "cf_coef", 1.0),
         "cf_updates": getattr(cfg, "cf_updates", 2),
         "rudder_enabled": (method == "rudder"),
@@ -200,10 +227,16 @@ def _make_args(env_name: str, method: str, seed: int, cfg: SuiteConfig, logdir_b
         "test_in_train": True,
         "test_freq": cfg.test_freq,
         "test_episodes": getattr(cfg, "test_episodes", 10),
+        "eval_seed": getattr(cfg, "eval_seed", None),
         "save_freq": 1_000_000,
         "name": cfg.cell_id(env_name, method, seed),
         "datetag": False,
         "logdir": logdir_base,
+        # Standard PPO per-batch advantage normalization. Emitted explicitly
+        # rather than left to the argparse default (also True) so the setting
+        # is visible here and overridable per experiment -- ablating it needs
+        # to be one config line, not an edit to this function.
+        "normalize_advantages": getattr(cfg, "normalize_advantages", True),
     }
 
 
@@ -229,6 +262,12 @@ def _extract_metrics(history: dict, cfg: SuiteConfig) -> dict:
         "cf_se_curve": arr("cf_se"),
         "cf_gap_curve": arr("cf_gap"),
         "cf_pass_rate_curve": arr("cf_pass_rate"),
+        # ls_hca mechanism telemetry (absent for other schemes): how many
+        # (action_type, reward_type, z) records got pooled each epoch and how
+        # large the resulting fitted hindsight table is -- the fork-free
+        # analog of cf_forks/cf_prefs above.
+        "ls_hca_records_curve": arr("ls_hca_records"),
+        "ls_hca_hhat_size_curve": arr("ls_hca_hhat_size"),
         "sampled_curve": sampled,
         "sampled_best": max(sampled) if sampled else None,
         "sampled_final": sampled[-1] if sampled else None,
@@ -265,7 +304,7 @@ def _train_cell_worker(payload):
 
 def train_cell(env_name: str, method: str, seed: int, cfg: SuiteConfig, logdir_base: str) -> dict:
     _set_seed(seed)
-    causal = method in ("lrq", "lrq2", "lrq3", "lqi", "lcv", "lva", "mc_q")
+    causal = method in ("lrq", "lrq2", "lrq3", "lqi", "lcv", "lva", "mc_q", "cf", "ls_hca", "ccf", "s_ccf", "alin", "cgae", "cgae_flow", "cfgae")
     # cfpl needs the ENV to record the causal trace (its forked branch returns
     # are lineage-restricted) while its AGENT stays on the standard SMDP-GAE
     # path -- _make_args keeps causal_rl False for it, and run_episode's
@@ -283,6 +322,12 @@ def train_cell(env_name: str, method: str, seed: int, cfg: SuiteConfig, logdir_b
     env = make_env(env_name, causal_rl=env_causal,
                    allow_postpone=cfg.allow_postpone,
                    causal_postpone_tokenflow=env_causal)
+    # Structural (conflict-graph-derived) INPUT features (gympn/simulator.py's
+    # GymProblem.use_structural_features): set post-construction rather than
+    # threading through make_env's fixed per-builder signature -- mirrors how
+    # every individual env-builder function is bypassed for this, since it's
+    # a pure network-input concern, orthogonal to which env/topology is built.
+    env.use_structural_features = getattr(cfg, 'use_structural_features', False)
     args = _make_args(env_name, method, seed, cfg, logdir_base)
 
     # training_run internally calls parse_args(); neutralize our own argv so it

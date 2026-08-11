@@ -4,8 +4,10 @@ Currently includes policy gradient agent (i.e., Monte Carlo policy
 gradient or vanilla policy optimization
 agent.
 """
+import math
 import numpy as np
 import os
+import random
 import torch
 from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -14,6 +16,7 @@ from typing import Dict
 
 from gympn.data import TrajectoryBuffer, print_status_bar
 from gympn.logging_utils import Logger, TrainingMetrics, TestMetrics, get_logger
+from gympn.potential import topology_potential
 
 
 # torch.autograd.set_detect_anomaly(True)
@@ -140,7 +143,16 @@ class Agent:
                  causal_scheme='lrq', causal_pg=False,
                  causal_rl=False, causal_beta=0.0, causal_mu=0.0,
                  smdp_discount=False, causal_aux_coef=0.5,
-                 qoff_network=None, qlin_network=None, cf_config=None):
+                 qoff_network=None, qlin_network=None, cf_config=None,
+                 phi_coef=0.0, phi_decay=0.9, phi_cap=None,
+                 ls_hca_hhat_floor=0.05, ls_hca_factor_clip=3.0,
+                 ls_hca_smoothing_alpha=1.0, ls_hca_state_min_n=30,
+                 ls_hca_state_epochs=50, ls_hca_state_lr=0.05,
+                 ls_hca_flat_fallback=False, ls_hca_residual=True,
+                 ls_hca_state_l2=0.0, ls_hca_consistent=True,
+                 ls_hca_ratio=True, ls_hca_weight_clip=10.0,
+                 ls_hca_z_feature='delay', ls_hca_z_bins=4,
+                 ls_hca_gate=False):
         self.policy_model = policy_network
         self.policy_loss = NotImplementedError
         self.policy_optimizer = torch.optim.Adam(params=list(policy_network.parameters()),
@@ -195,14 +207,329 @@ class Agent:
         self.eps = eps
         self.vf_coeff = vf_coeff
 
+        # Potential-based reward shaping (gympn/potential.py; Ng, Harada &
+        # Russell 1999). 0.0 (default) = disabled, byte-identical no-op --
+        # matches this codebase's "safe floor" convention (cf_config=None,
+        # causal_mu=0.0). See run_episode for the injection point and
+        # potential.py's module docstring for the theorem + scope notes.
+        self.phi_coef = float(phi_coef)
+        self.phi_decay = float(phi_decay)
+        # None (default) = uncapped (the original Phi); a small int caps each
+        # place's own contribution before summing -- see potential.py's
+        # topology_potential docstring for why (exogenous-arrival queue-depth
+        # variance).
+        self.phi_cap = phi_cap
+
         # G1 forked counterfactual preferences (gympn/counterfactual.py,
         # CAUSAL_LINEAGE_RETHINK.md §7.2). None => disabled (exact PPO floor:
         # no forks, no aux loss, nothing else changes). Keys: fork_prob,
         # reps, gate, lookahead, max_forks, coef, updates, beta.
         self.cf_config = cf_config
+        # causal_scheme='cf' (measured counterfactual advantage) needs a fork
+        # config; default one so it works without CLI wiring. Forks EVERY
+        # decision (fork_prob is unused on this path) up to max_forks.
+        if getattr(self, 'causal_scheme', None) == 'cf' and self.cf_config is None:
+            self.cf_config = {'fork_prob': 1.0, 'reps': 1, 'gate': 0.0,
+                              'lookahead': 8.0, 'max_forks': 200, 'beta': 0.0}
         self._cf_prefs = []
         self._cf_diag = []   # per-fork {'gap','se','passed'} mechanism telemetry
         self._cf_records = []  # decomposed mode: unresolved fork records
+
+        # ls_hca (FORKFREE_LINEAGE_RETHINK.md Idea 1): the fitted hindsight
+        # model hhat(a | reward-type r realized in the decision's lineage),
+        # keyed (action_type, reward_type, z) -> probability. Starts empty ->
+        # every CONTESTED term's correction factor is 0 (safe floor: pure-only
+        # credit) until the first epoch's records are fit. _ls_hca_records
+        # pools this epoch's (action_type, reward_type, z) triples, consumed
+        # and cleared by _fit_ls_hca_hhat() at epoch end (one-epoch lag: never
+        # fit and applied on the same batch).
+        self._ls_hca_hhat = {}
+        self._ls_hca_records = []
+        # Stability guards for the 1-pi/hhat correction (run_episode's ls_hca
+        # combine step) -- added after a real 30-epoch/10-seed s1 run
+        # collapsed 0W/10L against lrq2 (several seeds to greedy_final=0.0).
+        # Root cause: hhat is refit fresh each epoch from the PREVIOUS
+        # epoch's policy and deliberately lags (kept off the current batch
+        # for unbiasedness -- see _fit_ls_hca_hhat), while pi(a|s) is from
+        # the CURRENT, possibly much-sharpened policy (s1's entropy collapses
+        # ~1.0->0.5 within ~8 epochs). When hhat is small relative to a
+        # sharpened pi, 1-pi/hhat is unbounded -- e.g. pi=0.5, hhat=0.01 gives
+        # factor=-49, an uncapped multiplier on the reward contribution.
+        # ls_hca_hhat_floor: statistically-meaningful minimum for a FITTED
+        # hhat value (replaces the old 1e-9, which only guarded against
+        # literal division by zero, not against small-but-nonzero hhat).
+        # ls_hca_factor_clip: hard cap on |factor|, a pure safety net
+        # independent of the floor/smoothing below.
+        # ls_hca_smoothing_alpha: Laplace pseudo-count added when FITTING
+        # hhat (_fit_ls_hca_hhat), guarding sparser (reward_type, z) buckets
+        # on other envs even where the floor/clip above are not the binding
+        # constraint. None of these three touch the fit/apply batch
+        # separation that makes ls_hca unbiased -- they only bound how large
+        # the correction can get, or smooth a noisy small-count estimate.
+        self.ls_hca_hhat_floor = float(ls_hca_hhat_floor)
+        self.ls_hca_factor_clip = float(ls_hca_factor_clip)
+        self.ls_hca_smoothing_alpha = float(ls_hca_smoothing_alpha)
+        # Opt-in diagnostic hook, default off -- see the combine step below.
+        self.ls_hca_debug = False
+        self._ls_hca_debug_log = []
+
+        # State-conditional hhat (the "logistic model" the original design
+        # doc sketched and the first implementation simplified away for a
+        # flat, type-only table -- see causal-stability-suite memory,
+        # "LS-HCA REVISITED": even after fixing the pit/hhat scale mismatch
+        # (type-aggregated pi), a real residual anti-correlation between pit
+        # and factor remained (r=-0.44), consistent with hhat still being a
+        # state-MARGINALIZED average rather than state-conditional). For
+        # each (reward_type, z) group with enough pooled records
+        # (>= ls_hca_state_min_n), fit a tiny per-group multinomial logistic
+        # regression mapping the marking-vector state features (same
+        # featurization as _rudder_features, general across any A-E PN) to a
+        # distribution over that group's observed action types -- refit
+        # fresh every epoch from scratch (no continuity assumed across
+        # epochs, matching the flat table's own fit/apply separation for
+        # unbiasedness).
+        #
+        # ls_hca_flat_fallback: what to do for a (reward_type, z) group with
+        # no fitted state model (below ls_hca_state_min_n, or no state
+        # features configured). True = fall back to the flat Laplace-smoothed
+        # table self._ls_hca_hhat (the original behaviour). DEFAULT FALSE,
+        # i.e. treat the group exactly like an unseen key and apply the
+        # cold-start-safe factor=0.
+        #
+        # Why the default is off, measured not assumed (_diag_ls_hca_step0.py
+        # on s1, 8272 pooled records over 10 epochs): the flat table's whole
+        # content is the marginal association between action type and z, and
+        # that association is ABSENT -- P(start1|z=False)=0.655 vs
+        # P(start1|z=True)=0.640, G=1.92, p=0.166, Cramer's V=0.015, and not
+        # one of the 10 individual epochs significant either. The SAME data
+        # shows a real state-CONDITIONAL association (held-out CE 0.4182 with
+        # the z split vs 0.4297+-0.0002 for 200 z-shuffled placebos, below
+        # the placebo minimum, permutation p=0.005). So I(A;Z) ~ 0 while
+        # I(A;Z|X) > 0: the state masks the signal, the state-conditional
+        # model finds it, and the flat table can only ever fit noise --
+        # every factor it produces is spurious, applied at full strength to
+        # a real reward. Falling back to factor=0 is strictly safer: it
+        # forfeits nothing real and it is the same conservative floor
+        # already used for genuinely unseen keys.
+        self._ls_hca_state_node_types = []  # set by make_agent from metadata
+        self._ls_hca_hhat_model = {}        # {(reward_type,z): (nn.Module, [a_type,...])}
+        self.ls_hca_state_min_n = int(ls_hca_state_min_n)
+        self.ls_hca_state_epochs = int(ls_hca_state_epochs)
+        self.ls_hca_state_lr = float(ls_hca_state_lr)
+        self.ls_hca_flat_fallback = bool(ls_hca_flat_fallback)
+
+        # ls_hca_residual: parameterize hhat as a perturbation OF the policy,
+        #     h(a|x,z) = softmax_a( log pi_type(a|x) + g(a|x,z) )
+        # over the types enabled at x, with g the per-(reward_type, z) linear
+        # model above, zero-initialized. DEFAULT TRUE.
+        #
+        # The estimator's validity rests on a null: if the action did not
+        # influence the reward then h == pi and factor = 1 - pi/h = 0. In the
+        # non-residual form h and pi are estimated INDEPENDENTLY -- a per-group
+        # linear model on marking counts versus a GNN softmax -- so that null
+        # holds only if two unrelated estimators happen to agree, and every
+        # systematic disagreement becomes bias multiplied straight into a real
+        # reward. Here the null is exact by construction: g == 0 gives
+        # h == pi identically, whatever pi's own error is, so only the
+        # RESIDUAL log-odds is ever estimated. Zero-init means training starts
+        # AT the null and departs only as far as the data pushes it.
+        #
+        # Measured motivation (_diag_ls_hca_step0.py, held-out): the true
+        # correction is far smaller than the one being applied -- ideal
+        # median |factor| 0.057 vs 0.194 applied on s1 (3.4x), and 0.0067 vs
+        # 0.0832 on i_mixed_credit (12.4x). Roughly 85-90% of the correction
+        # magnitude reaching the rewards was estimator mismatch, not signal.
+        #
+        # Requires the captured per-decision pi vector (run_episode's
+        # ls_hca_pi_type_vecs). Where that is missing the code falls back to
+        # the independent form, so nothing crashes on older pooled records.
+        self.ls_hca_residual = bool(ls_hca_residual)
+
+        # ls_hca_state_l2: decoupled (AdamW) weight decay on the residual model
+        # g. UNDER ls_hca_residual THIS IS A PRIOR CENTERED EXACTLY ON THE
+        # NULL -- g == 0 means h == pi means factor == 0 -- so shrinking g is
+        # literally "apply no correction unless the data insists". (With
+        # ls_hca_residual off, g == 0 instead means a UNIFORM h, so the same
+        # penalty encodes a much weaker and less principled prior; the knob is
+        # still honoured there, but its interpretation does not carry over.)
+        #
+        # Motivated by what is left after the reparameterization: it removes
+        # the pi-vs-h structural mismatch by construction, but the applied
+        # correction still ran ~2.5-3.3x the held-out ideal, and the residue is
+        # g's OWN estimation error -- g is fit in-sample over ls_hca_state_
+        # epochs passes with no shrinkage, while the true effect is a median
+        # ~0.015-0.06 nudge (_diag_ls_hca_step0.py).
+        #
+        # DEFAULT 0.0 (off), because that hypothesis was MEASURED AND REFUTED.
+        # `_diag_ls_hca_l2_sweep.py` swept lambda over 0..3 through this exact
+        # fit path on cached records: held-out CE is best at lambda=0 on BOTH
+        # envs (s1 0.41455, monotonically worse from there, +0.020 nats by
+        # lambda=3; i_mixed_credit flat to 5 decimals out to lambda=0.03, then
+        # worse). g is not overfitting, so the |factor| reduction shrinkage
+        # does buy (s1 median 0.118 -> 0.101 at lambda=3) is shrinking SIGNAL,
+        # not noise. The knob stays because it is cheap and the conclusion is
+        # env-specific, but turning it on needs a sweep saying so first.
+        #
+        # The remaining over-correction was then traced elsewhere
+        # (_diag_ls_hca_consistency.py): the residual form pins h to pi only at
+        # g == 0, and fits each (rtype, z) group INDEPENDENTLY, so the law of
+        # total probability sum_z P(z|x) h(a|x,z) == pi(a|x) is violated
+        # (median 3.4% of pi, systematically signed). Enforcing it cuts the
+        # applied |factor| 4.46x, onto the measured ideal. Coupling the
+        # z-groups at fit time -- not shrinking g -- is the real fix.
+        self.ls_hca_state_l2 = float(ls_hca_state_l2)
+
+        # ls_hca_consistent: model the LINEAGE-MEMBERSHIP probability
+        # P(z | x, a) -- one binary head per action type per reward-type --
+        # instead of modelling hhat directly, and recover
+        #     h(a|x,z) = pi(a|x) P(z|x,a) / P(z|x),   P(z|x) = sum_a pi(a|x) P(z|x,a)
+        # DEFAULT TRUE. Supersedes ls_hca_residual, which stays as the
+        # fallback when this cannot be fit (and is itself still exact at the
+        # null); set both False for the original independent-fit behaviour.
+        #
+        # This is the fix for the LAST known error source. The residual form
+        # made the null exact but fitted each (rtype, z) group INDEPENDENTLY,
+        # so nothing enforced the law of total probability
+        #     sum_z P(z|x) h(a|x,z) = pi(a|x)
+        # that any real hindsight distribution obeys. Measured violation on
+        # held-out records (_diag_ls_hca_consistency.py): median 3.4% of pi,
+        # systematically signed (mean +0.043), and enforcing the identity cut
+        # the applied |factor| 4.46x (median 0.0403 -> 0.0090) onto the
+        # independently measured ideal. Writing h as a genuine posterior makes
+        # the identity hold identically -- sum_z P(z|x,a) = 1 by definition --
+        # rather than approximately.
+        #
+        # Two consequences worth knowing. (1) pi CANCELS: the applied factor
+        # reduces to 1 - P(z|x)/P(z|x,a), so the correction no longer depends
+        # on the policy network's calibration at all, only on whether the
+        # action shifts lineage membership -- which is the causal question the
+        # estimator was always trying to ask. (2) The null is exact for a
+        # stronger reason than before: it needs P(z|x,a) == P(z|x), not
+        # agreement between two estimators of pi.
+        self.ls_hca_consistent = bool(ls_hca_consistent)
+        self._ls_hca_zmodel = {}    # rtype -> (nn.Module, [a_type, ...])
+
+        # ls_hca_ratio: use HCA's STATE-conditional estimator for the CONTESTED
+        # term -- weight each lineage reward by w = h/pi -- instead of the
+        # return-conditional one, which ADDS the mean-zero advantage
+        # (1 - pi/h). DEFAULT TRUE.
+        #
+        #   Q_d = sum_{PURE,     d in lineage} r*disc          (exact, unchanged)
+        #       + sum_{CONTESTED, d in lineage} r*disc * w,  w = P(z|x,a)/P(z|x)
+        #
+        # Why this and not the difference form. Harutyunyan et al. give two
+        # estimators: the return-conditional one is an ADVANTAGE (mean zero)
+        # and the state-conditional one is a Q (return-scaled). We were
+        # computing the advantage and handing it to buffer.finish(mode=
+        # "replace") AS THE REWARD. Where PURE is nonempty that is survivable
+        # -- the exact term supplies the scale and the correction rides on top
+        # -- but on a PURE=set() env the entire reward becomes a mean-zero
+        # object, the value net learns ~0, and PPO's advantage normalization
+        # rescales the residual noise to unit variance. MEASURED on s1:
+        # 1.45+-2.33 vs lrq2's 12.02, paired -10.57, 0W/5L, p=.001, with 3/5
+        # seeds ending at exactly 0.0 -- BELOW random (9.85), the signature of
+        # collapsing onto postpone, which "the correction is merely small"
+        # never explained.
+        #
+        # Under the ratio form the null is w = 1, so Q_d is EXACTLY lrq2's
+        # lineage credit. LS-HCA stops being a replacement that can
+        # catastrophically underperform the baseline and becomes lrq2
+        # reweighted by how much the action actually moved lineage membership
+        # -- which is precisely the discrimination lrq2 lacks (it hands a
+        # reward's full mass to all k of its lineage decisions equally).
+        # Cold start is also w = 1 rather than the old form's zero credit.
+        #
+        # Two deliberate consequences. (1) Only decisions IN a reward's
+        # lineage are paid; the old form credited every decision x reward pair
+        # regardless of z. That drops a large amount of mean-zero noise mass,
+        # but also forfeits HCA's ability to PENALIZE a high-pi decision that
+        # failed to land in the lineage. (2) Expect s1 to land NEAR lrq2, not
+        # above it -- the measured signal there is a median |factor| of 0.072,
+        # so w sits near 1. Neutral-not-win is the honest prediction.
+        #
+        # ls_hca_weight_clip bounds w to [1/c, c]. It is NOT interchangeable
+        # with ls_hca_factor_clip: w = 1/(1-factor), so clipping the factor at
+        # +3 would imply w = -0.5, flipping the reward's sign.
+        self.ls_hca_ratio = bool(ls_hca_ratio)
+        self.ls_hca_weight_clip = float(ls_hca_weight_clip)
+
+        # ls_hca_z_feature: WHICH conditioning variable the hindsight model
+        # conditions on. 'delay' (DEFAULT) | 'depth' | 'share' | 'membership'.
+        #
+        # Why this exists. Every version up to now conditioned on binary
+        # lineage MEMBERSHIP, and that is provably incapable of the job. For a
+        # reward with k decisions in its lineage, all k have z=True: the
+        # conditioning variable is CONSTANT on exactly the set the reweighting
+        # needs to rank, so h(a|x,z) can separate those k only through x and a,
+        # never through their differing roles in the lineage. This is
+        # structural, not a weak fit. And k is large in practice -- on s1 it
+        # averages 8.48 (median 7, max 27) and is NEVER 1 -- so lrq2 is handing
+        # a reward's full mass to ~8 undiscriminated decisions, which is both
+        # the opportunity and, very likely, the reason lrq2 LOSES to plain PPO
+        # there (11.21 vs 13.60, paired -2.385, 1W/9L, p=.003). Measured
+        # consequence of the binary variable: 73% of applied weights land
+        # within 1% of w=1, i.e. indistinguishable from lrq2.
+        #
+        #   'delay'      reward time - decision time. Varies WITHIN a lineage.
+        #   'depth'      hop distance through the token DAG. Varies within.
+        #   'share'      1/k. Does NOT vary within a lineage -- it is a
+        #                property of the reward, not the decision -- so it
+        #                cannot rank lineage members. Provided for comparison
+        #                only; expect it to behave like 'membership'.
+        #   'membership' the previous binary indicator, for A/B.
+        #
+        # The statistic is bucketed into ls_hca_z_bins levels (level 0 is
+        # reserved for "not in this reward's lineage"), so P(z|x,a) stays a
+        # finite categorical and the consistent parameterization carries over
+        # unchanged -- 'membership' is exactly the ls_hca_z_bins=1 case, which
+        # is why the binary path is recovered rather than special-cased. Bin
+        # edges are quantiles of the pooled statistic, refit each epoch
+        # alongside the model and reused at apply time next epoch, matching the
+        # existing fit/apply lag discipline.
+        if ls_hca_z_feature not in ('delay', 'depth', 'share', 'membership'):
+            raise ValueError(
+                f"ls_hca_z_feature must be one of 'delay', 'depth', 'share', "
+                f"'membership'; got {ls_hca_z_feature!r}")
+        self.ls_hca_z_feature = ls_hca_z_feature
+        self.ls_hca_z_bins = max(1, int(ls_hca_z_bins))
+        self._ls_hca_z_edges = None     # quantile cut points, set at fit time
+
+        # ls_hca_gate: restrict CONTESTED credit to decisions actually in the
+        # reward's lineage. DEFAULT FALSE (ungated), which changes what the
+        # estimator falls back to when the correction says nothing:
+        #
+        #   gated   (True) : null = lrq2   -- only lineage members are paid
+        #   ungated (False): null = mc_q   -- every reward is paid, weighted
+        #
+        # Why the default flipped. Harutyunyan's state-conditional estimator
+        # sums over ALL rewards weighted by h/pi; the hard lineage gate was
+        # this project's addition, not the theory's. Measured on the stochastic
+        # tier, that addition does not pay for itself -- comparing lrq2 against
+        # its own lineage ABLATION mc_q (`_redistribute_mcq`, identical
+        # estimator minus the lineage test):
+        #     s1  mc_q 13.41  vs lrq2 11.21   (-2.20, 2W/8L, p=.015)
+        #     s2  mc_q 89.59  vs lrq2 87.11   (-2.48, 5W/4L, p=.21)
+        #     s3  mc_q 110.85 vs lrq2 112.02  (+1.17, 4W/6L, p=.41)
+        # The restriction is significantly HARMFUL on one env and
+        # indistinguishable on the other two; it never significantly helps.
+        # And against plain PPO, mc_q never significantly loses (s1 -0.18
+        # p=.55, s2 +10.27 p=.069, s3 +0.90 p=.57) whereas lrq2 loses s1
+        # outright (-2.38, 1W/9L, p=.003). So an ungated null is on par with
+        # PPO by construction and wins where the correction has signal, which
+        # a gated null cannot be -- it inherits lrq2's s1 deficit.
+        #
+        # Lineage does not disappear: it enters through the CONDITIONING
+        # VARIABLE (ls_hca_z_feature buckets membership plus delay/depth),
+        # which is what it is actually informative for, rather than as a hard
+        # 0/1 mask on who may be paid at all.
+        #
+        # Scope note: only the CONTESTED term is ungated. The PURE term stays
+        # exact and lineage-gated, since a PURE reward-type is by construction
+        # unreachable from any other decision point. So the null is exactly
+        # mc_q only where PURE is empty (s1 and 8 of the 11 suite envs); on
+        # mixed envs (i_mixed_credit, j_mixed_rework) it is exact-PURE plus
+        # ungated-CONTESTED, a hybrid.
+        self.ls_hca_gate = bool(ls_hca_gate)
 
     def act(self, state, return_logprob=False, deterministic=False):
         """Return an action for the given state using the policy model.
@@ -256,7 +583,7 @@ class Agent:
 
     def train(self, env, episodes=10, epochs=1, max_episode_length=None, verbose=0, save_freq=1,
               logdir=None, batch_size=64, sort_states=False, test_env=None, test_freq=5, test_episodes=10,
-              wandb_logger=None, num_workers=1):
+              wandb_logger=None, num_workers=1, eval_seed=None):
         """Train the agent on env with optional testing during training.
 
         Parameters
@@ -267,6 +594,10 @@ class Agent:
             The test environment for evaluation during training.
         test_freq : int, optional
             Frequency (in epochs) to run testing during training.
+        eval_seed : int, optional
+            Base seed pinning the evaluation scenarios (common random numbers).
+            See :meth:`test_in_train`. None keeps the historical behaviour of
+            drawing fresh eval scenarios from the live RNG stream.
         wandb_logger : WandBLogger, optional
             Logger for Weights & Biases integration.
 
@@ -275,6 +606,17 @@ class Agent:
         history : dict
             Dictionary with statistics from training and testing.
         """
+        # Pin the initial policy to the run seed alone. Parameters are created
+        # lazily at the first forward pass, so this has to happen here rather
+        # than at construction -- see gympn.seeding.seed_network_init for the
+        # measurements that motivated it (arms of the same experiment were
+        # starting from different initial policies, silently unmatching the
+        # comparison).
+        _agent_seed = getattr(self, 'agent_seed', None)
+        if _agent_seed is not None:
+            from gympn.seeding import seed_network_init
+            seed_network_init(_agent_seed)
+
         tb_writer = None if logdir is None else SummaryWriter(log_dir=logdir)
 
         # Initialize learning rate schedulers if enabled
@@ -327,6 +669,7 @@ class Agent:
             self._cf_prefs = []
             self._cf_diag = []
             self._cf_records = []
+            self._ls_hca_records = []  # this epoch's pool; _ls_hca_hhat itself persists
             # Use parallel episode collection with dill (4-8x speedup on collection, 2-4x overall)
             # Dill can serialize lambda functions and complex objects like SimVar
             return_history = self.run_episodes(env, episodes=episodes, max_episode_length=max_episode_length,
@@ -391,7 +734,10 @@ class Agent:
 
             # G1: SNR-gated counterfactual preference aux pass (after the
             # PPO epochs; coefficient annealed to 0 over training = floor).
-            if getattr(self, 'cf_config', None) is not None:
+            # Scheme 'cf' reuses cf_config for its ADVANTAGE forks, not the
+            # preference path, so it must skip this hook.
+            if (getattr(self, 'cf_config', None) is not None
+                    and getattr(self, 'causal_scheme', None) != 'cf'):
                 cf_stats = self._fit_cf_preferences()
                 # Mechanism telemetry: the paired SE and the gate-pass rate are
                 # where the lineage-restriction claim lives (a tighter SE at
@@ -432,6 +778,22 @@ class Agent:
                         f"pass={pass_rate:.0%} |gap|={mean_gap:.3f} se={mean_se:.3f} "
                         f"coef={cf_stats['coef']:.3f} loss={cf_stats['loss']:.4f}")
 
+            # ls_hca: refit the hindsight model from THIS epoch's pooled
+            # records, for use next epoch (see Agent._fit_ls_hca_hhat). Runs
+            # after the policy fit so the credits just trained on used the
+            # PREVIOUS epoch's hhat (no same-batch fit-and-apply).
+            if getattr(self, 'causal_scheme', None) == 'ls_hca':
+                hhat_stats = self._fit_ls_hca_hhat()
+                history.setdefault('ls_hca_records', np.zeros(epochs))
+                history.setdefault('ls_hca_hhat_size', np.zeros(epochs))
+                history['ls_hca_records'][i] = hhat_stats['n']
+                history['ls_hca_hhat_size'][i] = len(self._ls_hca_hhat)
+                get_logger().info(
+                    f"  [LS-HCA] pooled_records={hhat_stats['n']} "
+                    f"hhat_entries={len(self._ls_hca_hhat)} "
+                    f"state_models={hhat_stats.get('n_models', 0)} "
+                    f"zmodels={hhat_stats.get('n_zmodels', 0)}")
+
             # Update training history
             history['mean_returns'][i] = np.mean(return_history['returns'])
             history['min_returns'][i] = np.min(return_history['returns'])
@@ -463,7 +825,8 @@ class Agent:
             # Test the agent during training
             if test_env is not None and (i + 1) % test_freq == 0:
                 test_metrics = self.test_in_train(test_env, episodes=test_episodes,
-                                                  max_episode_length=max_episode_length, logdir=logdir)
+                                                  max_episode_length=max_episode_length, logdir=logdir,
+                                                  eval_seed=eval_seed)
                 test_index = (i + 1) // test_freq - 1
                 history['test_mean_returns'][test_index] = test_metrics['mean_returns']
                 history['test_min_returns'][test_index] = test_metrics['min_returns']
@@ -616,8 +979,28 @@ class Agent:
         # capped per episode. Forks snapshot/restore env.pn, so the main
         # trajectory is untouched.
         cf_on = (getattr(self, 'cf_config', None) is not None and buffer is not None
-                 and getattr(self, 'causal_scheme', None) != 'lrq2c')
+                 and getattr(self, 'causal_scheme', None) not in ('lrq2c', 'cf'))
         cf_forks_done = 0
+
+        # cf: measured counterfactual (COMA) advantage per decision via CRN forks
+        # with lineage-restricted returns. Stored on the buffer, aligned 1:1 with
+        # steps, and consumed by finish() for scheme 'cf' (bypasses the trace path).
+        cf_adv_on = (getattr(self, 'causal_scheme', None) == 'cf'
+                     and buffer is not None and getattr(self, 'cf_config', None) is not None)
+        cf_adv_list, cf_base_list = [], []
+        cf_adv_forks = 0
+
+        # ls_hca: fork-free hindsight credit (FORKFREE_LINEAGE_RETHINK.md
+        # Idea 1). No forks -- only needs pi(a|s) for the taken action at each
+        # step (the trace-side PURE/CONTESTED split + hindsight combine happen
+        # after the episode ends; see the ls_hca block below and
+        # causal_traces._redistribute_ls_hca).
+        ls_hca_on = (getattr(self, 'causal_scheme', None) == 'ls_hca' and buffer is not None)
+        ls_hca_pi_taken = []
+        ls_hca_pi_type_taken = []
+        ls_hca_state_feats = []
+        ls_hca_pi_type_vecs = []
+        ep_values = []          # per-decision V(s), for scheme 'cgae'
 
         # lrq2c: PPO + lrq2 lineage advantage + sparse EXACT indirect correction
         # (CRN forks at foreclosure-gated decisions only). See
@@ -692,6 +1075,86 @@ class Agent:
             if lrq2c_on:
                 cf_indirect.append(corr)
 
+            if cf_adv_on:
+                a_cf, b_cf = None, None
+                if cf_adv_forks < self.cf_config['max_forks']:
+                    from gympn.counterfactual import fork_cf_advantage
+                    a_cf, b_cf = fork_cf_advantage(self, env, state, action,
+                                                   logpis, self.cf_config)
+                    if a_cf is not None:
+                        cf_adv_forks += 1
+                cf_adv_list.append(a_cf)
+                cf_base_list.append(b_cf)
+
+            if ls_hca_on:
+                acts_d = state.get('actions_dict') if isinstance(state, dict) else None
+                n_act = len(acts_d) if acts_d else logpis.detach().reshape(-1).numel()
+                probs = torch.softmax(logpis.detach().reshape(-1)[:n_act], dim=0)
+                pit = float(probs[action]) if 0 <= action < probs.numel() else 1.0 / max(n_act, 1)
+                ls_hca_pi_taken.append(pit)
+                # Type-aggregated probability: hhat is fit at the ACTION-TYPE
+                # level (pooled over however many concrete bindings of that
+                # type occurred historically), but `pit` above is the mass on
+                # ONE specific binding among however many of that type are
+                # enabled THIS step -- a state-dependent, size-varying
+                # denominator hhat never shares. Confirmed empirically
+                # (causal-stability-suite memory, "LS-HCA REVISITED"): raw
+                # pit vs hhat gives corr(pit,factor)=-0.91, i.e. the
+                # correction punishes confident decisions simply because more
+                # bindings were competing for probability mass, not because
+                # anything about the decision was actually uncertain. Summing
+                # pi over all enabled bindings sharing the taken action's
+                # TYPE gives a quantity on the same scale as hhat.
+                pit_type = pit
+                share = 1.0 / max(n_act, 1)  # fallback: uniform-policy share
+                pi_type_vec = None
+                if acts_d and 0 <= action < len(acts_d) and probs.numel() >= len(acts_d):
+                    taken_entry = acts_d[action]
+                    taken_type_obj = taken_entry[2] if len(taken_entry) > 2 else None
+                    taken_type = getattr(taken_type_obj, '_id', None)
+                    if taken_type is not None:
+                        # Type-aggregated pi over EVERY enabled type, not just
+                        # the taken one. The residual parameterization (see
+                        # ls_hca_residual in __init__) needs the whole vector:
+                        # it defines h as a perturbation OF pi, so pi is the
+                        # softmax base at both fit and apply time, and the
+                        # types not taken are exactly the competitors that
+                        # base has to normalize against.
+                        by_type = {}
+                        for i, entry in enumerate(acts_d):
+                            if len(entry) <= 2 or i >= probs.numel():
+                                continue
+                            tid = getattr(entry[2], '_id', None)
+                            if tid is None:
+                                continue
+                            by_type[tid] = by_type.get(tid, 0.0) + float(probs[i])
+                        pi_type_vec = by_type or None
+                        same_type_idx = [
+                            i for i, entry in enumerate(acts_d)
+                            if len(entry) > 2 and getattr(entry[2], '_id', None) == taken_type
+                        ]
+                        pit_type = sum(float(probs[i]) for i in same_type_idx if i < probs.numel())
+                        # n_type/N: the taken type's share of ALL enabled
+                        # bindings this decision -- exactly what a UNIFORM
+                        # policy would give pit_type, i.e. a direct
+                        # calibration reference for the state-conditional
+                        # model. Confirmed empirically (causal-stability-
+                        # suite memory, "LS-HCA REVISITED"): a trained policy
+                        # sees systematically SMALLER action sets than a
+                        # random one (median 5 vs 7, p=6e-17 on s1) -- so
+                        # n_type/N drifts over training for structural
+                        # reasons the marking-vector features alone don't
+                        # make explicit; feeding it directly lets the model
+                        # calibrate against it instead of confusing "fewer
+                        # competitors" with "genuinely more confident".
+                        n_type = len(same_type_idx)
+                        share = n_type / max(len(acts_d), 1)
+                ls_hca_pi_type_taken.append(pit_type)
+                ls_hca_pi_type_vecs.append(pi_type_vec)
+                ls_hca_state_feats.append(
+                    self._rudder_features(state, node_types=self._ls_hca_state_node_types)
+                    + [share])
+
             # Collect for batch processing
             states_batch.append(state)
             actions_batch.append(action)
@@ -714,13 +1177,37 @@ class Agent:
                 except Exception:
                     qoff_batch.append(0.0)
 
+            # Potential-based reward shaping (gympn/potential.py): read Phi(s)
+            # from the MAIN trajectory's pn before stepping -- `pn` was
+            # captured above before any fork block (cf_on/lrq2c_on/cf_adv_on)
+            # could snapshot/restore env.pn, so this is never a forked branch.
+            phi_s = (topology_potential(pn, decay=self.phi_decay, cap=self.phi_cap)
+                    if self.phi_coef and pn is not None else 0.0)
+
             next_state, reward, done, truncated, info = env.step(action)
+            total_reward += reward   # RAW reward -- eval/logging read info['pn_reward']
+                                     # (independent accumulator), so this is unaffected by
+                                     # shaping either way; kept raw here for clarity.
+
+            if self.phi_coef and pn is not None:
+                # Terminal-Phi convention: the finite-horizon telescoping
+                # requires Phi(terminal) := 0, applied at the LAST step this
+                # episode will ever store -- the same boolean condition the
+                # break check below uses (episode_length here is PRE-
+                # increment, hence `+ 1`), so this can never diverge from the
+                # buffer's own tau[-1]:=0 / dones_ep[-1]=True convention.
+                is_last_step = done or (max_episode_length is not None
+                                        and episode_length + 1 > max_episode_length)
+                tau = max(0.0, float(getattr(pn, 'clock', decision_time)) - decision_time)
+                disc = math.exp(-self.buffer.causal_beta * tau)
+                phi_next = 0.0 if is_last_step else topology_potential(pn, decay=self.phi_decay, cap=self.phi_cap)
+                reward = reward + self.phi_coef * (disc * phi_next - phi_s)
+
             rewards_batch.append(reward)
             if rudder_on:
                 rudder_rewards.append(float(reward))
 
             episode_length += 1
-            total_reward += reward
 
             # Compute values in batch every N steps or at episode end
             if len(states_batch) >= value_batch_size or done:
@@ -734,6 +1221,7 @@ class Agent:
                         buffer.store(s, a, r, lp, values[i], lpis,
                                      token_ids=None, time=tm,
                                      qoff=(qoff_batch[i] if qoff_on else None))
+                        ep_values.append(float(values[i]))
 
                 # Clear batches for next iteration
                 states_batch = []
@@ -796,7 +1284,145 @@ class Agent:
                     # per-decision indirect corrections, aligned 1:1 with steps;
                     # finish() adds them to the lrq2 credits for scheme 'lrq2c'.
                     buffer._lrq2c_indirect = cf_indirect
-                buffer.finish(credits=info['eligibility_credits'], mode="replace")
+                if cf_adv_on:
+                    # per-decision measured counterfactual advantage + baseline,
+                    # aligned 1:1 with steps; finish() uses them for scheme 'cf'.
+                    buffer._cf_adv = cf_adv_list
+                    buffer._cf_base = cf_base_list
+                if ls_hca_on:
+                    # Combine the trace's exact PURE credit with the CONTESTED
+                    # hindsight correction here, where both ingredients this
+                    # trace object cannot see on its own -- pi(a|s) for the
+                    # taken action (ls_hca_pi_taken, this loop) and the fitted
+                    # hhat table (self._ls_hca_hhat, previous epoch) -- are
+                    # available. New (action_type, reward_type, z) records are
+                    # pooled into self._ls_hca_records for the NEXT epoch's
+                    # refit (_fit_ls_hca_hhat), never this one's.
+                    ct = info['eligibility_credits']
+                    pure = ct.redistribute_rewards(scheme='ls_hca',
+                                                   beta=self.buffer.causal_beta)
+                    pending = getattr(ct, '_ls_hca_pending', None) or [[] for _ in pure]
+                    buffer._ls_hca_postpone = [
+                        bool(isinstance(getattr(act.get('transition'), '_id', None), str)
+                             and getattr(act.get('transition'), '_id').startswith('postpone_'))
+                        for act in ct.transition_history.get_action_transitions()
+                    ]
+                    hhat = self._ls_hca_hhat
+                    combined = list(pure)
+                    for t, items in enumerate(pending):
+                        if t >= len(ls_hca_pi_type_taken):
+                            continue
+                        # Type-aggregated pi (see the capture site above) --
+                        # comparable in scale to hhat, which is fit at the
+                        # action-TYPE level too.
+                        pit = ls_hca_pi_type_taken[t]
+                        state_feat = (ls_hca_state_feats[t] if t < len(ls_hca_state_feats)
+                                     else None)
+                        pi_vec = (ls_hca_pi_type_vecs[t] if t < len(ls_hca_pi_type_vecs)
+                                  else None)
+                        ratio_mode = getattr(self, 'ls_hca_ratio', True)
+                        for entry in items:
+                            a_type, rtype, z, contrib = entry[:4]
+                            # Entries carry all three candidate conditioning
+                            # statistics (delay, depth, share); pick the
+                            # configured one and bucket it into a level. Older
+                            # 4-tuples (no statistics) degrade to the binary
+                            # membership variable.
+                            delay, depth, share = (entry[4:7] if len(entry) >= 7
+                                                   else (None, None, None))
+                            zstat = self._ls_hca_zstat(z, delay, depth, share)
+                            lvl = self._ls_hca_level(zstat, z=z)
+                            key = (a_type, rtype, lvl)
+                            h = self._ls_hca_predict_h(a_type, rtype, lvl, state_feat,
+                                                       hhat, pi_type_vec=pi_vec)
+                            if ratio_mode:
+                                # HCA's OTHER estimator (see ls_hca_ratio in
+                                # __init__): weight the lineage-gated reward by
+                                # w = h/pi instead of adding the mean-zero
+                                # advantage (1 - pi/h) to it. Only decisions
+                                # actually IN this reward's lineage are paid;
+                                # the z=False entries still fall through to the
+                                # record pool below, because fitting P(z|x,a)
+                                # needs both outcomes as labels.
+                                if z or not getattr(self, 'ls_hca_gate', False):
+                                    if h is not None and pit > 0:
+                                        w = h / pit
+                                    else:
+                                        # Cold start (no model yet) is w = 1,
+                                        # i.e. exactly lrq2's credit -- start AT
+                                        # the working baseline and depart only
+                                        # as the fit earns it. The old form's
+                                        # cold start was factor = 0, i.e. NO
+                                        # credit, which on a PURE=set() env is
+                                        # no learning signal at all.
+                                        w = 1.0
+                                    # Clip w directly, NOT the factor: the two
+                                    # are related by w = 1/(1-factor), so the
+                                    # factor clip maps to nonsense here (a
+                                    # factor of +3 would give w = -0.5, a
+                                    # sign-flipped reward).
+                                    wc = getattr(self, 'ls_hca_weight_clip', 10.0)
+                                    combined[t] += contrib * max(1.0 / wc, min(wc, w))
+                                self._ls_hca_records.append(
+                                    (a_type, rtype, lvl, state_feat, pi_vec, zstat))
+                                if getattr(self, 'ls_hca_debug', False):
+                                    self._ls_hca_debug_log.append(
+                                        (float(pit), h,
+                                         float(h / pit) if (h is not None and pit > 0) else 1.0,
+                                         key))
+                                continue
+                            if h is not None:
+                                # The floor guards an h estimated INDEPENDENTLY
+                                # of pi, where a small h and a sharpened pi can
+                                # collide and blow the ratio up. Under the
+                                # residual parameterization that failure mode
+                                # cannot occur -- h is built FROM pi, so a
+                                # small pi implies a correspondingly small h
+                                # and pi/h stays O(1) -- and applying the floor
+                                # anyway would DESTROY the exactness guarantee:
+                                # with h == pi == 0.03 < floor, flooring gives
+                                # factor = 1 - 0.03/0.05 = 0.4 instead of 0.
+                                # So the floor is skipped exactly when it is
+                                # both unnecessary and harmful.
+                                if not ((getattr(self, 'ls_hca_residual', True)
+                                         or getattr(self, 'ls_hca_consistent', True))
+                                        and pi_vec):
+                                    h = max(h, getattr(self, 'ls_hca_hhat_floor', 0.05))
+                                raw_factor = 1.0 - pit / h
+                            else:
+                                raw_factor = 0.0  # unseen key: unchanged cold-start floor
+                            clip = getattr(self, 'ls_hca_factor_clip', 3.0)
+                            factor = max(-clip, min(clip, raw_factor))
+                            combined[t] += contrib * factor
+                            self._ls_hca_records.append(
+                                (a_type, rtype, lvl, state_feat, pi_vec, zstat))
+                            # Opt-in diagnostic hook (default off, zero cost
+                            # otherwise): confirms/refutes whether `factor`
+                            # is systematically most negative exactly when
+                            # pit is high -- see causal-stability-suite
+                            # memory, "LS-HCA REVISITED" hypothesis 1.
+                            if getattr(self, 'ls_hca_debug', False):
+                                self._ls_hca_debug_log.append(
+                                    (float(pit), h, float(factor), key))
+                    buffer.finish(credits=combined, mode="replace")
+                elif getattr(self, 'causal_scheme', None) == 'cfgae':
+                    # cfgae consumes the TRACE OBJECT (it needs the component
+                    # partition and the per-step reward attribution, not a
+                    # credit vector); data.py's finish does the filtered GAE.
+                    buffer.finish(credits=info['eligibility_credits'],
+                                  mode="replace")
+                elif getattr(self, 'causal_scheme', None) in ('cgae', 'cgae_flow'):
+                    # CGAE needs the critic's V(s) as well as the trace: the
+                    # recursion bootstraps through it at causal depth, so the
+                    # values collected during this episode are handed in here
+                    # (the trace object never sees the value model).
+                    ct = info['eligibility_credits']
+                    q = ct.redistribute_rewards(
+                        scheme=self.causal_scheme, beta=self.buffer.causal_beta,
+                        values=ep_values, lam=getattr(self, 'lam', 0.95))
+                    buffer.finish(credits=q, mode="replace")
+                else:
+                    buffer.finish(credits=info['eligibility_credits'], mode="replace")
             else:
                 buffer.finish(credits=None)
 
@@ -1510,6 +2136,357 @@ class Agent:
 
         return loss.item()
 
+    def _fit_ls_hca_hhat(self):
+        """LS-HCA (Idea 1, FORKFREE_LINEAGE_RETHINK.md): refit the hindsight
+        model hhat(a | reward-type r realized in the decision's lineage) from
+        this epoch's pooled ``(action_type, reward_type, z)`` records -- a
+        plain empirical table, Laplace-smoothed:
+        P(a | r-type, z) = (count(a, r-type, z) + alpha) /
+                           (count(r-type, z) + alpha * K),
+        K = number of distinct action types observed for that (r-type, z)
+        group. alpha=``self.ls_hca_smoothing_alpha`` (default 1.0); alpha=0
+        recovers the original unsmoothed MLE. This is a batch statistic like
+        LCV's c_hat, not a per-state model: coarser than the "logistic model"
+        sketched in the doc, but a well-posed, tiny fit given the low-
+        dimensional conditioning event (a lineage-membership indicator, not a
+        return-space density). Used to correct NEXT epoch's contested credit
+        (Agent.run_episode's ls_hca combine step, which also floors/clips the
+        resulting correction factor -- smoothing here and the floor/clip
+        there are complementary, not redundant: smoothing guards sparse
+        buckets at FIT time, floor/clip guards any residual pi-vs-hhat
+        staleness at APPLY time). The records pooled THIS epoch were
+        themselves scored with the hhat fit at the END OF THE PREVIOUS epoch
+        (or the empty table at epoch 0 -- the safe, pure-only floor), so
+        fitting and applying never share a batch.
+
+        ALSO fits a state-conditional model per (reward_type, z) group when
+        there's enough data (>= ``self.ls_hca_state_min_n``) and state
+        features were captured (``self._ls_hca_state_node_types`` non-empty)
+        -- see ``_ls_hca_predict_h``. This is the "logistic model" referenced
+        above, finally built: a tiny per-group ``nn.Linear`` (marking-vector
+        state features -> logits over that group's observed action types),
+        refit from scratch every epoch (no cross-epoch continuity, matching
+        the flat table's own semantics). Groups below the data threshold, or
+        when state features aren't available at all, fall back to the flat
+        table -- this never changes behavior on envs/configs that predate
+        this addition."""
+        from collections import defaultdict
+        recs = self._ls_hca_records
+        if not recs:
+            return {'n': 0}
+        counts = defaultdict(int)
+        totals = defaultdict(int)
+        support = defaultdict(set)
+        # Bin edges for the conditioning statistic, refit from THIS epoch's
+        # pool and then used both for this fit's own labels and for next
+        # epoch's apply step -- so labels and edges are always coherent, and
+        # the model still lags the policy exactly as before. Quantiles rather
+        # than fixed cut points because the statistic's scale is env-specific
+        # (delays on one env are depths on another).
+        n_bins = max(1, int(getattr(self, 'ls_hca_z_bins', 4)))
+        stats_pool = [rec[5] for rec in recs if len(rec) > 5 and rec[5] is not None]
+        if n_bins > 1 and len(stats_pool) >= n_bins:
+            qs = np.quantile(stats_pool, [i / n_bins for i in range(1, n_bins)])
+            # Collapse duplicate cut points: a statistic with few distinct
+            # values (depth is often 1-3) would otherwise get empty levels.
+            edges = sorted({float(q) for q in qs})
+            self._ls_hca_z_edges = edges or None
+        else:
+            self._ls_hca_z_edges = None
+
+        by_group = defaultdict(list)  # (rtype,lvl) -> [(a_type, state_feat, pi_vec), ...]
+        by_rtype = defaultdict(list)  # rtype       -> [(a_type, state_feat, lvl), ...]
+        for rec in recs:
+            a_type, rtype = rec[0], rec[1]
+            state_feat = rec[3] if len(rec) > 3 else None
+            pi_vec = rec[4] if len(rec) > 4 else None
+            zstat = rec[5] if len(rec) > 5 else None
+            # Re-derive the level from the raw statistic under the edges just
+            # computed; rec[2] carries the level assigned at APPLY time, under
+            # the previous epoch's edges, which would be inconsistent here.
+            lvl = self._ls_hca_level(zstat, z=bool(rec[2]))
+            counts[(a_type, rtype, lvl)] += 1
+            totals[(rtype, lvl)] += 1
+            support[(rtype, lvl)].add(a_type)
+            if state_feat is not None:
+                by_group[(rtype, lvl)].append((a_type, state_feat, pi_vec))
+                by_rtype[rtype].append((a_type, state_feat, lvl))
+        alpha = getattr(self, 'ls_hca_smoothing_alpha', 1.0)
+        self._ls_hca_hhat = {
+            key: (counts[key] + alpha) /
+                 (totals[(key[1], key[2])] + alpha * len(support[(key[1], key[2])]))
+            for key in counts
+        }
+
+        self._ls_hca_hhat_model = {}
+        min_n = getattr(self, 'ls_hca_state_min_n', 30)
+        # state_dim derived from the actual captured feature vectors (marking
+        # counts + the n_type/N share feature), not just len(node_types), so
+        # this stays correct regardless of what _rudder_features returns or
+        # how many extra scalars get appended alongside it in the future.
+        has_state_config = len(getattr(self, '_ls_hca_state_node_types', []) or []) > 0
+        if has_state_config:
+            # --- consistent mode: fit P(z | x, a), one model per reward-type --
+            # Modelling the LINEAGE-MEMBERSHIP probability instead of hhat
+            # directly is what makes the law of total probability hold by
+            # construction: h(a|x,z) = pi(a|x) P(z|x,a) / P(z|x) is a genuine
+            # posterior, so sum_z P(z|x) h(a|x,z) = pi(a|x) sum_z P(z|x,a) =
+            # pi(a|x) identically. Per-(rtype, z) fits could not do this --
+            # nothing coupled the z=True and z=False models, and the resulting
+            # violation was the whole residual over-correction (median 3.4% of
+            # pi, 4.46x excess |factor|; _diag_ls_hca_consistency.py).
+            # One binary head per action type, sharing the state features.
+            # Zero init => P(z|x,a) = 0.5 for every a => P(z|x) = 0.5 =>
+            # factor = 1 - P(z|x)/P(z|x,a) = 0, so this ALSO starts at the null.
+            self._ls_hca_zmodel = {}
+            if getattr(self, 'ls_hca_consistent', True):
+                n_lv = self._ls_hca_n_levels()
+                for rtype, items in by_rtype.items():
+                    if len(items) < min_n:
+                        continue
+                    classes = sorted({a for a, _, _ in items})
+                    state_dim = len(items[0][1])
+                    if not classes or state_dim == 0:
+                        continue
+                    # More than one level must actually occur, else P(z|x,a) is
+                    # degenerate and the correction is vacuous rather than
+                    # merely small.
+                    if len({lv for _, _, lv in items}) < 2:
+                        continue
+                    cls_idx = {c: i for i, c in enumerate(classes)}
+                    X = torch.tensor([f for _, f, _ in items], dtype=torch.float32)
+                    ai = torch.tensor([cls_idx[a] for a, _, _ in items], dtype=torch.long)
+                    lv = torch.tensor([min(l, n_lv - 1) for _, _, l in items],
+                                      dtype=torch.long)
+                    # One categorical head per action type: outputs are
+                    # (n_classes x n_levels), softmaxed over LEVELS. Zero init
+                    # => uniform over levels for every action => P(z|x,a) is
+                    # action-independent => w == 1, so training still starts at
+                    # the null. n_levels==2 reproduces the binary case exactly.
+                    zmodel = torch.nn.Linear(state_dim, len(classes) * n_lv)
+                    torch.nn.init.zeros_(zmodel.weight)
+                    torch.nn.init.zeros_(zmodel.bias)
+                    zopt = torch.optim.AdamW(
+                        zmodel.parameters(),
+                        lr=getattr(self, 'ls_hca_state_lr', 0.05),
+                        weight_decay=getattr(self, 'ls_hca_state_l2', 0.0))
+                    rows = torch.arange(len(items))
+                    for _ in range(getattr(self, 'ls_hca_state_epochs', 50)):
+                        zopt.zero_grad()
+                        # supervise only the head of the action actually taken
+                        out = zmodel(X).view(-1, len(classes), n_lv)
+                        torch.nn.functional.cross_entropy(
+                            out[rows, ai], lv).backward()
+                        zopt.step()
+                    self._ls_hca_zmodel[rtype] = (zmodel, classes, n_lv)
+
+            residual = getattr(self, 'ls_hca_residual', True)
+            for group, items in by_group.items():
+                if len(items) < min_n:
+                    continue
+                classes = sorted({a for a, _, _ in items})
+                if not classes:
+                    continue
+                state_dim = len(items[0][1])
+                if state_dim == 0:
+                    continue
+                cls_idx = {c: i for i, c in enumerate(classes)}
+                X = torch.tensor([f for _, f, _ in items], dtype=torch.float32)
+                y = torch.tensor([cls_idx[a] for a, _, _ in items], dtype=torch.long)
+                model = torch.nn.Linear(state_dim, len(classes))
+
+                base = None
+                if residual:
+                    # log pi over `classes`, per record: the softmax OFFSET the
+                    # residual model perturbs. Types the policy could not take
+                    # at that state get -inf (masked out of the softmax, which
+                    # is what "not enabled" means). If a record has no captured
+                    # pi vector at all, its base row is flat -- that record then
+                    # contributes an ordinary unconditioned fit rather than
+                    # silently corrupting the others.
+                    rows = []
+                    for _, _, pv in items:
+                        if pv:
+                            rows.append([float(pv.get(c, 0.0)) for c in classes])
+                        else:
+                            rows.append([1.0] * len(classes))
+                    base = torch.tensor(rows, dtype=torch.float32)
+                    base = torch.log(base.clamp_min(1e-12))
+                    base[base <= math.log(1e-12)] = float('-inf')
+                    # A record whose whole row is masked would produce a NaN
+                    # loss; fall back to flat for those (cannot happen when the
+                    # taken type is present, which it always is in practice).
+                    allmask = torch.isinf(base).all(dim=1)
+                    if bool(allmask.any()):
+                        base[allmask] = 0.0
+                    # Zero init => g == 0 => h == pi exactly on the first step,
+                    # i.e. training STARTS at the null (factor == 0) and only
+                    # moves away from it to the extent the data demands.
+                    torch.nn.init.zeros_(model.weight)
+                    torch.nn.init.zeros_(model.bias)
+
+                # AdamW (decoupled) rather than Adam(weight_decay=): decoupling
+                # makes the shrinkage strength mean the same thing regardless of
+                # gradient scale, so ls_hca_state_l2 stays interpretable as
+                # "how hard to pull g back to the null" across envs.
+                l2 = getattr(self, 'ls_hca_state_l2', 0.0)
+                opt = torch.optim.AdamW(model.parameters(),
+                                        lr=getattr(self, 'ls_hca_state_lr', 0.05),
+                                        weight_decay=l2)
+                n_epochs = getattr(self, 'ls_hca_state_epochs', 50)
+                for _ in range(n_epochs):
+                    opt.zero_grad()
+                    logits = model(X) if base is None else model(X) + base
+                    loss = torch.nn.functional.cross_entropy(logits, y)
+                    loss.backward()
+                    opt.step()
+                self._ls_hca_hhat_model[group] = (model, classes)
+
+        # With the flat fallback off (the default), a group with no fitted
+        # state model contributes factor=0. If NO group got a model, every
+        # correction is 0 -- and on an env whose reward-types are all
+        # CONTESTED (PURE is then empty, so the exact term is identically
+        # zero too) that silently leaves the agent with no credit signal at
+        # all. Loud, because the symptom otherwise looks like a training
+        # failure rather than a configuration one.
+        if not self._ls_hca_hhat_model and not getattr(self, 'ls_hca_flat_fallback', False):
+            reason = ("no state features configured (metadata missing -> "
+                      "_ls_hca_state_node_types is empty)" if not has_state_config
+                      else f"every (reward_type, z) group had < ls_hca_state_min_n"
+                           f"={min_n} records")
+            get_logger().warning(
+                f"  [LS-HCA] no state-conditional model could be fit ({reason}); "
+                f"with ls_hca_flat_fallback=False every hindsight correction "
+                f"will be 0 this epoch. Set ls_hca_flat_fallback=True to use "
+                f"the flat table instead, or lower ls_hca_state_min_n.")
+
+        return {'n': len(recs), 'n_models': len(self._ls_hca_hhat_model),
+                'n_zmodels': len(getattr(self, '_ls_hca_zmodel', {}) or {})}
+
+    def _ls_hca_zstat(self, z, delay, depth, share):
+        """Pick the configured conditioning statistic; None when the decision
+        is not in this reward's lineage (that is its own level, not a value)."""
+        if not z:
+            return None
+        feat = getattr(self, 'ls_hca_z_feature', 'delay')
+        if feat == 'delay':
+            return delay
+        if feat == 'depth':
+            return depth
+        if feat == 'share':
+            return share
+        return 1.0                      # 'membership': one in-lineage level
+
+    def _ls_hca_level(self, zstat, z=None):
+        """Conditioning LEVEL: 0 = not in this reward's lineage, 1..B = in it,
+        bucketed by the configured statistic against the stored quantile edges.
+
+        Falls back to a single in-lineage level when no edges exist yet (epoch
+        0) or the statistic is missing, which reproduces the old binary
+        membership variable exactly -- so a cold start is the previous
+        behaviour, not an undefined one."""
+        if zstat is None:
+            return 1 if (z and getattr(self, 'ls_hca_z_feature', 'delay') == 'membership') else (1 if z else 0)
+        edges = getattr(self, '_ls_hca_z_edges', None)
+        if not edges:
+            return 1
+        lvl = 1
+        for e in edges:
+            if zstat > e:
+                lvl += 1
+            else:
+                break
+        return lvl
+
+    def _ls_hca_n_levels(self):
+        edges = getattr(self, '_ls_hca_z_edges', None)
+        return 1 + (len(edges) + 1 if edges else 1)
+
+    def _ls_hca_predict_h(self, a_type, rtype, z, state_feat, hhat, pi_type_vec=None):
+        """hhat(a_type | state, rtype, z): the fitted state-conditional model
+        (``_fit_ls_hca_hhat``'s ``self._ls_hca_hhat_model``) when available
+        for this (reward_type, z) group and ``a_type`` is one of its fitted
+        classes; else ``None``, so the caller applies the cold-start-safe
+        factor=0 floor.
+
+        The flat Laplace-smoothed table is consulted only when
+        ``ls_hca_flat_fallback`` is on (default off -- it carries no
+        measurable signal; see the knob's rationale in ``__init__``)."""
+        # Consistent mode: h = pi * P(z|x,a) / P(z|x). Returned as an h so the
+        # caller's `factor = 1 - pit/h` is unchanged, but note what that
+        # becomes once pi cancels:
+        #     factor = 1 - P(z|x) / P(z|x,a)
+        # -- the policy drops out of the correction entirely. The null is then
+        # exact for a strictly stronger reason than under the residual form: it
+        # holds whenever the action does not shift the lineage-membership
+        # probability, P(z|x,a) == P(z|x), with no reference to pi's own
+        # accuracy at all.
+        zentry = (self._ls_hca_zmodel.get(rtype)
+                  if getattr(self, 'ls_hca_consistent', True)
+                  and getattr(self, '_ls_hca_zmodel', None) else None)
+        if zentry is not None and state_feat is not None and pi_type_vec:
+            zmodel, zclasses, n_lv = zentry
+            # `z` is the conditioning LEVEL here (0 = not in this reward's
+            # lineage, 1..B = in it, bucketed by ls_hca_z_feature). Booleans
+            # still work -- False/True are 0/1 -- so the binary callers and
+            # tests need no change.
+            lvl = int(z)
+            if a_type in zclasses and 0 <= lvl < n_lv:
+                enabled = [t for t, p in pi_type_vec.items()
+                           if p > 0.0 and t in zclasses]
+                if enabled:
+                    with torch.no_grad():
+                        x = torch.tensor([state_feat], dtype=torch.float32)
+                        p = torch.softmax(
+                            zmodel(x).view(len(zclasses), n_lv), dim=-1)
+                    # P(z=lvl|x) marginalizes over the enabled+fitted types,
+                    # renormalizing pi over them (an enabled type the fit never
+                    # saw has no P(z|x,a) to contribute; on these envs every
+                    # action type is fitted, so the renormalization is a no-op).
+                    wsum = sum(pi_type_vec[t] for t in enabled)
+                    p_marg = sum(pi_type_vec[t] * float(p[zclasses.index(t), lvl])
+                                 for t in enabled) / max(wsum, 1e-12)
+                    p_cond = float(p[zclasses.index(a_type), lvl])
+                    eps = 1e-6
+                    if p_cond > eps:
+                        return float(pi_type_vec[a_type]) * p_cond / max(p_marg, eps)
+                    return None
+
+        group = (rtype, z)
+        model_entry = self._ls_hca_hhat_model.get(group) if hasattr(self, '_ls_hca_hhat_model') else None
+        if model_entry is not None and state_feat is not None:
+            model, classes = model_entry
+            residual = getattr(self, 'ls_hca_residual', True)
+            if residual and pi_type_vec:
+                # Residual form. The softmax runs over the types ACTUALLY
+                # ENABLED at this state (pi_type_vec's support), not over the
+                # fitted classes: a type the fit never saw simply gets g=0, and
+                # a fitted class that is not enabled here is absent from the
+                # normalization. That is what makes the null exact for any
+                # enabled set -- with g == 0 the softmax returns pi itself
+                # (pi_type_vec already sums to 1 over the enabled types), so
+                # factor = 1 - pi/h = 0 identically.
+                enabled = [t for t, p in pi_type_vec.items() if p > 0.0]
+                if a_type not in enabled:
+                    return None
+                with torch.no_grad():
+                    x = torch.tensor([state_feat], dtype=torch.float32)
+                    g = model(x).reshape(-1)
+                    logits = torch.tensor(
+                        [math.log(max(pi_type_vec[t], 1e-12))
+                         + (float(g[classes.index(t)]) if t in classes else 0.0)
+                         for t in enabled], dtype=torch.float32)
+                    probs = torch.softmax(logits, dim=-1)
+                return float(probs[enabled.index(a_type)])
+            if a_type in classes:
+                with torch.no_grad():
+                    x = torch.tensor([state_feat], dtype=torch.float32)
+                    probs = torch.softmax(model(x), dim=-1).reshape(-1)
+                return float(probs[classes.index(a_type)])
+        if getattr(self, 'ls_hca_flat_fallback', False):
+            return hhat.get((a_type, rtype, z))
+        return None
+
     def _fit_cf_preferences(self):
         """G1 aux pass: pairwise logistic loss on the policy's log-probs for
         this epoch's SNR-gated counterfactual preferences.
@@ -1573,7 +2550,8 @@ class Agent:
             last_loss = float(loss.item())
         return {'n': len(prefs), 'loss': last_loss, 'coef': coef}
 
-    def test_in_train(self, env, episodes=100, max_episode_length=None, deterministic=True, logdir=None):
+    def test_in_train(self, env, episodes=100, max_episode_length=None, deterministic=True, logdir=None,
+                      eval_seed=None):
         """Evaluate the agent on a test environment during training.
 
         Parameters
@@ -1588,6 +2566,37 @@ class Agent:
             Whether to use a deterministic policy during testing.
         logdir : str, optional
             Directory to save the best policy.
+        eval_seed : int, optional
+            Base seed for COMMON RANDOM NUMBERS across evaluations. When set,
+            episode ``i`` runs under seed ``eval_seed + i``, so every eval point
+            -- across epochs, across runs, and across methods -- scores the
+            policy on the SAME fixed set of scenarios.
+
+            Without it (the default, and the historical behaviour) each eval
+            draws fresh scenarios from wherever training left the global RNG:
+            unbiased, but two arms are compared on different sample paths.
+            Measured on s1, one 20-episode eval point carries +-0.231 SD of
+            pure scenario noise, so a paired single-point difference carries
+            +-0.327 -- and ``greedy_drift``, a max over ~15 such points, is
+            inflated by ~0.40 for a policy that is genuinely flat.
+
+            The env's stochasticity comes from the global ``random`` / NumPy
+            streams, so this reseeds those per episode and RESTORES the prior
+            state afterwards. Training's stream therefore continues across the
+            eval as if it had not run -- verified directly in
+            suite/_test_eval_crn.py (T2).
+
+            That does NOT make a CRN run step-identical to a non-CRN run of the
+            same seed, and it cannot: without eval_seed the eval CONSUMES the
+            training stream (20 episodes' worth of draws per eval point), so
+            the two configurations' rollouts diverge from the first eval
+            onward -- measured on a 4-epoch s1 cell, epoch 4's sampled return
+            was 9.65 with CRN vs 9.40 without. Results produced with eval_seed
+            set are a new baseline, not a re-scoring of existing cells.
+
+            ``env.reset(seed=...)`` is deliberately NOT used: it routes to
+            seed_everything, which would also reseed torch and re-apply the
+            deterministic-kernel switches on every eval episode.
 
         Returns
         -------
@@ -1595,22 +2604,37 @@ class Agent:
             Dictionary containing evaluation metrics (mean, min, max, std returns and lengths).
         """
         history = {'returns': np.zeros(episodes), 'lengths': np.zeros(episodes)}
-        for i in range(episodes):
-            state = env.reset()
-            done = False
-            episode_length = 0
-            total_reward = 0
-            info = {'pn_reward': 0}
-            while not done:
-                action = self.act(state, deterministic=deterministic)
-                next_state, reward, done, truncated, info = env.step(action)
-                episode_length += 1
-                state = next_state
+        crn = eval_seed is not None
+        if crn:
+            saved_random = random.getstate()
+            saved_np = np.random.get_state()
+            saved_torch = torch.get_rng_state()
+        try:
+            for i in range(episodes):
+                if crn:
+                    # Same scenario i for every arm and every epoch.
+                    random.seed(eval_seed + i)
+                    np.random.seed((eval_seed + i) % (2 ** 32))
+                state = env.reset()
+                done = False
+                episode_length = 0
+                total_reward = 0
+                info = {'pn_reward': 0}
+                while not done:
+                    action = self.act(state, deterministic=deterministic)
+                    next_state, reward, done, truncated, info = env.step(action)
+                    episode_length += 1
+                    state = next_state
 
-            if episode_length == 0:
-                get_logger().warning("Episode length is zero - no valid action produced")
-            history['returns'][i] = info['pn_reward']
-            history['lengths'][i] = episode_length
+                if episode_length == 0:
+                    get_logger().warning("Episode length is zero - no valid action produced")
+                history['returns'][i] = info['pn_reward']
+                history['lengths'][i] = episode_length
+        finally:
+            if crn:
+                random.setstate(saved_random)
+                np.random.set_state(saved_np)
+                torch.set_rng_state(saved_torch)
 
         test_metrics = {
             'mean_returns': np.mean(history['returns']),
@@ -1667,14 +2691,20 @@ class Agent:
         """
         self.policy_model = torch.load(torch.load(filename))
 
-    def _rudder_features(self, state):
-        """Featurize a graph observation for the RUDDER LSTM: the marking
-        vector (token count per node type, in the fixed metadata order set by
-        the rudder_config's 'node_types'). Cheap, Markov-ish and constant-dim
-        regardless of which places are currently occupied."""
+    def _rudder_features(self, state, node_types=None):
+        """Featurize a graph observation: the marking vector (token count per
+        node type, in a fixed metadata order). Cheap, Markov-ish and
+        constant-dim regardless of which places are currently occupied.
+        Originally built for the RUDDER LSTM (``node_types`` defaults to
+        ``self._rudder_node_types``, from ``rudder_config``); reused as-is
+        for LS-HCA's state-conditional hindsight model (``node_types=self.
+        _ls_hca_state_node_types``) -- same general, task-assignment-agnostic
+        featurization, no new machinery."""
         g = state['graph'] if isinstance(state, dict) and 'graph' in state else state
+        if node_types is None:
+            node_types = getattr(self, '_rudder_node_types', []) or []
         feats = []
-        for nt in getattr(self, '_rudder_node_types', []) or []:
+        for nt in node_types:
             try:
                 feats.append(float(g[nt].x.size(0)) if nt in g.node_types else 0.0)
             except Exception:

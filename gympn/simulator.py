@@ -58,7 +58,7 @@ class GymProblem(SimProblem):
         :param debugging: if set to True, produces more information for debugging purposes (defaults to True).
     """
 
-    def __init__(self, debugging=True, binding_priority=lambda bindings: bindings[0], tag='e', has_var_attrs=True, solver=None, plot_observations=False, allow_postpone=False, causal_rl=False, causal_postpone_tokenflow=False):
+    def __init__(self, debugging=True, binding_priority=lambda bindings: bindings[0], tag='e', has_var_attrs=True, solver=None, plot_observations=False, allow_postpone=False, causal_rl=False, causal_postpone_tokenflow=False, use_structural_features=False):
         super().__init__(debugging, binding_priority)
 
         self.network_tag = NetworkTag(tag)  # boolean to indicate if it is time to take action ('a') or evolutions (i.e. normal events, 'e')
@@ -113,6 +113,74 @@ class GymProblem(SimProblem):
             self.causal_trace.postpone_tokenflow = self.causal_postpone_tokenflow
 
         self._debugging = True
+
+        # Structural (conflict-graph-derived) INPUT features -- opt-in,
+        # default off (byte-identical observation shape when False, matching
+        # this codebase's other opt-in flags: cf_config=None, causal_mu=0.0,
+        # phi_coef=0.0). Unlike every other lineage/topology mechanism tried
+        # in this project (lrq/ccf/s_ccf/lcv/lva/ls_hca/potential-shaping),
+        # this one is neither a credit/advantage term (no bias-variance
+        # tradeoff to prove) nor a reward-shaping term (no GAE-bootstrap
+        # fragility) -- it's plain extra input to the GNN encoder, letting
+        # gradient descent decide whether/how to use it. See
+        # gympn.conflict_graph.analyze() for what's computed, and
+        # get_graph_observation's a_transition block for where it's consumed.
+        # Cached on this instance (static topology, recomputed at most once
+        # per pn, same lifecycle as causal_traces._static_comp_cache).
+        self.use_structural_features = bool(use_structural_features)
+        self._conflict_feat_cache = None
+
+    def _get_action_conflict_features(self):
+        """{action_type_id: (in_conflict, degree, reward_proximity)} --
+        static, purely topological features (place/transition/arc structure
+        only, no token-value semantics, no marking dependence).
+
+        in_conflict/degree come from the conflict graph
+        (gympn.conflict_graph.analyze): which decisions structurally compete
+        for a token with another decision, and with how many other action
+        types. NOTE these two are necessarily SYMMETRIC for any action pair
+        joined by exactly one conflict edge (graph degree on a single
+        pairwise edge is equal on both ends by construction) -- e.g. on
+        s1_stoch_sequence, start1/start2 share only the `employee` pool and
+        get identical (1.0, 1.0). That is a correct computation, not a bug;
+        it just means conflict-degree alone cannot discriminate WHICH of two
+        mutually-conflicting actions is structurally preferable.
+
+        reward_proximity fixes that: the MINIMUM gympn.potential place
+        weight (decay**hop-to-nearest-reward-transition, see
+        get_place_weights) among the action's own incoming places. Since
+        ALL incoming places must hold a token for the action to fire, its
+        farthest (lowest-weight) precondition is the structural bottleneck
+        on how close to a reward this action's stage of the pipeline sits --
+        e.g. on s1, start1 needs `waiting1` (hop 4, deep upstream) while
+        start2's farthest precondition is `employee`/`waiting2` (hop 2), so
+        reward_proximity correctly differs even though conflict-degree does
+        not. General across topologies: no resource-pool-specific reasoning,
+        just the same BFS already validated for potential-based shaping.
+
+        Computed once and cached; recomputed only if invalidated (e.g. after
+        the net is deep-copied and topology could differ -- callers that
+        mutate topology should reset ``self._conflict_feat_cache = None``,
+        mirroring ``causal_trace._static_comp_cache``'s invalidation
+        convention)."""
+        if self._conflict_feat_cache is not None:
+            return self._conflict_feat_cache
+        from gympn.conflict_graph import analyze
+        from gympn.potential import get_place_weights
+        a = analyze(self)
+        degree = {}
+        for x, y in a.action_conflict_edges:
+            degree[x] = degree.get(x, 0) + 1
+            degree[y] = degree.get(y, 0) + 1
+        weights = get_place_weights(self)
+        feats = {}
+        for t in self.actions:
+            d = degree.get(t._id, 0)
+            place_weights = [weights.get(p._id, 0.0) for p in t.incoming]
+            proximity = min(place_weights) if place_weights else 0.0
+            feats[t._id] = (1.0 if d > 0 else 0.0, float(d), float(proximity))
+        self._conflict_feat_cache = feats
+        return feats
 
     def add_gym_var(self, name, attributes: dict, priority=lambda token: token.time):
         """
@@ -678,11 +746,22 @@ class GymProblem(SimProblem):
                 #t_nodes_mask = []
                 a_transition_dict = {} #helper to keep track of the transitions indexes in the graph
                 for i, t in enumerate(self.expanded_pn.actions):
+                    t_name = GymProblem._get_string_before_last_dot(t._id)
                     if add_self_loops:
-                        t_name = GymProblem._get_string_before_last_dot(t._id)
                         t_values = [1 if action._id == t_name else 0 for action in self.actions] #a_transitions know which transition type they are (useful with self loops and multiple actions)
                     else:
                         t_values = [] #otherwise they do not need to carry information
+
+                    if self.use_structural_features:
+                        # Static conflict-graph features (see
+                        # _get_action_conflict_features): does this action
+                        # TYPE structurally compete with another action for a
+                        # token, and with how many. Input to the network only
+                        # -- never touches credit/reward, so none of the
+                        # bias-variance or GAE-bootstrap issues every other
+                        # lineage/topology mechanism in this project hit apply.
+                        t_values = t_values + list(
+                            self._get_action_conflict_features().get(t_name, (0.0, 0.0, 0.0)))
 
                     b_list = [el.marking[0] for el in t.incoming]
                     binds = [([place for place in self.places if place._id == GymProblem._get_string_before_last_dot(el._id)][0], el.marking[0]) for el in t.incoming]
@@ -1434,14 +1513,33 @@ class GymProblem(SimProblem):
 
             elif len(bindings) > 0 and self.network_tag.is_action():  # hand control to the gym env
                 if not self.allow_postpone:
-                    condition = True if self.causal_rl else len(bindings) > 1
-                    if condition:  # only consult the agent when there is a real choice
+                    # A single binding is not a decision -- there is nothing to
+                    # choose. Auto-fire it for causal_rl runs too.
+                    #
+                    # This used to read `True if self.causal_rl else
+                    # len(bindings) > 1`, i.e. causal runs consulted the agent
+                    # even on forced moves. That kept the trace's action
+                    # transitions 1:1 with buffer decisions, but at two costs:
+                    # forced no-op decisions entered the training batch as real
+                    # samples, and (because the branch keys on causal_rl) the
+                    # causal arms faced a DIFFERENT decision sequence from the
+                    # ppo baseline they were being compared against -- a
+                    # structural confound in every postpone-off comparison.
+                    #
+                    # The lineage does not need the agent for this: fire() +
+                    # update_reward() register the produced tokens and the
+                    # transition in the causal trace either way, so provenance
+                    # still flows through the forced firing. It is registered
+                    # with agent_decision=False so it becomes a lineage node
+                    # rather than a decision node, which is what preserves the
+                    # trace/buffer alignment the old shortcut was protecting.
+                    if len(bindings) > 1:  # only consult the agent on a real choice
                         return _obs(), self.clock > self.length or not active_model, i
                     else:
                         binding = bindings[0]
                         run.append(binding)
                         result_tokens = self.fire(binding)
-                        self.update_reward(binding, result_tokens)
+                        self.update_reward(binding, result_tokens, agent_decision=False)
                         i += 1
                 else:
                     # allow_postpone: the agent may also choose to postpone.
@@ -1451,7 +1549,16 @@ class GymProblem(SimProblem):
 
         return _obs(), self.clock > self.length or not active_model, i
 
-    def update_reward(self, timed_binding, result_tokens=None):
+    def update_reward(self, timed_binding, result_tokens=None, agent_decision=True):
+        """Accrue the firing's reward and, in causal mode, record it in the trace.
+
+        agent_decision : bool, default True
+            Whether the agent actually chose this firing. False for a forced
+            single-binding action auto-fired by run_evolutions: its tokens and
+            reward still enter the causal trace (provenance is unaffected), but
+            it is NOT registered as a decision, so the trace's action
+            transitions stay aligned 1:1 with the decisions in the buffer.
+        """
         binding, time, transition = timed_binding
         variable_values = []
 
@@ -1476,7 +1583,8 @@ class GymProblem(SimProblem):
         #print(f"produced reward {r_f} with binding {binding}")
         #update causal reward buffer if enabled
         if self.causal_rl:
-            self.update_causal_trace(binding, result_tokens, r_f, transition)
+            self.update_causal_trace(binding, result_tokens, r_f, transition,
+                                     agent_decision=agent_decision)
 
 
         return r_f, variable_values
@@ -1685,6 +1793,7 @@ class GymProblem(SimProblem):
                 # action-invariant components. Reset the cached component map.
                 self.causal_trace._pn = self
                 self.causal_trace._static_comp_cache = None
+                self.causal_trace._ls_hca_classify_cache = None
                 # Ensure causal trace starts empty at the beginning of training
                 try:
                     self.causal_trace.flush()
@@ -1787,6 +1896,7 @@ class GymProblem(SimProblem):
                     max_episode_length=args.max_episode_length, batch_size=args.batch_size,
                     test_env=test_env, test_freq=test_freq,
                     test_episodes=getattr(args, 'test_episodes', 10),
+                    eval_seed=getattr(args, 'eval_seed', None),
                     wandb_logger=wandb_logger)
 
         # Store training history for programmatic access
@@ -2292,7 +2402,8 @@ class GymProblem(SimProblem):
                 out_token, sentinel_transition, old_input_tokens, time=self.clock
             )
 
-    def update_causal_trace(self, bindings, result_tokens, reward, transition):
+    def update_causal_trace(self, bindings, result_tokens, reward, transition,
+                            agent_decision=True):
         """
         Updates the causal trace with the provided bindings, result tokens, and reward.
         Parameters
@@ -2315,7 +2426,17 @@ class GymProblem(SimProblem):
             self.causal_trace.register_token(p_token, transition, consumed_tokens, time=self.clock)
 
         #update transition history with the reward obtained
-        self.causal_trace.register_transition(transition, consumed_tokens, result_tokens, is_action=(isinstance(transition, SimAction)), reward=reward, time=self.clock)
+        # agent_decision=False (a forced single-binding firing auto-fired by
+        # run_evolutions) registers as a LINEAGE node, not a decision node: the
+        # tokens above still carry provenance through it, so credit walks
+        # straight past it to the upstream decision that actually caused the
+        # flow, while get_action_transitions() continues to return exactly the
+        # decisions the agent made -- which is what the per-decision credit
+        # vectors are indexed against.
+        self.causal_trace.register_transition(transition, consumed_tokens, result_tokens,
+                                              is_action=(isinstance(transition, SimAction)
+                                                         and agent_decision),
+                                              reward=reward, time=self.clock)
 
 
 class SimAction(SimEvent):
