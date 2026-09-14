@@ -820,8 +820,10 @@ A_{\cflowraw}[d]-A_{\cflow}[d] \;=\; \bigl(R(d)-1\bigr)\,\hat{G}(d).
 \end{equation}
 \end{proposition}
 
-\noindent The proof is immediate from $w = R\hat w$. Three consequences drive
-everything in Section~\ref{sec:exp}.
+\noindent The proof is immediate from $w = R\hat w$.
+Figure~\ref{fig:rowsum} shows the distribution of $R(d)$ that
+\eqref{eq:defect} multiplies. Three consequences drive everything in
+Section~\ref{sec:exp}.
 
 \emph{(i) The error scales with the critic, not the reward.}
 $\hat{G}(d)=O(V)=O(H\bar r)$ for remaining causal horizon $H$ and mean
@@ -836,6 +838,21 @@ downstream of $d$, hence on the action at $d$. Forking every action at a decisio
 state under common random numbers, $R$ is identical across actions at only
 $18.8\%$ (four independent copies) and $6.2\%$ (single component) of fork points.
 An action-dependent term does not factor out through the score-function identity.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{../figures/fig_rowsum.pdf}
+\caption{The bootstrap row sum $R(d)$ over decisions of five random rollouts.
+\cflowraw{} leaves it unconstrained---mean $1.008$, standard deviation $0.542$,
+range $[0.143, 3.429]$ on the single-component environment---so
+\eqref{eq:defect} does not vanish, and the hatched mass is the
+$55.3\%$ ($24.1\%$ at four copies) of decisions where it exceeds a quarter of
+the critic. \cflow{} divides by $R$, so its coefficient is the dashed rule at
+exactly $1$ for every decision, by construction rather than on average. The
+aggregate mean of $\approx 1$ is what makes the defect easy to miss: it is a
+dispersion problem, not a bias in the mean.}
+\label{fig:rowsum}
+\end{figure}
 
 \emph{(iii) Successor normalization removes it identically.}
 $\sum_s\hat w=1$ by construction, so $R\equiv 1$ and \eqref{eq:defect} vanishes
@@ -1389,7 +1406,24 @@ collapsed seeds, against \cflow's $0.999\pm0.025$ and no collapses
 Proposition~\ref{prop:s} is not a property of one environment: it appears at
 both ends of the decomposability range, and it is invisible at small seed
 counts because it manifests as occasional catastrophic runs rather than as a
-uniformly lower mean.
+uniformly lower mean. Figure~\ref{fig:divergence} shows the failure on the
+single-component environment run by run.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{../figures/fig_divergence.pdf}
+\caption{The divergence, per seed, on the single-component environment.
+\textbf{(a)} Every \cflowraw{} seed (thin) against \cflow's mean and spread
+(dashed, band); $10$ of $20$ \cflowraw{} seeds end collapsed. The emphasised run
+is seed $1$: it climbs to $10.3$, holds there for roughly six evaluation points,
+then falls to $0.15$---below the random anchor. \textbf{(b)} Entropy over the
+same runs, on a shared epoch axis. Seed $1$'s entropy is flat at $0.18$
+throughout the collapse, so this is a confidently wrong policy rather than a
+failure to explore---the signature Proposition~\ref{prop:s} predicts when the
+error term grows with the critic. A mean with a confidence band hides this
+entirely, which is why the defect survived five-seed comparisons.}
+\label{fig:divergence}
+\end{figure}
 
 \subsection{The successor normalization is necessary}
 \label{sec:normneeded}
