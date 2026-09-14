@@ -27,6 +27,15 @@
 \usetikzlibrary{petri,positioning,arrows.meta,fit,backgrounds,calc}
 \usepackage[hidelinks]{hyperref}
 
+% --- float placement: the defaults strand large floats at the end ------
+\setcounter{topnumber}{3}
+\setcounter{bottomnumber}{2}
+\setcounter{totalnumber}{4}
+\renewcommand{\topfraction}{0.9}
+\renewcommand{\bottomfraction}{0.7}
+\renewcommand{\textfraction}{0.08}
+\renewcommand{\floatpagefraction}{0.75}
+
 \newtheorem{proposition}{Proposition}
 \newtheorem{corollary}{Corollary}
 \newtheorem{assumption}{Assumption}
@@ -399,7 +408,7 @@ from any decision point under an alternative action---the capability
 consequence of the same executable-model property that makes A-E PN a
 unified modeling-and-solving framework in the first place.
 
-\begin{figure}[t]
+\begin{figure}[tbp]
 \centering
 \begin{tikzpicture}[>=Stealth,node distance=1.5cm,
   place/.style={circle,draw,minimum size=9mm,inner sep=1pt},
@@ -531,7 +540,7 @@ $Q[d]$. Because $V$ is fitted to the emitted $Q$, the critic converges to the
 same object the recursion bootstraps through and the fixed point is
 self-consistent. Algorithm~\ref{alg:cflow} states the procedure.
 
-\begin{algorithm}[t]
+\begin{algorithm}[tbp]
 \caption{Causal-order advantage estimation (\cflow)}
 \label{alg:cflow}
 \begin{algorithmic}[1]
@@ -602,7 +611,7 @@ c_d(j)=\!\!\sum_{\text{paths } d\rightsquigarrow \own(j)}\ \prod c ,
 so a variant is characterized by the total path weight it places on each
 descendant's owned reward. Table~\ref{tab:family} lists the family.
 
-\begin{table}[t]
+\begin{table}[tbp]
 \centering
 \caption{The estimator family, and the two sums that matter.}
 \label{tab:family}
@@ -721,40 +730,6 @@ satisfies $\Ex[\hat g^{\star}]=\nabla_\theta J(\theta)$ for any
 $\Fscr_d$-measurable baseline $V$.
 \end{proposition}
 
-\begin{proof}
-Write the discarded mass as
-$G_d^{\mathrm{full}}-A^{\star}[d]=\Delta_d+\Xi_d$, where $\Delta_d$ collects the
-cross-component rewards and
-$\Xi_d=\sum \rho_d(t_j)r_j$ runs over the rewards $j$ with $t_j\ge u_d$,
-$c(j)=c(d)$ and $\own(j)\notin\desc^{*}(d)$: those in $d$'s own component that
-the closure nonetheless omits. It suffices to show each vanishes in the
-gradient.
-
-Fix $d$ and condition on $\Fscr_d$. Since $a_d$ is drawn given $\Fscr_d$ and
-both quantities are realized afterwards,
-\[
-  \Ex\bigl[\nabla\log\pi_\theta(a_d\mid s_d)\,X_d \mid \Fscr_d\bigr]
-  = \Ex_{a_d}\bigl[\nabla\log\pi_\theta(a_d\mid s_d)\,
-    \Ex[X_d\mid\Fscr_d,a_d]\bigr]
-\]
-for $X_d\in\{\Delta_d,\Xi_d\}$. For $X_d=\Delta_d$ the inner expectation is
-free of $a_d$ by Assumption~\ref{as:exo}. For $X_d=\Xi_d$, a reward $j$ in that
-sum has $\own(j)\notin\desc^{*}(d)$; since $\own(j)$ is the \emph{latest}
-decision on $j$'s lineage and the successor relation is time-forward, no
-decision of $\Ascr(j)$ can lie in $\desc^{*}(d)$ at all, so no descendant of
-$a_d$ is on $j$'s lineage. By the same A-E PN argument that justifies
-Assumption~\ref{as:exo}---$r_j$ is a deterministic function of the tokens
-consumed at its firing, whose histories are recorded---$r_j$ is then causally
-uninfluenced by $a_d$, and its conditional mean is likewise free of $a_d$.
-
-In both cases the inner expectation is some $\bar X_d$ not depending on $a_d$,
-so the outer expectation is
-$\bar X_d\,\Ex_{a_d}[\nabla\log\pi_\theta(a_d\mid s_d)\mid\Fscr_d]
- =\bar X_d\,\nabla_\theta\sum_a \pi_\theta(a\mid s_d)=\bar X_d\,\nabla_\theta 1=0$
-by the score-function identity. The baseline term contributes zero by the same
-identity. Summing over $d$ and taking total expectation gives the claim.
-\end{proof}
-
 \begin{remark}[What Proposition~\ref{prop:star} does and does not license]
 It licenses \eqref{eq:star} as a reference point, and with it every
 \emph{relative} statement in Sections~\ref{sec:bias} and \ref{sec:relative}. It
@@ -799,9 +774,9 @@ state under common random numbers, $R$ is identical across actions at only
 $18.8\%$ (four independent copies) and $6.2\%$ (single component) of fork points.
 An action-dependent term does not factor out through the score-function identity.
 
-\begin{figure}[t]
+\begin{figure}[tbp]
 \centering
-\includegraphics[width=\textwidth]{../figures/fig_rowsum.pdf}
+\includegraphics[width=0.95\textwidth]{../figures/fig_rowsum.pdf}
 \caption{The bootstrap row sum $R(d)$ over decisions of five random rollouts.
 \cflowraw{} leaves it unconstrained---mean $1.008$, standard deviation $0.542$,
 range $[0.143, 3.429]$ on the single-component environment---so
@@ -857,28 +832,6 @@ component-scoped credit reduces the per-decision advantage variance by a factor
 $\approx K$ and the gradient-noise standard deviation by $\approx\sqrt{K}$.
 \end{proposition}
 
-\begin{proof}
-Conditionally on $s_d$ the baseline is a constant, so it does not affect either
-variance. By conditional independence
-$\Var(\sum_k R_k\mid s_d)=\sum_k \Var(R_k\mid s_d)=\sum_k\sigma_k^2$, which is
-the first equality; the second is immediate. Under
-$\sigma_k^2\approx\sigma^2$ the ratio is $K\sigma^2/\sigma^2=K$, and standard
-deviation scales as the square root.
-\end{proof}
-
-\begin{remark}[The gap between the model and the estimator]
-Two idealizations separate Proposition~\ref{prop:k} from what \cflow{} actually
-computes. Conditional independence across components is stronger than
-Assumption~\ref{as:exo}, which constrains only conditional means: (A1) is what
-buys unbiasedness, independence is what buys the variance factor, and an
-environment can satisfy the first while only approximately satisfying the
-second. And \cflow{} scopes to $\desc^{*}(d)$, which is contained in $c(d)$ and
-usually strictly smaller, so it discards more than the model does---which is why
-the empirical gain is not a clean function of $K$ (Section~\ref{sec:scaling}).
-The proposition should be read as identifying the mechanism and its governing
-quantity, not as predicting an effect size.
-\end{remark}
-
 The scoping is directly observable. With
 $S(d)=|\desc(d)|/|\{\text{decisions after }d\}|$, balanced components give
 $S\approx 1/K$, and on the scaling benchmark with $N$ copies (where the copies are
@@ -899,21 +852,20 @@ measures how much of it was independent.
 
 A natural objection to \eqref{eq:unroll} is that crediting every causal ancestor
 must inflate credit relative to the return $G=\sum_j r_j$. It does, but far less
-than the baseline it is compared against: under plain return-to-go a reward at
-decision $k$ enters the advantage of all $k$ preceding decisions, giving
-$\sum_t G_t \approx (n/2)G$ for $n$ decisions. Measured, $\sum_d Q[d]/G$ is
-$39.78$, $21.23$ and $18.40$ for return-to-go on our three main environments
-(against $n/2$ of $34.5$, $18$ and $14.5$) versus $4.34$, $4.32$ and $4.86$ for
-\cflow---a four- to ninefold \emph{reduction}, tracking $1/S$ closely. The
-residual is the variance-reduction mechanism viewed from the other side. Absolute
-scale is in any case removed by per-batch advantage standardization.
-Figure~\ref{fig:credit} shows both the reduction and its structure: the same
-episode credited by each estimator, where the causal one is not merely sparser
-but \emph{block} sparse, the blocks being the components it discovered.
+than the baseline it is compared against: plain return-to-go enters a reward at
+decision $k$ into all $k$ preceding advantages, giving $\sum_t G_t\approx(n/2)G$.
+Measured, $\sum_d Q[d]/G$ is $39.78$, $21.23$ and $18.40$ for return-to-go on our
+three main environments---against $n/2$ of $34.5$, $18$ and $14.5$---versus
+$4.34$, $4.32$ and $4.86$ for \cflow, a four- to ninefold \emph{reduction}
+tracking $1/S$. Absolute scale is in any case removed by per-batch advantage
+standardization. Figure~
+ef{fig:credit} shows the reduction and its structure:
+the causal estimator is not merely sparser but \emph{block} sparse, the blocks
+being the components it discovered.
 
-\begin{figure}[t]
+\begin{figure}[tbp]
 \centering
-\includegraphics[width=\textwidth]{../figures/fig_credit_matrix.pdf}
+\includegraphics[width=0.95\textwidth]{../figures/fig_credit_matrix.pdf}
 \caption{The credit matrix $c_d(j)$---the weight decision $d$ places on the
 reward owned by decision $j$---on single episodes. \textbf{(a)} and \textbf{(b)}
 are the \emph{same} episode of the four-copy environment under the same row and
@@ -971,16 +923,6 @@ For this chain,
 \]
 \end{lemma}
 
-\begin{proof}
-Row-stochasticity is \eqref{eq:sucsum}. By Assumption~\ref{as:time} the DAG is
-acyclic, so a walk visits any node at most once; consequently the events
-$\{\text{the walk's initial segment is }\pi\}$, indexed by the distinct paths
-$\pi: d\rightsquigarrow e$, are pairwise disjoint and their union is exactly the
-event that the walk visits $e$. Each has probability
-$\prod_{(x\to y)\in\pi}\hat w(x\!\to\!y)$, and summing gives $c_d(e)$. A
-probability lies in $[0,1]$.
-\end{proof}
-
 Define the \emph{re-convergence deficiency} at $d$, in worst-case and
 reward-weighted form,
 \[
@@ -1016,21 +958,6 @@ $V\equiv0$:
       reachability.
 \end{enumerate}
 \end{proposition}
-
-\begin{proof}
-(i) is Lemma~\ref{lem:visit}. For (ii), telescoping of $\rho$ gives
-$A^\star[d]-A[d]=\sum_{e}\bigl(1-c_d(e)\bigr)\rho_{de}\,\mathrm{owned}[e]$;
-take absolute values, use $\rho\le1$ and $0\le 1-c_d(e)\le\delta_d$, and note
-the middle expression is exactly $\bar\delta_d$ times the total owned mass.
-For (iii), the two estimators differ only through the summand, so
-$\nabla J_{\cflow}-\nabla J_{\star}
- =\Ex\bigl[\sum_d (A[d]-A^\star[d])\nabla\log\pi_d\bigr]$; apply the triangle
-inequality, then (ii) and Assumption~\ref{as:score}, and reindex the double sum
-by owner, each $e$ being counted once per ancestor. For (iv), if out-degree is
-at most one throughout $\desc^{*}(d)$ the walk is deterministic and visits every
-descendant, so $c_d(e)=1$; conversely $c_d(e)=1$ for all $e$ says every maximal
-walk from $d$ meets every descendant, which is total order by reachability.
-\end{proof}
 
 \paragraph{The bound is instrumented, and its equality case is observed.}
 Table~\ref{tab:envs} reports mean $c_d(e)$ per environment. On multi-site
@@ -1110,74 +1037,17 @@ the set of stationary points are \emph{identical}, and the factor $m$ is
 absorbed by the step size---and removed outright by the per-batch advantage
 standardization used throughout. Only the \emph{dispersion} of $m_d$ can distort
 the direction.
-\item[(iii)] \textbf{Cosine law.} Let $p_d \propto A^{\star}[d]^2$ and let
-$\mathrm{CV}$ be the coefficient of variation of $m$ under $p$. Then
-\[
-  \cos\angle\bigl(A, A^{\star}\bigr)
-  \;=\; \bigl(1+\mathrm{CV}^2\bigr)^{-1/2}
-  \qquad\text{exactly,}
-  \qquad\text{hence}\qquad
-  1-\cos\angle \;\le\; \tfrac{1}{2}\mathrm{CV}^2 .
-\]
-\item[(iv)] $\mathrm{CV}$ is dimensionless, independent of $n$, and computable
-from a handful of untrained rollouts.
 \end{enumerate}
 \end{proposition}
 
-\begin{proof}
-(i) By Assumption~\ref{as:pos} the denominator of $\bar\delta_d$ is
-$A^{\star}[d]$ and its numerator is $A^{\star}[d]-A[d]$, so
-$\bar\delta_d = 1 - A[d]/A^{\star}[d]$, which rearranges to (i). (ii) is
-immediate from linearity of $\nabla J$ in the per-decision coefficient. For
-(iii), write $u=A^{\star}$ and $A_d=m_d u_d$. Then
-$\langle A,u\rangle=\sum_d m_d u_d^2=\Ex_p[m]\lVert u\rVert^2$ and
-$\lVert A\rVert^2=\sum_d m_d^2u_d^2=\Ex_p[m^2]\lVert u\rVert^2$, so
-\[
-  \cos\angle=\frac{\Ex_p[m]}{\sqrt{\Ex_p[m^2]}}
-           =\frac{\Ex_p[m]}{\sqrt{\Ex_p[m]^2+\Var_p(m)}}
-           =\bigl(1+\mathrm{CV}^2\bigr)^{-1/2},
-\]
-and $(1+x)^{-1/2}\ge 1-x/2$ gives the bound.
-\end{proof}
-
-\paragraph{Measured.} Table~\ref{tab:cosine} reports both sides. The identity
-(i) holds to machine precision (maximum absolute deviation $1.8\times10^{-15}$
-over all episodes), and the cosine law (iii) is exact to
-$6.7\times10^{-16}$---these are verifications of algebra, not fits. The
-practical content is the last column: the direction of the credit vector is
-preserved to within $11\%$ in the worst case, and \emph{exactly} on multi-site,
-where out-degree is one so $\bar\delta\equiv0$.
-
-\begin{table}[t]
-\centering
-\caption{Proposition~\ref{prop:rel} measured on untrained rollouts
-($\lambda=1$, $V\equiv0$, $\beta=0$). $\mathrm{CV}$ is the $A^{\star2}$-weighted
-coefficient of variation of the multiplier.}
-\label{tab:cosine}
-\begin{tabular}{lccccc}
-\toprule
-environment & $\bar\delta$ (mean) & $\mathrm{CV}$ & $\cos\angle$ measured
-            & $(1+\mathrm{CV}^2)^{-1/2}$ & $1-\cos\angle$ \\
-\midrule
-multi-site   & $0.000$ & $0.000$ & $1.00000$ & $1.00000$ & $0.000$ \\
-$N{=}4$      & $0.095$ & $0.195$ & $0.97823$ & $0.97823$ & $0.022$ \\
-$N{=}8$      & $0.109$ & $0.500$ & $0.89106$ & $0.89106$ & $0.109$ \\
-single comp. & $0.374$ & $0.423$ & $0.91987$ & $0.91987$ & $0.080$ \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\begin{remark}[What the cosine law does and does not cover]
-Proposition~\ref{prop:rel}(iii) is a statement about the vectors of
-per-decision \emph{coefficients} $A$ and $A^{\star}$, not directly about the
-gradients $\sum_d A_d\nabla\log\pi_d$. The two coincide when the score vectors
-$\{\nabla\log\pi_d\}$ are orthonormal; in general they differ by a factor
-governed by the conditioning of the score Gram matrix, which we do not bound.
-We therefore read Table~\ref{tab:cosine} as characterizing the estimator, not
-as a guarantee on the realized gradient. As with
-Proposition~\ref{prop:bias}, everything is stated \emph{relative} to
-$A^{\star}$, whose unbiasedness rests on Assumption~\ref{as:exo}.
-\end{remark}
+Proposition~\ref{prop:rel}(ii) is the fact Section~\ref{sec:exactness}
+relies on: a shrinkage that is \emph{uniform} across decisions cannot change the
+ascent direction at all, and is removed outright by the per-batch advantage
+standardization we use, so only the dispersion of $m_d$ can distort the
+gradient. Appendix~\ref{app:cosine} turns that into an exact cosine law in terms
+of the coefficient of variation of $m$, measures both sides, and reports that
+the credit direction is preserved to within $11\%$ in the worst case and
+exactly on multi-site, where out-degree is one and $\bar\delta\equiv0$.
 
 %===========================================================================
 \section{Experiments}
@@ -1223,7 +1093,7 @@ pool links every case into one causal component, which is the negative control.
 Appendix~\ref{app:envs} specifies all three, together with the random and
 heuristic anchors of the normalization.
 
-\begin{table}[t]
+\begin{table}[tbp]
 \centering
 \caption{Structural statistics, computed from random rollouts before training.
 $K$ = reward-bearing causal components; fan-out = mean $|\suc(d)|$;
@@ -1253,9 +1123,9 @@ $0.0$), a fact we verify rather than assume.
 
 \subsection{Main results at the converged budget}
 
-\begin{figure}[t]
+\begin{figure}[tbp]
 \centering
-\includegraphics[width=\textwidth]{../figures/fig_curves_v3.pdf}
+\includegraphics[width=0.94\textwidth]{../figures/fig_curves_v3.pdf}
 \caption{Learning curves, mean over $20$ common-random-number seeds with $95\%$
 confidence bands; every series carries its own dash pattern so the figure reads
 in greyscale. \textbf{(a)} Where the problem decomposes ($K{=}8$), causal-order
@@ -1271,7 +1141,7 @@ coefficient. Its early confidence band extends below the axis.}
 \label{fig:curves}
 \end{figure}
 
-\begin{table}[t]
+\begin{table}[tbp]
 \centering
 \caption{Normalized final return at the converged $40$-epoch budget,
 $20$ common-random-number seeds for every cell. Parenthesised values are
@@ -1307,96 +1177,63 @@ single comp. & $1.0$ & $0.699$ & $0.643$ & $0.727$ & $0.722$ & $-0.006$ & $0.675
 \end{tabular}
 \end{table}
 
-\begin{table}[t]
-\centering
-\caption{Paired comparisons against \cflow{} ($20$ seeds, paired $t$-test).
-The pattern is uniform: large and significant against non-causal or
-unbounded-coefficient baselines, null against every bounded causal variant.}
-\label{tab:paired}
-\small
-\begin{tabular}{llrrl}
-\toprule
-environment & comparator & difference & $p$ & \\
-\midrule
-multi-site & PPO        & $+0.512$ & $<0.0001$ & $\ast\!\ast\!\ast$ \\
-multi-site & \mcq       & $+0.642$ & $<0.0001$ & $\ast\!\ast\!\ast$ \\
-multi-site & \ccf       & $+0.162$ & $0.0500$  & borderline \\
-$N{=}8$    & PPO        & $+0.194$ & $0.0019$  & $\ast\!\ast$ \\
-$N{=}8$    & \cflowraw  & $+0.258$ & $0.0999$  & \\
-$N{=}8$    & \ccf       & $+0.021$ & $0.24$    & null \\
-$N{=}4$    & \mcq       & $+0.418$ & $<0.0001$ & $\ast\!\ast\!\ast$ \\
-$N{=}4$    & \cfgae     & $+0.370$ & $0.0005$  & $\ast\!\ast\!\ast$ \\
-$N{=}4$    & PPO        & $+0.264$ & $0.0009$  & $\ast\!\ast\!\ast$ \\
-$N{=}4$    & \cgae, \ccf, \ccap, \cflowraw & $-0.015$ to $+0.009$ & $\ge 0.43$ & null \\
-$N{=}2$    & \mcq       & $+0.230$ & $0.0100$  & $\ast$ \\
-$N{=}2$    & all other arms & $+0.080$ to $+0.204$ & $\ge 0.052$ & null \\
-single comp. & \cflowraw & $\mathbf{+0.705}$ & $\mathbf{0.0006}$ & $\ast\!\ast\!\ast$ \\
-single comp. & \cdag     & $\mathbf{+0.395}$ & $\mathbf{<0.0001}$ & $\ast\!\ast\!\ast$ \\
-single comp. & PPO, \cgae, \ccap, \cfgae, \ccf, \mcq & $-0.040$ to $+0.056$ & $\ge 0.27$ & null \\
-\bottomrule
-\end{tabular}
-\end{table}
 
 \paragraph{Against PPO the effect is large where $K$ is large.}
-On multi-site, \cflow{} improves normalized return by $+0.512$ ($18$W/$1$L,
-$p<0.0001$) and collapses on $0$ of $20$ seeds against PPO's $14$. At eight
-copies the paired gain is $+0.194$ ($p=0.0019$), at four copies $+0.264$
-($p=0.0009$), and against \cfgae{} at four copies $+0.370$ ($p=0.0005$). At two
-copies the gain is $+0.080$ and not significant ($p=0.34$), and at $K{=}1$ it is
-$-0.030$; the effect is therefore present at the three high-$K$ configurations
-and absent at the two low-$K$ ones, which is the pattern
-Proposition~\ref{prop:k} predicts and which we return to in
-Section~\ref{sec:scaling}.
+On multi-site \cflow{} improves normalized return by $+0.512$ ($18$W/$1$L,
+$p<0.0001$) and collapses on $0$ of $20$ seeds against PPO's $14$; the paired
+gains are $+0.194$ ($p=0.0019$) at eight copies and $+0.264$ ($p=0.0009$) at
+four, against \cfgae{} $+0.370$ ($p=0.0005$). At two copies ($+0.080$,
+$p=0.34$) and at $K{=}1$ ($-0.030$) it is absent. The effect is therefore
+present at the three high-$K$ configurations and absent at the two low-$K$
+ones, the pattern Proposition~\ref{prop:k} predicts and which
+Section~\ref{sec:scaling} takes up.
 
 \paragraph{The gain is located in the causal restriction, not the discounting.}
 The lineage ablation \mcq{} is the identical SMDP return-to-go with the causal
 restriction removed and everything else---discounting, normalization,
-optimizer---held fixed. It loses to \cflow{} on every environment where scoping
-is possible, and by margins that track $K$: $+0.642$ on multi-site
-($20$W/$0$L, $p<0.0001$, where \mcq{} scores $0.030$ and collapses on $17$ of
-$20$ seeds), $+0.418$ at four copies ($18$W/$2$L, $p<0.0001$) and $+0.230$ at
-two copies ($10$W/$4$L, $p=0.010$). On the single-component environment, where
-Proposition~\ref{prop:k} says there is nothing to scope, the same ablation is
-null: $+0.024$, $p=0.52$. The ablation therefore separates exactly where the
-mechanism says it should and nowhere else.
+optimizer---held fixed. It loses to \cflow{} wherever scoping is possible, by
+margins tracking $K$: $+0.642$ on multi-site ($20$W/$0$L, $p<0.0001$, where
+\mcq{} scores $0.030$ and collapses on $17$ of $20$ seeds), $+0.418$ at four
+copies and $+0.230$ at two (both $p\le0.010$). Where
+Proposition~\ref{prop:k} says there is nothing to scope it is null ($+0.024$,
+$p=0.52$). The ablation separates exactly where the mechanism says it should
+and nowhere else.
 
 \paragraph{Against other bounded causal schemes the effect is null everywhere.}
-At four copies \cflow{} versus \cgae{}, \ccf{}, \ccap{} and \cflowraw{} spans
-$-0.015$ to $+0.009$, every $p\ge0.43$; on the single-component environment
-$-0.040$ to $+0.056$, every $p\ge0.27$; at two copies $+0.080$ to $+0.204$,
-every $p\ge0.052$. (The comparison set here is the bounded causal schemes; the
-non-causal ablation \mcq{} is significant at two and four copies, as reported
-above.) We state this explicitly because an earlier version of this
-work, run at a shorter budget with fewer seeds, reported a significant advantage
-over \ccf{}; that difference was a convergence-speed artifact---\ccf{} gains
-$+0.24$ at four copies under the longer budget---and it does not survive.
-Multi-site is the one borderline case ($+0.162$, $p=0.0500$, $11$W/$9$L), which
-we read as no reliable difference given the disagreeing rank test.
+Versus \cgae{}, \ccf{}, \ccap{} and \cflowraw{} the paired difference spans
+$-0.015$ to $+0.009$ at four copies, $-0.040$ to $+0.056$ on the
+single-component environment and $+0.080$ to $+0.204$ at two copies, with every
+$p\ge0.27$ except the $N{=}2$ minimum of $0.052$; multi-site is the one
+borderline case ($+0.162$, $p=0.0500$, $11$W/$9$L), which we read as no reliable
+difference given the disagreeing rank test. (The non-causal ablation \mcq{}
+\emph{is} significant at two and four copies, as above.) We state this
+explicitly because an earlier version of this work, at a shorter budget and
+fewer seeds, reported a significant advantage over \ccf{}: that was a
+convergence-speed artifact---\ccf{} gains $+0.24$ at four copies under the
+longer budget---and it does not survive.
 
 \paragraph{On the negative control the method is null, as designed.}
-Against PPO on the single-component environment, \cflow{} is $-0.030$
-($p=0.46$), and indeed \emph{seven} arms lie within $0.06$ of one another there.
-The mechanism predicts this: $K=1.0$ and one component holds $100\%$ of reward
-mass, so there is nothing to scope. A method that predicts its own failure case
-is the strongest evidence we can offer for the mechanism, and the value of the
-environment is that it is where the \emph{ablations} separate
-(Section~\ref{sec:exp}, Table~\ref{tab:paired}).
+Against PPO on the single-component environment \cflow{} is $-0.030$
+($p=0.46$), and \emph{seven} arms lie within $0.06$ of one another. The
+mechanism predicts it: $K=1.0$, and one component holds all the reward mass, so
+there is nothing to scope. A method that predicts its own failure case is the
+strongest evidence we can offer for the mechanism---and this environment is
+where the \emph{ablations} separate.
 
 \paragraph{The unbounded coefficient fails on the highest-$K$ environment too.}
-At the shorter budget and five seeds, \cflowraw{} appeared healthy at eight
-copies ($0.994\pm0.014$). At $20$ seeds it measures $0.741\pm0.654$ with $3$
-collapsed seeds, against \cflow's $0.999\pm0.025$ and no collapses
-($+0.258$, $p=0.0999$). Together with the single-component result
-($+0.705$, $p=0.0006$), this establishes that the divergence of
-Proposition~\ref{prop:s} is not a property of one environment: it appears at
-both ends of the decomposability range, and it is invisible at small seed
-counts because it manifests as occasional catastrophic runs rather than as a
-uniformly lower mean. Figure~\ref{fig:divergence} shows the failure on the
-single-component environment run by run.
+At the shorter budget and five seeds \cflowraw{} appeared healthy at eight
+copies ($0.994\pm0.014$); at $20$ seeds it measures $0.741\pm0.654$ with $3$
+collapsed seeds against \cflow's $0.999\pm0.025$ and none ($+0.258$,
+$p=0.0999$). With the single-component result ($+0.705$, $p=0.0006$), the
+divergence of Proposition~\ref{prop:s} is thus not a property of one
+environment: it appears at both ends of the decomposability range, and it is
+invisible at small seed counts because it manifests as occasional catastrophic
+runs rather than a uniformly lower mean. Figure~\ref{fig:divergence} shows it
+run by run.
 
-\begin{figure}[t]
+\begin{figure}[tbp]
 \centering
-\includegraphics[width=\textwidth]{../figures/fig_divergence.pdf}
+\includegraphics[width=0.88\textwidth]{../figures/fig_divergence.pdf}
 \caption{The divergence, per seed, on the single-component environment.
 \textbf{(a)} Every \cflowraw{} seed (thin) against \cflow's mean and spread
 (dashed, band); $10$ of $20$ \cflowraw{} seeds end collapsed. The emphasised run
@@ -1413,7 +1250,7 @@ entirely, which is why the defect survived five-seed comparisons.}
 \subsection{The successor normalization is necessary}
 \label{sec:normneeded}
 
-\begin{table}[t]
+\begin{table}[tbp]
 \centering
 \caption{Single-component environment ($K{=}1$), $20$ seeds, normalized final
 return, paired against \cflow. Only two rungs of the ladder are significant;
@@ -1529,9 +1366,9 @@ estimators from the failing one, and boundedness is.
 The gain over PPO is present at every $K>1$ and absent at $K=1$, but it is
 \emph{not} monotone in $K$:
 
-\begin{figure}[t]
+\begin{figure}[tbp]
 \centering
-\includegraphics[width=0.92\textwidth]{../figures/fig_k_axis.pdf}
+\includegraphics[width=0.82\textwidth]{../figures/fig_k_axis.pdf}
 \caption{Paired gain over PPO against $K$, with the headroom PPO itself leaves
 drawn as a ceiling. The gain is absent at $K{=}1$ and present at every $K>1$,
 but it is not monotone---and the reason is visible rather than asserted. At two
@@ -1545,7 +1382,6 @@ We plot the five configurations as points and deliberately fit no trend through
 them.}
 \label{fig:kaxis}
 \end{figure}
-
 
 Figure~\ref{fig:kaxis} plots the five configurations against the ceiling. We
 report the non-monotonicity rather than smoothing it, because its cause is
@@ -1575,86 +1411,67 @@ $K$ axis, and we draw no conclusion from the ordering of arms within it.
 \label{sec:boundary}
 %===========================================================================
 
-
 Proposition~\ref{prop:k} makes a sharp prediction: \cflow's variance reduction
-scales with the number of causally independent components $K$, and collapses
-to \emph{exactly} PPO when $K=1$ (a single shared resource pool links every
-case into one component). This is the theorem's own honest null, not a
-failure. We use a two-stage service-line environment with a single shared,
-skill-heterogeneous employee pool as the decisive $K{=}1$ case. This is the
-same environment called \emph{single component} in Section~\ref{sec:exp}; here
-we call it the \emph{bottleneck environment} to name the mechanism under test
-rather than the statistic. Its experiments predate the converged-budget re-runs
-and use a $30$-epoch, $10$-seed protocol, which is why the baseline arm reads
-$0.739$ here against $0.729$ in Table~\ref{tab:ablation}; see
-Appendix~\ref{app:boundary}, which also gives the technical detail of all three
-mechanisms. We ask: can the residual gap on
-this genuinely single-component problem be closed by any other provenance- or
-structure-based route? We tested three independent, well-motivated
-candidates---never touching credit, only what the learner observes---and
-found each provably inert or empirically neutral. Table~\ref{tab:boundary}
-and Figure~\ref{fig:boundary} summarize, and Figure~\ref{fig:phidial} gives the
-reward-shaping coefficient dial in full; we report all three not as a coda but
-as a result, since two of the three failures follow from a proof rather than a
-correlation and together they localize the bottleneck's difficulty precisely.
+scales with $K$ and collapses to exactly PPO when $K=1$. That is the theorem's
+own honest null, and it raises the question this section answers---whether the
+residual gap on a genuinely single-component problem can be closed by some
+\emph{other} provenance- or structure-based route. We tested three independent
+candidates, none of which touches credit assignment; all three change only what
+the learner observes. Each is provably inert or empirically neutral, and two of
+the three failures follow from a proof rather than a correlation, which is why
+we report them as a result rather than a coda: together they localize where the
+difficulty does not live. The environment is the two-stage service line with one
+shared, skill-heterogeneous employee pool, called \emph{single component} in
+Section~\ref{sec:exp} and the \emph{bottleneck environment} here. These
+experiments predate the converged-budget re-runs and use a $30$-epoch, $10$-seed
+protocol, which is why the baseline reads $0.739$ against $0.729$ in
+Table~\ref{tab:ablation}. Appendix~\ref{app:boundary} gives the technical detail
+of all three mechanisms.
 
 \paragraph{Reward shaping.} Potential-based shaping from PN topology
 \citep{ng1999shaping}, SMDP-generalized, is provably policy-invariant for any
-potential function---verified directly in code via an exact terminal-value
-cancellation test, not merely cited. A full coefficient dial on the
-bottleneck environment (same cached PPO baseline reused across all four
-points) shows reach-rate cleanly monotonic in the injected-variance
-direction ($8/10\to4/10\to1/10$ seeds reaching $95\%$ of the heuristic
-anchor as the coefficient rises $0.2\to0.5\to1.0$), and no coefficient
-produces a significant win: $0.739\pm0.10$ (baseline) vs.\ $0.766\pm0.10$
-($p=.48$, coefficient $0.2$) vs.\ $0.420\pm0.10$, $0$W/$10$L (coefficient
-$1.0$). The mechanism is that constant exogenous arrivals make the potential
-rise as well as fall, injecting a per-step signal on the same order of
-magnitude as the full episode return---unbiased in aggregate (guaranteed by
-the theorem) but a substantially noisier value-regression target at a finite
-budget.
+potential---which we verify in code by an exact terminal-value cancellation
+test rather than merely cite. No coefficient produces a significant win, and
+large ones are harmful: $0.739\pm0.10$ at baseline against $0.766\pm0.10$
+($p=.48$) at coefficient $0.2$ and $0.420\pm0.10$, $0$W/$10$L at $1.0$, with the
+fraction of seeds reaching $95\%$ of the heuristic anchor falling monotonically
+($8/10\to4/10\to1/10$). The mechanism is that constant exogenous arrivals make
+the potential rise as well as fall, injecting a per-step signal on the order of
+the whole episode return: unbiased in aggregate, as the theorem guarantees, but
+a much noisier value-regression target at a finite budget. Safety and efficacy
+are independent properties, and this mechanism has the first without the second.
 
-\paragraph{Structural input features.} Static, conflict-graph-derived scalars
-appended to each action node's own input features (does this action type
-structurally compete for a token, and with how many; and, after a first null
-result, the minimum topological distance to the nearest reward among an
-action's required inputs) are both statistically neutral ($p=.58$ and
-$p=.69$ respectively). The stronger finding is \emph{why}: every action node
-already carries a one-hot action-type identity at zero hops, so the two
-competing action types in the bottleneck environment are already fully
-distinguishable with or without any structural feature. Any scalar computed
-as a function of action type alone is therefore a deterministic function of
-information a single learned weight on the one-hot could already
-reconstruct---provably redundant, not merely observed to be unhelpful across
-two experiments, and true of this architecture on any topology, not only the
-bottleneck environment.
+\paragraph{Structural input features.} Conflict-graph-derived scalars appended
+to each action node's own features---whether an action type structurally
+competes for a token and with how many, and, after a first null, the minimum
+topological distance to the nearest reward---are both neutral ($p=.58$ and
+$p=.69$). The stronger finding is \emph{why}. Every action node already carries
+a one-hot action-type identity at zero hops, so the two competing action types
+here are fully distinguishable with or without any structural feature, and any
+scalar that is a function of action type alone is a deterministic function of
+what a single learned weight on that one-hot could already reconstruct. The
+redundancy is provable, and holds for this architecture on any topology rather
+than only on the bottleneck environment.
 
-\paragraph{Actor architecture.} We identify and prove a previously
-undocumented limitation: the actor decodes each action's logit from only that
-action node's own final message-passing embedding, unlike the critic, which
-has always pooled over all action/postpone node embeddings for its value
-estimate. Combined with graph edges directed strictly along token flow (no
-reverse edges at any real observation call site), an action's logit can
-depend on state only via a forward path reaching it within the network's
-depth. We prove this is a hard architectural fact, not a training-budget
-limitation: on a purpose-built topology of two structurally independent
-two-stage pipelines, perturbing one pipeline's downstream marking left the
-other pipeline's action logit \emph{exactly, bit-for-bit unchanged} under a
-randomly initialized, untrained network ($\Delta=0.000$)---reachability is a
-property of the computational graph, independent of learned weights. We fix
-this (concatenating the same pooled context the critic already computes onto
-each action node before decoding), confirm the fix closes the gap on the
-same proof topology ($\Delta=0.000\to0.528$), and re-test on the bottleneck
-environment: norm.\ final $0.739\pm0.10$ (baseline) vs.\ $0.746\pm0.14$
-(fixed architecture), $p=.91$---no significant effect. The proof and the
-training result are not in tension: the bottleneck environment's shared
-resource pool happens to recycle, giving the unfixed architecture a
-marginal, accidental backdoor to the same information, so the blind spot was
-never total there, and whatever fraction the fix newly exposes is not, in
-practice, decision-relevant enough to move a well-tuned baseline at this
-training budget.
+\paragraph{Actor architecture.} We identify and prove a previously undocumented
+limitation. The actor decodes each action's logit from that action node's own
+final embedding alone, whereas the critic has always pooled over all action and
+postpone nodes. Combined with edges directed strictly along token flow---no
+reverse edges at any real observation site---an action's logit can depend on
+state only through a forward path reaching it within the network's depth. This
+is an architectural fact, not a budget limitation: on a purpose-built topology
+of two independent two-stage pipelines, perturbing one pipeline's downstream
+marking leaves the other's action logit \emph{bit-for-bit unchanged} under a
+randomly initialized network ($\Delta=0.000$), since reachability is a property
+of the computational graph and not of learned weights. Concatenating the pooled
+context the critic already computes onto each action node before decoding closes
+the gap on that topology ($\Delta=0.000\to0.528$), but is neutral on the
+bottleneck environment: $0.746\pm0.14$ against $0.739\pm0.10$, $p=.91$. The
+proof and the null are not in tension---the shared pool recycles, giving the
+unfixed architecture a marginal accidental backdoor to the same information, so
+the blind spot was never total here.
 
-\begin{table}[t]
+\begin{table}[tbp]
 \centering
 \caption{The boundary-condition investigation, bottleneck environment
 ($K{=}1$).}
@@ -1670,34 +1487,23 @@ Actor global context & proven to close a real gap & neutral, $p=.91$; gap was al
 \end{tabular}
 \end{table}
 
-\begin{figure}[t]
+\begin{figure}[tbp]
 \centering
 \includegraphics[width=0.78\linewidth]{../figures/fig4_boundary_summary.pdf}
 \caption{Baseline PPO vs.\ each of the three boundary-condition mechanisms on
 the bottleneck environment ($K{=}1$; error bars are $95\%$ CIs over seeds).
 None significantly improves on the baseline; reward shaping at
-$\phi_{\mathrm{coef}}{=}1.0$ is significantly worse.}
+$\phi_{\mathrm{coef}}{=}1.0$ is significantly worse. The full coefficient dial
+is in Figure~\ref{fig:phidial}.}
 \label{fig:boundary}
 \end{figure}
 
-\begin{figure}[t]
-\centering
-\includegraphics[width=\linewidth]{../figures/fig5_phi_dial.pdf}
-\caption{The reward-shaping coefficient dial on the bottleneck environment:
-efficacy (left) degrades once past $\phi_{\mathrm{coef}}=0.2$, and the
-fraction of seeds reaching $95\%$ of the heuristic anchor (right) degrades
-monotonically---safety (Section~\ref{sec:related}, \citealp{ng1999shaping})
-and efficacy are independent properties, and this mechanism has the first
-without the second at practical training budgets.}
-\label{fig:phidial}
-\end{figure}
-
-None of this is a failure of experimental design: each mechanism does
-exactly what it was built to do. It is evidence about where the bottleneck
-environment's difficulty does \emph{not} live---not in what the learner can
-observe, and not, per Proposition~\ref{prop:k}, in an avoidable credit bias
-on this genuinely single-component topology. We state this as an open
-problem rather than a solved one in Section~\ref{sec:discussion}.
+Each mechanism does exactly what it was built to do, so none of this is a
+failure of experimental design. It is evidence about where the bottleneck
+environment's difficulty does \emph{not} live: not in what the learner can
+observe, and not---by Proposition~\ref{prop:k}---in an avoidable credit bias on
+a genuinely single-component topology. Section~\ref{sec:discussion} states it as
+an open problem rather than a solved one.
 
 % ======================================================================
 
@@ -1769,7 +1575,99 @@ matters is keeping the bootstrap coefficient bounded: the natural formulation
 does not, and diverges as a result.
 
 %===========================================================================
+\clearpage
 \appendix
+\section{Proofs}
+\label{app:proofs}
+%==========================================================================
+
+The statements are in Section~\ref{sec:theory}; only the arguments are
+collected here.
+
+\begin{proof}[Proposition~\ref{prop:star}]
+Write the discarded mass as
+$G_d^{\mathrm{full}}-A^{\star}[d]=\Delta_d+\Xi_d$, where $\Delta_d$ collects the
+cross-component rewards and
+$\Xi_d=\sum \rho_d(t_j)r_j$ runs over the rewards $j$ with $t_j\ge u_d$,
+$c(j)=c(d)$ and $\own(j)\notin\desc^{*}(d)$: those in $d$'s own component that
+the closure nonetheless omits. It suffices to show each vanishes in the
+gradient.
+
+Fix $d$ and condition on $\Fscr_d$. Since $a_d$ is drawn given $\Fscr_d$ and
+both quantities are realized afterwards,
+\[
+  \Ex\bigl[\nabla\log\pi_\theta(a_d\mid s_d)\,X_d \mid \Fscr_d\bigr]
+  = \Ex_{a_d}\bigl[\nabla\log\pi_\theta(a_d\mid s_d)\,
+    \Ex[X_d\mid\Fscr_d,a_d]\bigr]
+\]
+for $X_d\in\{\Delta_d,\Xi_d\}$. For $X_d=\Delta_d$ the inner expectation is
+free of $a_d$ by Assumption~\ref{as:exo}. For $X_d=\Xi_d$, a reward $j$ in that
+sum has $\own(j)\notin\desc^{*}(d)$; since $\own(j)$ is the \emph{latest}
+decision on $j$'s lineage and the successor relation is time-forward, no
+decision of $\Ascr(j)$ can lie in $\desc^{*}(d)$ at all, so no descendant of
+$a_d$ is on $j$'s lineage. By the same A-E PN argument that justifies
+Assumption~\ref{as:exo}---$r_j$ is a deterministic function of the tokens
+consumed at its firing, whose histories are recorded---$r_j$ is then causally
+uninfluenced by $a_d$, and its conditional mean is likewise free of $a_d$.
+
+In both cases the inner expectation is some $\bar X_d$ not depending on $a_d$,
+so the outer expectation is
+$\bar X_d\,\Ex_{a_d}[\nabla\log\pi_\theta(a_d\mid s_d)\mid\Fscr_d]
+ =\bar X_d\,\nabla_\theta\sum_a \pi_\theta(a\mid s_d)=\bar X_d\,\nabla_\theta 1=0$
+by the score-function identity. The baseline term contributes zero by the same
+identity. Summing over $d$ and taking total expectation gives the claim.
+\end{proof}
+
+\begin{proof}[Proposition~\ref{prop:k}]
+Conditionally on $s_d$ the baseline is a constant, so it does not affect either
+variance. By conditional independence
+$\Var(\sum_k R_k\mid s_d)=\sum_k \Var(R_k\mid s_d)=\sum_k\sigma_k^2$, which is
+the first equality; the second is immediate. Under
+$\sigma_k^2\approx\sigma^2$ the ratio is $K\sigma^2/\sigma^2=K$, and standard
+deviation scales as the square root.
+\end{proof}
+
+\begin{proof}[Lemma~\ref{lem:visit}]
+Row-stochasticity is \eqref{eq:sucsum}. By Assumption~\ref{as:time} the DAG is
+acyclic, so a walk visits any node at most once; consequently the events
+$\{\text{the walk's initial segment is }\pi\}$, indexed by the distinct paths
+$\pi: d\rightsquigarrow e$, are pairwise disjoint and their union is exactly the
+event that the walk visits $e$. Each has probability
+$\prod_{(x\to y)\in\pi}\hat w(x\!\to\!y)$, and summing gives $c_d(e)$. A
+probability lies in $[0,1]$.
+\end{proof}
+
+\begin{proof}[Proposition~\ref{prop:bias}]
+(i) is Lemma~\ref{lem:visit}. For (ii), telescoping of $\rho$ gives
+$A^\star[d]-A[d]=\sum_{e}\bigl(1-c_d(e)\bigr)\rho_{de}\,\mathrm{owned}[e]$;
+take absolute values, use $\rho\le1$ and $0\le 1-c_d(e)\le\delta_d$, and note
+the middle expression is exactly $\bar\delta_d$ times the total owned mass.
+For (iii), the two estimators differ only through the summand, so
+$\nabla J_{\cflow}-\nabla J_{\star}
+ =\Ex\bigl[\sum_d (A[d]-A^\star[d])\nabla\log\pi_d\bigr]$; apply the triangle
+inequality, then (ii) and Assumption~\ref{as:score}, and reindex the double sum
+by owner, each $e$ being counted once per ancestor. For (iv), if out-degree is
+at most one throughout $\desc^{*}(d)$ the walk is deterministic and visits every
+descendant, so $c_d(e)=1$; conversely $c_d(e)=1$ for all $e$ says every maximal
+walk from $d$ meets every descendant, which is total order by reachability.
+\end{proof}
+
+\begin{proof}[Proposition~\ref{prop:rel}]
+(i) By Assumption~\ref{as:pos} the denominator of $\bar\delta_d$ is
+$A^{\star}[d]$ and its numerator is $A^{\star}[d]-A[d]$, so
+$\bar\delta_d = 1 - A[d]/A^{\star}[d]$, which rearranges to (i). (ii) is
+immediate from linearity of $\nabla J$ in the per-decision coefficient. For
+(iii), write $u=A^{\star}$ and $A_d=m_d u_d$. Then
+$\langle A,u\rangle=\sum_d m_d u_d^2=\Ex_p[m]\lVert u\rVert^2$ and
+$\lVert A\rVert^2=\sum_d m_d^2u_d^2=\Ex_p[m^2]\lVert u\rVert^2$, so
+\[
+  \cos\angle=\frac{\Ex_p[m]}{\sqrt{\Ex_p[m^2]}}
+           =\frac{\Ex_p[m]}{\sqrt{\Ex_p[m]^2+\Var_p(m)}}
+           =\bigl(1+\mathrm{CV}^2\bigr)^{-1/2},
+\]
+and $(1+x)^{-1/2}\ge 1-x/2$ gives the bound.
+\end{proof}
+
 \section{Estimator definitions and additional remarks}
 \label{app:defs}
 %===========================================================================
@@ -1887,6 +1785,111 @@ Proposition~\ref{prop:rel} in Section~\ref{sec:relative}. They are short enough
 that separating them from the statements would cost more than it saves.
 
 %===========================================================================
+\section{The cosine law, and its measurement}
+\label{app:cosine}
+%==========================================================================
+
+Proposition~\ref{prop:rel}(i)--(ii) is stated in
+Section~\ref{sec:relative}. Parts (iii)--(iv) complete it.
+
+\begin{proposition}[Cosine law, continuing Proposition~\ref{prop:rel}]
+\label{prop:cos}
+\begin{enumerate}
+\item[(iii)] \textbf{Cosine law.} Let $p_d \propto A^{\star}[d]^2$ and let
+$\mathrm{CV}$ be the coefficient of variation of $m$ under $p$. Then
+\[
+  \cos\angle\bigl(A, A^{\star}\bigr)
+  \;=\; \bigl(1+\mathrm{CV}^2\bigr)^{-1/2}
+  \qquad\text{exactly,}
+  \qquad\text{hence}\qquad
+  1-\cos\angle \;\le\; \tfrac{1}{2}\mathrm{CV}^2 .
+\]
+\item[(iv)] $\mathrm{CV}$ is dimensionless, independent of $n$, and computable
+from a handful of untrained rollouts.
+\end{enumerate}
+\end{proposition}
+
+\paragraph{Measured.} Table~\ref{tab:cosine} reports both sides. The identity
+(i) holds to machine precision (maximum absolute deviation $1.8\times10^{-15}$
+over all episodes), and the cosine law (iii) is exact to
+$6.7\times10^{-16}$---these are verifications of algebra, not fits. The
+practical content is the last column: the direction of the credit vector is
+preserved to within $11\%$ in the worst case, and \emph{exactly} on multi-site,
+where out-degree is one so $\bar\delta\equiv0$.
+
+\begin{table}[tbp]
+\centering
+\caption{Proposition~\ref{prop:rel} measured on untrained rollouts
+($\lambda=1$, $V\equiv0$, $\beta=0$). $\mathrm{CV}$ is the $A^{\star2}$-weighted
+coefficient of variation of the multiplier.}
+\label{tab:cosine}
+\begin{tabular}{lccccc}
+\toprule
+environment & $\bar\delta$ (mean) & $\mathrm{CV}$ & $\cos\angle$ measured
+            & $(1+\mathrm{CV}^2)^{-1/2}$ & $1-\cos\angle$ \\
+\midrule
+multi-site   & $0.000$ & $0.000$ & $1.00000$ & $1.00000$ & $0.000$ \\
+$N{=}4$      & $0.095$ & $0.195$ & $0.97823$ & $0.97823$ & $0.022$ \\
+$N{=}8$      & $0.109$ & $0.500$ & $0.89106$ & $0.89106$ & $0.109$ \\
+single comp. & $0.374$ & $0.423$ & $0.91987$ & $0.91987$ & $0.080$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{remark}[What the cosine law does and does not cover]
+Proposition~\ref{prop:rel}(iii) is a statement about the vectors of
+per-decision \emph{coefficients} $A$ and $A^{\star}$, not directly about the
+gradients $\sum_d A_d\nabla\log\pi_d$. The two coincide when the score vectors
+$\{\nabla\log\pi_d\}$ are orthonormal; in general they differ by a factor
+governed by the conditioning of the score Gram matrix, which we do not bound.
+We therefore read Table~\ref{tab:cosine} as characterizing the estimator, not
+as a guarantee on the realized gradient. As with
+Proposition~\ref{prop:bias}, everything is stated \emph{relative} to
+$A^{\star}$, whose unbiasedness rests on Assumption~\ref{as:exo}.
+\end{remark}
+\begin{remark}[The gap between the model and the estimator]
+Two idealizations separate Proposition~\ref{prop:k} from what \cflow{} actually
+computes. Conditional independence across components is stronger than
+Assumption~\ref{as:exo}, which constrains only conditional means: (A1) is what
+buys unbiasedness, independence is what buys the variance factor, and an
+environment can satisfy the first while only approximately satisfying the
+second. And \cflow{} scopes to $\desc^{*}(d)$, which is contained in $c(d)$ and
+usually strictly smaller, so it discards more than the model does---which is why
+the empirical gain is not a clean function of $K$ (Section~\ref{sec:scaling}).
+The proposition should be read as identifying the mechanism and its governing
+quantity, not as predicting an effect size.
+\end{remark}
+
+\begin{table}[tbp]
+\centering
+\caption{Paired comparisons against \cflow{} ($20$ seeds, paired $t$-test).
+The pattern is uniform: large and significant against non-causal or
+unbounded-coefficient baselines, null against every bounded causal variant.}
+\label{tab:paired}
+\small
+\begin{tabular}{llrrl}
+\toprule
+environment & comparator & difference & $p$ & \\
+\midrule
+multi-site & PPO        & $+0.512$ & $<0.0001$ & $\ast\!\ast\!\ast$ \\
+multi-site & \mcq       & $+0.642$ & $<0.0001$ & $\ast\!\ast\!\ast$ \\
+multi-site & \ccf       & $+0.162$ & $0.0500$  & borderline \\
+$N{=}8$    & PPO        & $+0.194$ & $0.0019$  & $\ast\!\ast$ \\
+$N{=}8$    & \cflowraw  & $+0.258$ & $0.0999$  & \\
+$N{=}8$    & \ccf       & $+0.021$ & $0.24$    & null \\
+$N{=}4$    & \mcq       & $+0.418$ & $<0.0001$ & $\ast\!\ast\!\ast$ \\
+$N{=}4$    & \cfgae     & $+0.370$ & $0.0005$  & $\ast\!\ast\!\ast$ \\
+$N{=}4$    & PPO        & $+0.264$ & $0.0009$  & $\ast\!\ast\!\ast$ \\
+$N{=}4$    & \cgae, \ccf, \ccap, \cflowraw & $-0.015$ to $+0.009$ & $\ge 0.43$ & null \\
+$N{=}2$    & \mcq       & $+0.230$ & $0.0100$  & $\ast$ \\
+$N{=}2$    & all other arms & $+0.080$ to $+0.204$ & $\ge 0.052$ & null \\
+single comp. & \cflowraw & $\mathbf{+0.705}$ & $\mathbf{0.0006}$ & $\ast\!\ast\!\ast$ \\
+single comp. & \cdag     & $\mathbf{+0.395}$ & $\mathbf{<0.0001}$ & $\ast\!\ast\!\ast$ \\
+single comp. & PPO, \cgae, \ccap, \cfgae, \ccf, \mcq & $-0.040$ to $+0.056$ & $\ge 0.27$ & null \\
+\bottomrule
+\end{tabular}
+\end{table}
+
 \section{Environments}
 \label{app:envs}
 %===========================================================================
@@ -1942,7 +1945,7 @@ environment of the boundary-condition investigation of
 Section~\ref{sec:boundary}, where it is called the \emph{bottleneck
 environment} because the shared pool is the binding constraint.
 
-\begin{table}[t]
+\begin{table}[tbp]
 \centering
 \caption{Environment parameters. Horizon is in simulated time units; the
 heuristic is the anchor for the normalization
@@ -1997,7 +2000,7 @@ inherit the baseline's settings unchanged. This is deliberate---any tuning
 advantage would confound the credit comparison---but it also means the reported
 numbers are not the best attainable for any arm.
 
-\begin{table}[t]
+\begin{table}[tbp]
 \centering
 \caption{Hyperparameters, identical for every arm and every environment.}
 \label{tab:hyper}
@@ -2205,6 +2208,18 @@ Section~\ref{sec:boundary}, where only active-intervention mechanisms ever moved
 the single-component floor.
 
 %===========================================================================
+\begin{figure}[tbp]
+\centering
+\includegraphics[width=\linewidth]{../figures/fig5_phi_dial.pdf}
+\caption{The reward-shaping coefficient dial on the bottleneck environment:
+efficacy (left) degrades once past $\phi_{\mathrm{coef}}=0.2$, and the
+fraction of seeds reaching $95\%$ of the heuristic anchor (right) degrades
+monotonically---safety (Section~\ref{sec:related}, \citealp{ng1999shaping})
+and efficacy are independent properties, and this mechanism has the first
+without the second at practical training budgets.}
+\label{fig:phidial}
+\end{figure}
+
 \section{Boundary-condition investigation: technical detail}
 \label{app:boundary}
 %===========================================================================
