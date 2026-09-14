@@ -1,0 +1,91 @@
+% The lineage / causal-order mechanism figure. \input from main_v3.tex.
+% Panel (a) is the paper's central idea in one picture: GAE bootstraps from the
+% TEMPORAL successor, which in an interleaved system belongs to a different case;
+% causal-order estimation bootstraps from the CAUSAL successor instead.
+% Panel (b) is the normalization that Proposition 1 turns on.
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  dec/.style={draw, rounded corners=2pt, minimum height=6.5mm,
+              minimum width=10mm, align=center, font=\small, line width=0.6pt},
+  caseA/.style={dec, fill=teal!8,   draw=teal!70!black},
+  caseB/.style={dec, fill=orange!12, draw=orange!80!black},
+  plain/.style={dec, fill=black!4,  draw=black!55},
+  causalA/.style={-{Latex[length=1.7mm]}, line width=1.0pt, teal!70!black},
+  causalB/.style={-{Latex[length=1.7mm]}, line width=1.0pt, orange!80!black},
+  temporal/.style={-{Latex[length=1.5mm]}, densely dashed, line width=0.7pt,
+                   black!45},
+  tag/.style={font=\scriptsize, inner sep=1.5pt},
+  note/.style={font=\scriptsize, black!60},
+]
+
+% ================= panel (a): temporal vs causal successor =================
+\node[caseA] (d1) at (0,0)   {$d_1$};
+\node[caseB] (d2) at (1.9,0) {$d_2$};
+\node[caseA] (d3) at (3.8,0) {$d_3$};
+\node[caseB] (d4) at (5.7,0) {$d_4$};
+
+% causal recursion: solid arcs ABOVE, one per case
+\draw[causalA] (d1) to[bend left=42]
+  node[midway, above, tag, teal!45!black] {token of $A$} (d3);
+\draw[causalB] (d2) to[bend left=42]
+  node[midway, above, tag, orange!60!black] {token of $B$} (d4);
+
+% temporal recursion: dashed arcs BELOW, consecutive, with visible heads
+\foreach \a/\b in {d1/d2, d2/d3, d3/d4}
+  \draw[temporal] (\a) to[bend right=40] (\b);
+
+% rewards, emitted at the consuming decision
+\draw[causalA] ($(d3.east)+(0.03,0)$) -- ++(0.40,0)
+  node[right, tag, teal!45!black, inner sep=1pt] {$r_A$};
+\draw[causalB] ($(d4.east)+(0.03,0)$) -- ++(0.40,0)
+  node[right, tag, orange!60!black, inner sep=1pt] {$r_B$};
+
+% legends for the two arrow families
+\node[note, anchor=west, align=left] at (-0.75,1.42)
+  {\textbf{causal} successor (solid): same case};
+\node[note, anchor=west, align=left] at (-0.75,-1.30)
+  {\textbf{temporal} successor (dashed): GAE's $t\!+\!1$, a \emph{different} case};
+
+\draw[-{Latex[length=1.6mm]}, black!35] (-0.75,-1.72) -- (6.35,-1.72);
+\node[note, anchor=west] at (6.4,-1.72) {time};
+
+\node[font=\small] at (2.85,-2.25) {(a) the substitution};
+
+% ================= panel (b): the successor normalization =================
+\begin{scope}[xshift=8.9cm]
+  \node[plain] (dd) at (0,0)      {$d$};
+  \node[plain] (s1) at (2.2,0.68) {$s_1$};
+  \node[plain] (s2) at (2.2,-0.68){$s_2$};
+
+  \draw[-{Latex[length=1.7mm]}, line width=1.0pt] (dd) --
+    node[midway, above, sloped, tag] {$w_1$} (s1);
+  \draw[-{Latex[length=1.7mm]}, line width=1.0pt] (dd) --
+    node[midway, below, sloped, tag] {$w_2$} (s2);
+
+  % formulas: \textstyle keeps the sum limits inline, so nothing collides
+  \node[anchor=north, align=center, font=\scriptsize, inner sep=2pt]
+    at (1.1,-1.18)
+    {$R(d)=w_1+w_2$ \quad is \emph{unconstrained}\\[2pt]
+     $\hat w_i = w_i/R(d)$ \quad gives $\textstyle\sum_i \hat w_i = 1$};
+
+  \node[font=\small] at (1.1,-2.25) {(b) the normalization};
+\end{scope}
+
+\end{tikzpicture}
+\caption{The mechanism. \textbf{(a)} Four decisions in wall-clock order, drawn
+from two interleaved cases $A$ and $B$. Generalized advantage estimation
+bootstraps along the dashed \emph{temporal} chain, so the TD error it charges to
+$d_1$ is the one produced at $d_2$---a decision about a different case, whose
+reward $d_1$ did not influence. The token $d_1$ produced is instead consumed at
+$d_3$, where the reward $r_A$ is emitted. Causal-order estimation follows the
+solid provenance edges, so $d_1$ is credited with $r_A$ and never with $r_B$.
+Reward ownership is a partition---each reward is assigned to the latest decision
+on its own lineage---so no reward is counted twice. \textbf{(b)} Where a
+decision's tokens feed several later decisions, the edge weights must be
+normalized \emph{over successors}. Token conservation constrains the sum over
+each node's predecessors, which leaves the row sum $R(d)$ free; because $R(d)$
+multiplies the bootstrapped value (Proposition~\ref{prop:s}), leaving it
+unbounded makes the recursion diverge in training.}
+\label{fig:lineage}
+\end{figure}

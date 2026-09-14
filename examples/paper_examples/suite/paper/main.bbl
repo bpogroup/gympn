@@ -1,0 +1,188 @@
+\begin{thebibliography}{23}
+\expandafter\ifx\csname natexlab\endcsname\relax\def\natexlab#1{#1}\fi
+\providecommand{\url}[1]{\texttt{#1}}
+\providecommand{\href}[2]{#2}
+\providecommand{\path}[1]{#1}
+\providecommand{\DOIprefix}{doi:}
+\providecommand{\ArXivprefix}{arXiv:}
+\providecommand{\URLprefix}{URL: }
+\providecommand{\Pubmedprefix}{pmid:}
+\providecommand{\doi}[1]{\href{http://dx.doi.org/#1}{\path{#1}}}
+\providecommand{\Pubmed}[1]{\href{pmid:#1}{\path{#1}}}
+\providecommand{\bibinfo}[2]{#2}
+\ifx\xfnm\relax \def\xfnm[#1]{\unskip,\space#1}\fi
+%Type = Inproceedings
+\bibitem[{Arjona-Medina et~al.(2019)Arjona-Medina, Gillhofer, Widrich,
+  Unterthiner, Brandstetter and Hochreiter}]{rudder2019}
+\bibinfo{author}{Arjona-Medina, J.A.}, \bibinfo{author}{Gillhofer, M.},
+  \bibinfo{author}{Widrich, M.}, \bibinfo{author}{Unterthiner, T.},
+  \bibinfo{author}{Brandstetter, J.}, \bibinfo{author}{Hochreiter, S.},
+  \bibinfo{year}{2019}.
+\newblock \bibinfo{title}{Rudder: Return decomposition for delayed rewards},
+  in: \bibinfo{booktitle}{NeurIPS}.
+%Type = Article
+\bibitem[{Benders(1962)}]{benders1962partitioning}
+\bibinfo{author}{Benders, J.F.}, \bibinfo{year}{1962}.
+\newblock \bibinfo{title}{Partitioning procedures for solving mixed-variables
+  programming problems}.
+\newblock \bibinfo{journal}{Numerische Mathematik} \bibinfo{volume}{4},
+  \bibinfo{pages}{238--252}.
+%Type = Article
+\bibitem[{Bengio et~al.(2021)Bengio, Lodi and Prouvost}]{bengio2021tour}
+\bibinfo{author}{Bengio, Y.}, \bibinfo{author}{Lodi, A.},
+  \bibinfo{author}{Prouvost, A.}, \bibinfo{year}{2021}.
+\newblock \bibinfo{title}{Machine learning for combinatorial optimization: A
+  methodological tour d'horizon}.
+\newblock \bibinfo{journal}{European Journal of Operational Research}
+  \bibinfo{volume}{290}, \bibinfo{pages}{405--421}.
+%Type = Inproceedings
+\bibitem[{Dai et~al.(2017)Dai, Khalil, Zhang, Dilkina and
+  Song}]{khalil2017learning}
+\bibinfo{author}{Dai, H.}, \bibinfo{author}{Khalil, E.B.},
+  \bibinfo{author}{Zhang, Y.}, \bibinfo{author}{Dilkina, B.},
+  \bibinfo{author}{Song, L.}, \bibinfo{year}{2017}.
+\newblock \bibinfo{title}{Learning combinatorial optimization algorithms over
+  graphs}, in: \bibinfo{booktitle}{NeurIPS}.
+%Type = Article
+\bibitem[{Dantzig and Wolfe(1960)}]{dantzig1960decomposition}
+\bibinfo{author}{Dantzig, G.B.}, \bibinfo{author}{Wolfe, P.},
+  \bibinfo{year}{1960}.
+\newblock \bibinfo{title}{Decomposition principle for linear programs}.
+\newblock \bibinfo{journal}{Operations Research} \bibinfo{volume}{8},
+  \bibinfo{pages}{101--111}.
+%Type = Inproceedings
+\bibitem[{Foerster et~al.(2018)Foerster, Farquhar, Afouras, Nardelli and
+  Whiteson}]{coma2018}
+\bibinfo{author}{Foerster, J.}, \bibinfo{author}{Farquhar, G.},
+  \bibinfo{author}{Afouras, T.}, \bibinfo{author}{Nardelli, N.},
+  \bibinfo{author}{Whiteson, S.}, \bibinfo{year}{2018}.
+\newblock \bibinfo{title}{Counterfactual multi-agent policy gradients}, in:
+  \bibinfo{booktitle}{AAAI}.
+%Type = Inproceedings
+\bibitem[{Harutyunyan et~al.(2019)Harutyunyan, Dabney, Mesnard
+  et~al.}]{hca2019}
+\bibinfo{author}{Harutyunyan, A.}, \bibinfo{author}{Dabney, W.},
+  \bibinfo{author}{Mesnard, T.}, et~al., \bibinfo{year}{2019}.
+\newblock \bibinfo{title}{Hindsight credit assignment}, in:
+  \bibinfo{booktitle}{NeurIPS}.
+%Type = Inproceedings
+\bibitem[{Hu et~al.(2020)Hu, Dong, Wang and Sun}]{hu2020hgt}
+\bibinfo{author}{Hu, Z.}, \bibinfo{author}{Dong, Y.}, \bibinfo{author}{Wang,
+  K.}, \bibinfo{author}{Sun, Y.}, \bibinfo{year}{2020}.
+\newblock \bibinfo{title}{Heterogeneous graph transformer}, in:
+  \bibinfo{booktitle}{WWW}, pp. \bibinfo{pages}{2704--2710}.
+%Type = Article
+\bibitem[{Jordan and Graves(1995)}]{pooling_flexibility}
+\bibinfo{author}{Jordan, W.C.}, \bibinfo{author}{Graves, S.C.},
+  \bibinfo{year}{1995}.
+\newblock \bibinfo{title}{Principles on the benefits of manufacturing process
+  flexibility}.
+\newblock \bibinfo{journal}{Management Science} \bibinfo{volume}{41},
+  \bibinfo{pages}{577--594}.
+%Type = Article
+\bibitem[{Lo~Bianco et~al.(2023)Lo~Bianco, Dijkman, Nuijten and van
+  Jaarsveld}]{aepn2023}
+\bibinfo{author}{Lo~Bianco, R.}, \bibinfo{author}{Dijkman, R.},
+  \bibinfo{author}{Nuijten, W.}, \bibinfo{author}{van Jaarsveld, W.},
+  \bibinfo{year}{2023}.
+\newblock \bibinfo{title}{Action-evolution petri nets: a framework for modeling
+  and solving dynamic task assignment problems}.
+\newblock \bibinfo{journal}{arXiv preprint arXiv:2306.02910} .
+%Type = Article
+\bibitem[{Lo~Bianco et~al.(2025a)}]{gympn2025}
+\bibinfo{author}{Lo~Bianco, R.}, et~al., \bibinfo{year}{2025}a.
+\newblock \bibinfo{title}{Gympn: A library for decision-making in process
+  management systems}.
+\newblock \bibinfo{journal}{arXiv preprint arXiv:2506.20404} .
+%Type = Article
+\bibitem[{Lo~Bianco et~al.(2025b)}]{aepn_repr2025}
+\bibinfo{author}{Lo~Bianco, R.}, et~al., \bibinfo{year}{2025}b.
+\newblock \bibinfo{title}{A universal approach to feature representation in
+  dynamic task assignment problems}.
+\newblock \bibinfo{journal}{arXiv preprint arXiv:2507.03579} .
+%Type = Article
+\bibitem[{Mazyavkina et~al.(2021)Mazyavkina, Sviridov, Ivanov and
+  Burnaev}]{mazyavkina2021survey}
+\bibinfo{author}{Mazyavkina, N.}, \bibinfo{author}{Sviridov, S.},
+  \bibinfo{author}{Ivanov, S.}, \bibinfo{author}{Burnaev, E.},
+  \bibinfo{year}{2021}.
+\newblock \bibinfo{title}{Reinforcement learning for combinatorial
+  optimization: A survey}.
+\newblock \bibinfo{journal}{Computers \& Operations Research}
+  \bibinfo{volume}{134}, \bibinfo{pages}{105400}.
+%Type = Inproceedings
+\bibitem[{Mesnard et~al.(2021)Mesnard, Weber, Viola et~al.}]{ccadeep2021}
+\bibinfo{author}{Mesnard, T.}, \bibinfo{author}{Weber, T.},
+  \bibinfo{author}{Viola, F.}, et~al., \bibinfo{year}{2021}.
+\newblock \bibinfo{title}{Counterfactual credit assignment in model-free
+  reinforcement learning}, in: \bibinfo{booktitle}{ICML}.
+%Type = Inproceedings
+\bibitem[{Nazari et~al.(2018)Nazari, Oroojlooy, Snyder and
+  Tak{\'a}č}]{nazari2018vrp}
+\bibinfo{author}{Nazari, M.}, \bibinfo{author}{Oroojlooy, A.},
+  \bibinfo{author}{Snyder, L.}, \bibinfo{author}{Tak{\'a}č, M.},
+  \bibinfo{year}{2018}.
+\newblock \bibinfo{title}{Reinforcement learning for solving the vehicle
+  routing problem}, in: \bibinfo{booktitle}{NeurIPS}.
+%Type = Inproceedings
+\bibitem[{Ng et~al.(1999)Ng, Harada and Russell}]{ng1999shaping}
+\bibinfo{author}{Ng, A.Y.}, \bibinfo{author}{Harada, D.},
+  \bibinfo{author}{Russell, S.}, \bibinfo{year}{1999}.
+\newblock \bibinfo{title}{Policy invariance under reward transformations:
+  Theory and application to reward shaping}, in: \bibinfo{booktitle}{ICML}, pp.
+  \bibinfo{pages}{278--287}.
+%Type = Inproceedings
+\bibitem[{Rashid et~al.(2018)Rashid, Samvelyan, de~Witt, Farquhar, Foerster and
+  Whiteson}]{qmix2018}
+\bibinfo{author}{Rashid, T.}, \bibinfo{author}{Samvelyan, M.},
+  \bibinfo{author}{de~Witt, C.S.}, \bibinfo{author}{Farquhar, G.},
+  \bibinfo{author}{Foerster, J.}, \bibinfo{author}{Whiteson, S.},
+  \bibinfo{year}{2018}.
+\newblock \bibinfo{title}{Qmix: Monotonic value function factorisation for deep
+  multi-agent reinforcement learning}, in: \bibinfo{booktitle}{ICML}.
+%Type = Article
+\bibitem[{Schulman et~al.(2016)Schulman, Moritz, Levine, Jordan and
+  Abbeel}]{gae2016}
+\bibinfo{author}{Schulman, J.}, \bibinfo{author}{Moritz, P.},
+  \bibinfo{author}{Levine, S.}, \bibinfo{author}{Jordan, M.},
+  \bibinfo{author}{Abbeel, P.}, \bibinfo{year}{2016}.
+\newblock \bibinfo{title}{High-dimensional continuous control using generalized
+  advantage estimation} .
+%Type = Article
+\bibitem[{Schulman et~al.(2017)Schulman, Wolski, Dhariwal, Radford and
+  Klimov}]{ppo2017}
+\bibinfo{author}{Schulman, J.}, \bibinfo{author}{Wolski, F.},
+  \bibinfo{author}{Dhariwal, P.}, \bibinfo{author}{Radford, A.},
+  \bibinfo{author}{Klimov, O.}, \bibinfo{year}{2017}.
+\newblock \bibinfo{title}{Proximal policy optimization algorithms}.
+\newblock \bibinfo{journal}{arXiv preprint arXiv:1707.06347} .
+%Type = Inproceedings
+\bibitem[{Sunehag et~al.(2018)}]{vdn2018}
+\bibinfo{author}{Sunehag, P.}, et~al., \bibinfo{year}{2018}.
+\newblock \bibinfo{title}{Value-decomposition networks for cooperative
+  multi-agent learning}, in: \bibinfo{booktitle}{AAMAS}.
+%Type = Article
+\bibitem[{Sutton et~al.(2000)Sutton, McAllester, Singh and
+  Mansour}]{sutton2000pg}
+\bibinfo{author}{Sutton, R.S.}, \bibinfo{author}{McAllester, D.},
+  \bibinfo{author}{Singh, S.}, \bibinfo{author}{Mansour, Y.},
+  \bibinfo{year}{2000}.
+\newblock \bibinfo{title}{Policy gradient methods for reinforcement learning
+  with function approximation} .
+%Type = Article
+\bibitem[{Wolpert and Tumer(2001)}]{difference2002}
+\bibinfo{author}{Wolpert, D.H.}, \bibinfo{author}{Tumer, K.},
+  \bibinfo{year}{2001}.
+\newblock \bibinfo{title}{Optimal payoff functions for members of collectives}.
+\newblock \bibinfo{journal}{Advances in Complex Systems} \bibinfo{volume}{4},
+  \bibinfo{pages}{265--279}.
+%Type = Inproceedings
+\bibitem[{Zhang et~al.(2020)Zhang, Song, Cao, Zhang, Tan and
+  Xu}]{zhang2020jobshop}
+\bibinfo{author}{Zhang, C.}, \bibinfo{author}{Song, W.}, \bibinfo{author}{Cao,
+  Z.}, \bibinfo{author}{Zhang, J.}, \bibinfo{author}{Tan, P.S.},
+  \bibinfo{author}{Xu, C.}, \bibinfo{year}{2020}.
+\newblock \bibinfo{title}{Learning to dispatch for job shop scheduling via deep
+  reinforcement learning}, in: \bibinfo{booktitle}{NeurIPS}.
+
+\end{thebibliography}
