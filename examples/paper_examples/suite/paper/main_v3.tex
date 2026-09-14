@@ -949,6 +949,31 @@ $39.78$, $21.23$ and $18.40$ for return-to-go on our three main environments
 \cflow---a four- to ninefold \emph{reduction}, tracking $1/S$ closely. The
 residual is the variance-reduction mechanism viewed from the other side. Absolute
 scale is in any case removed by per-batch advantage standardization.
+Figure~\ref{fig:credit} shows both the reduction and its structure: the same
+episode credited by each estimator, where the causal one is not merely sparser
+but \emph{block} sparse, the blocks being the components it discovered.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{../figures/fig_credit_matrix.pdf}
+\caption{The credit matrix $c_d(j)$---the weight decision $d$ places on the
+reward owned by decision $j$---on single episodes. \textbf{(a)} and \textbf{(b)}
+are the \emph{same} episode of the four-copy environment under the same row and
+column ordering, so they differ only by estimator: return-to-go credits a
+decision for essentially everything that happens after it, while causal-order
+credit is confined to a decision's own descendants. \textbf{(b)} is block
+structured, and the blocks are the causal components the estimator
+found---three reward-bearing components on this episode---without being given a
+partition, an entity list, or any token-value semantics. \textbf{(c)} is the
+negative control: on the single-component environment there is one block, so
+scoping removes nothing that is statistically independent and the method is
+expected to be null, which is what Section~\ref{sec:exp} measures. Decisions are
+ordered by component and then by clock; the permutation is identical within the
+four-copy pair. The matrices are computed by the estimator's own recursion on
+the library's causal structure and verified against it: $C\,\mathrm{owned}$
+reproduces the shipped implementation's output to $10^{-15}$.}
+\label{fig:credit}
+\end{figure}
 
 \subsection{A bias bound for \cflow}
 \label{sec:bias}
@@ -1546,21 +1571,26 @@ estimators from the failing one, and boundedness is.
 The gain over PPO is present at every $K>1$ and absent at $K=1$, but it is
 \emph{not} monotone in $K$:
 
-\begin{center}
-\begin{tabular}{lccc}
-\toprule
-environment & $K$ & gain over PPO & $p$ \\
-\midrule
-single component & $1.0$ & $-0.030$ & $0.46$ \\
-$N{=}2$ copies   & $2.0$ & $+0.080$ & $0.34$ \\
-$N{=}4$ copies   & $3.3$ & $\mathbf{+0.264}$ & $\mathbf{0.0009}$ \\
-$N{=}8$ copies   & $6.3$ & $+0.194$ & $\mathbf{0.0019}$ \\
-multi-site       & $8.0$ & $\mathbf{+0.512}$ & $\mathbf{<0.0001}$ \\
-\bottomrule
-\end{tabular}
-\end{center}
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.92\textwidth]{../figures/fig_k_axis.pdf}
+\caption{Paired gain over PPO against $K$, with the headroom PPO itself leaves
+drawn as a ceiling. The gain is absent at $K{=}1$ and present at every $K>1$,
+but it is not monotone---and the reason is visible rather than asserted. At two
+and eight copies PPO already reaches $0.80$, so at most $0.20$ of normalized
+return remains for any method to claim, and the measured gain sits essentially
+\emph{on} that bound ($+0.194$ against a ceiling of $0.196$ at eight copies).
+The gain grows at multi-site because the ceiling does: PPO scores $0.161$ there
+and leaves $0.839$ unclaimed. $K$ therefore predicts \emph{whether}
+component-scoped credit can help; the magnitude additionally requires headroom.
+We plot the five configurations as points and deliberately fit no trend through
+them.}
+\label{fig:kaxis}
+\end{figure}
 
-We report the non-monotonicity rather than smoothing it, because its cause is
+
+Figure~\ref{fig:kaxis} plots the five configurations against the ceiling. We
+report the non-monotonicity rather than smoothing it, because its cause is
 visible and is not about $K$. At $N{=}8$ every causal arm saturates near the
 heuristic ($0.977$--$0.999$, standard deviations $0.03$--$0.06$) and PPO itself
 reaches $0.805$, leaving under $0.20$ of headroom for any method to claim; the
