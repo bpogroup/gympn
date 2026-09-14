@@ -1411,7 +1411,9 @@ class Agent:
                     # credit vector); data.py's finish does the filtered GAE.
                     buffer.finish(credits=info['eligibility_credits'],
                                   mode="replace")
-                elif getattr(self, 'causal_scheme', None) in ('cgae', 'cgae_flow'):
+                elif getattr(self, 'causal_scheme', None) in ('cgae', 'cgae_flow',
+                                                              'cgae_cflow', 'cgae_cflow2',
+                                                              'cgae_cap', 'cgae_dag'):
                     # CGAE needs the critic's V(s) as well as the trace: the
                     # recursion bootstraps through it at causal depth, so the
                     # values collected during this episode are handed in here
@@ -1420,6 +1422,17 @@ class Agent:
                     q = ct.redistribute_rewards(
                         scheme=self.causal_scheme, beta=self.buffer.causal_beta,
                         values=ep_values, lam=getattr(self, 'lam', 0.95))
+                    if self.causal_scheme == 'cgae_cflow2':
+                        # cgae_cflow2 makes postpone transparent, so it emits 0
+                        # there; data.py's finish() substitutes the SMDP-TD
+                        # advantage instead. The credits arrive as a plain
+                        # vector (not the trace), so hand it the flags the same
+                        # way ls_hca does.
+                        buffer._cgae_postpone = [
+                            bool(isinstance(getattr(act.get('transition'), '_id', None), str)
+                                 and getattr(act.get('transition'), '_id').startswith('postpone_'))
+                            for act in ct.transition_history.get_action_transitions()
+                        ]
                     buffer.finish(credits=q, mode="replace")
                 else:
                     buffer.finish(credits=info['eligibility_credits'], mode="replace")

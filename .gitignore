@@ -27,3 +27,19 @@ examples/paper_examples/suite/**/train/
 *.out
 *.toc
 *.synctex.gz
+
+# Diagnostic record dumps (regenerable by re-running the _diag_* script that
+# wrote them; several MB of pickled rollouts each, from the demoted ls_hca work)
+*.pkl
+
+# Stray training-output dirs that the `**/train/` rule above misses because
+# they are named <probe>_train rather than train/
+examples/paper_examples/suite/*_train/
+
+# LaTeX build artifacts beyond aux/out (latexmk bookkeeping). .bbl is NOT
+# ignored: Elsevier wants it with the submission.
+*.fls
+*.fdb_latexmk
+*.blg
+*.spl
+*.tex.bak

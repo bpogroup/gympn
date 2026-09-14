@@ -74,6 +74,44 @@ def _prepare_x_dict_for_conv(x_dict, input_size, graph=None, params_iter=None,
 
 
 # ---------------------------------------------------------------------
+# Shared global-context pooling (action/postpone nodes -> one vector per
+# graph). HeteroCritic has always used this to build its state value;
+# HeteroActor's optional `global_context` (see below) reuses the SAME
+# pooling so a node's context is exactly what the critic already sees,
+# not a second independently-tuned summary.
+# ---------------------------------------------------------------------
+def _batch_index_for(graph, ntype, n, device):
+    """Per-node graph-membership index for ntype (which graph, in a batch,
+    each node belongs to), defaulting to all-zeros (single graph) when the
+    type carries no PyG `.batch` attribute (the common case outside a
+    batched training update)."""
+    try:
+        if ntype in graph.x_dict and hasattr(graph[ntype], 'batch'):
+            return graph[ntype].batch
+    except Exception:
+        pass
+    return torch.zeros(n, dtype=torch.int64, device=device)
+
+
+def _pool_action_postpone(x_enc, graph):
+    """global_max_pool over [a_transition, postpone] (whichever are present
+    and non-empty), keyed by per-graph batch index: one context vector per
+    graph in the batch, or None if there is nothing to pool (no live
+    bindings at all -- shouldn't happen in practice, guarded defensively)."""
+    parts, idx_parts = [], []
+    for ntype in ('a_transition', 'postpone'):
+        x = x_enc.get(ntype)
+        if x is not None and x.numel() > 0:
+            parts.append(x)
+            idx_parts.append(_batch_index_for(graph, ntype, x.size(0), x.device))
+    if not parts:
+        return None
+    concat_nodes = torch.cat(parts, dim=0)
+    pool_index = torch.cat(idx_parts, dim=0)
+    return global_max_pool(concat_nodes, pool_index)
+
+
+# ---------------------------------------------------------------------
 # HGT stack: L layers, dropout, per-node-type residual projections.
 # ---------------------------------------------------------------------
 class HGTStack(nn.Module):
@@ -215,6 +253,23 @@ class HeteroActor(ActorCritic):
         num_heads: int = 2,
         dropout: float = 0.1,
         residual: bool = True,
+        # Opt-in, default off (byte-identical logits when False -- same
+        # safe-floor convention as every other knob in this project).
+        # HeteroActor.forward decodes each action's logit from ONLY that
+        # node's own final HGTConv embedding -- unlike HeteroCritic, which
+        # has always max-pooled over all action/postpone nodes for its
+        # value estimate. Combined with get_graph_observation's edges being
+        # directed strictly along token flow (add_reverse_edges=False
+        # everywhere in real use), an action's logit can depend on state
+        # ONLY if a forward, token-flow-direction path reaches it within
+        # `num_layers` hops -- provably zero otherwise (verified directly:
+        # on a fully disjoint two-chain net, perturbing one chain's
+        # downstream marking left the other chain's raw logit EXACTLY
+        # bit-for-bit unchanged). When True, concatenates the SAME pooled
+        # context HeteroCritic already builds (_pool_action_postpone) onto
+        # each action/postpone node before decoding, giving the actor
+        # access to state outside its own directed-reachable neighborhood.
+        global_context: bool = False,
         # Backwards compatibility: accept legacy kwargs (e.g. output_size)
         output_size: Optional[int] = None,
         **kwargs,
@@ -225,6 +280,7 @@ class HeteroActor(ActorCritic):
         self.metadata = metadata
         self.num_heads = num_heads
         self.dropout = dropout
+        self.global_context = bool(global_context)
 
         self.encoder = HGTStack(
             in_channels=self.input_size,
@@ -237,7 +293,10 @@ class HeteroActor(ActorCritic):
             activation="relu",
         )
 
-        # Shared decoder for both 'a_transition' and 'postpone'
+        # Shared decoder for both 'a_transition' and 'postpone'. LazyLinear
+        # absorbs the wider [own_embedding ; pooled_context] input when
+        # global_context=True with zero manual dimension bookkeeping (same
+        # pattern already relied on for use_structural_features).
         self.decoder = nn.Sequential(
             nn.LazyLinear(self.hidden_size),
             nn.ReLU(),
@@ -290,10 +349,21 @@ class HeteroActor(ActorCritic):
         logits_a = torch.empty((0, 1), device=device, dtype=torch.float32)
         logits_p = None
 
-        if 'a_transition' in x_enc and x_enc['a_transition'] is not None and x_enc['a_transition'].numel() > 0:
-            logits_a = self.decoder(x_enc['a_transition'])
-        if 'postpone' in x_enc and x_enc['postpone'] is not None and x_enc['postpone'].numel() > 0:
-            logits_p = self.decoder(x_enc['postpone'])
+        context = _pool_action_postpone(x_enc, graph) if getattr(self, 'global_context', False) else None
+
+        def _decode(ntype):
+            x = x_enc.get(ntype)
+            if x is None or x.numel() == 0:
+                return None
+            if context is not None:
+                idx = _batch_index_for(graph, ntype, x.size(0), x.device)
+                x = torch.cat((x, context[idx]), dim=-1)
+            return self.decoder(x)
+
+        la = _decode('a_transition')
+        if la is not None:
+            logits_a = la
+        logits_p = _decode('postpone')
 
         logits = torch.cat((logits_a, logits_p), dim=0) if logits_p is not None else logits_a
 
@@ -467,31 +537,9 @@ class HeteroCritic(ActorCritic):
             if v is not None:
                 x_enc[k] = torch.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # Pool across targets
-        if 'postpone' in x_enc and x_enc['postpone'] is not None and x_enc['postpone'].numel() > 0:
-            concat_nodes = torch.cat((x_enc['a_transition'], x_enc['postpone']), dim=0)
-            try:
-                idx_parts = []
-                if hasattr(graph['a_transition'], 'batch'):
-                    idx_parts.append(graph['a_transition'].batch)
-                else:
-                    idx_parts.append(torch.zeros(x_enc['a_transition'].size(0), dtype=torch.int64, device=concat_nodes.device))
-                if hasattr(graph['postpone'], 'batch'):
-                    idx_parts.append(graph['postpone'].batch)
-                else:
-                    idx_parts.append(torch.zeros(x_enc['postpone'].size(0), dtype=torch.int64, device=concat_nodes.device))
-                pool_index = torch.cat(idx_parts, dim=0)
-            except Exception:
-                pool_index = torch.zeros(concat_nodes.size(0), dtype=torch.int64, device=concat_nodes.device)
-            pooled = global_max_pool(concat_nodes, pool_index)
-        else:
-            try:
-                index = graph['a_transition'].batch
-            except Exception:
-                index = torch.zeros(x_enc['a_transition'].size(0), dtype=torch.int64, device=x_enc['a_transition'].device)
-            pooled = global_max_pool(x_enc['a_transition'], index)
-
-        return pooled
+        # Pool across targets (shared with HeteroActor's optional
+        # global_context -- see _pool_action_postpone).
+        return _pool_action_postpone(x_enc, graph)
 
     def forward(self, data):
         return self.value_head(self._encode_pool(data))

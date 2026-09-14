@@ -79,3 +79,35 @@ def seed_everything(seed: int, *, deterministic: bool = True,
             # older torch, or an op without a deterministic path: best effort
             pass
     return seed
+
+def seed_network_init(seed: int) -> int:
+    """Pin the torch RNG to a dedicated sub-stream for NETWORK INITIALISATION.
+
+    ``seed_everything`` fixes the stream, but not the *position in it* at which
+    the policy's weights are drawn: how many draws are consumed beforehand
+    depends on the run (env construction, token id generation) and on the
+    method (``lva`` builds a critic aux head, ``lrq3``/``lqi`` build extra Q
+    heads, ``rudder`` an LSTM). Two arms of the same experiment therefore start
+    from *different initial policies*, which silently turns a matched-seed
+    comparison into an unmatched one.
+
+    Measured before this existed (s1, seed 0, epoch-1 return under the initial
+    policy): ``ppo_clip``/``mc_q``/``lrq2``/``lrq`` all gave 8.40, while
+    ``lcv``/``rudder`` gave 7.95 and ``lva`` 8.55 -- and the *same* method
+    (``lrq2``, seed 0, same config) gave 8.40 in one run and 7.95 in another.
+
+    Calling this immediately before the networks' parameters are first
+    materialised makes the initial policy a deterministic function of ``seed``
+    alone. The sub-stream is offset from the environment stream so the two
+    cannot alias.
+
+    Note that gympn's networks use lazy modules, so parameters are created at
+    the first FORWARD pass, not at construction -- this must therefore be
+    called at the start of training, not right after the networks are built.
+    """
+    import torch as _torch
+    derived = (int(seed) * 2654435761 + 0x9E3779B9) % (2 ** 31 - 1)
+    _torch.manual_seed(derived)
+    if _torch.cuda.is_available():
+        _torch.cuda.manual_seed_all(derived)
+    return derived

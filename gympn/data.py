@@ -572,6 +572,90 @@ class TrajectoryBuffer:
         # step rewards happened to cancel to zero.
         is_causal = self.causal_rl
 
+        # --- cf: measured counterfactual (COMA) advantage -----------------
+        # The advantage is MEASURED at rollout time by CRN forks with
+        # lineage-restricted returns (buffer._cf_adv, baseline in _cf_base),
+        # aligned 1:1 with steps. Use it directly; fall back to SMDP-GAE at any
+        # step where a fork was not run (value None). The measured baseline is
+        # the critic's value target. Bypasses the trace-credit path entirely.
+        # --- cfgae: component-filtered GAE --------------------------------
+        # ccf's partition, consumed through PPO's OWN GAE recursion instead of
+        # as a Monte-Carlo Q-sample. For each causal component we run the
+        # ordinary SMDP-GAE over the reward stream MASKED to that component,
+        # and each decision reads the advantage from its own component's pass.
+        #
+        # Why this and not ccf. Every Monte-Carlo scheme here (lrq, ccf, s_ccf,
+        # mc_q) is lambda=1 with no bootstrap, so its K=1 limit is mc_q -- which
+        # only TIES ppo (-0.18, p=.55 on s1) because it is a different
+        # estimator that happens to score the same. Here, at K=1 there is one
+        # component, the mask is identically one, and the recursion is
+        # term-for-term the standard SMDP-GAE: the K=1 limit is PPO EXACTLY.
+        # At K>1 the dropped cross-component rewards are independent of the
+        # action given the state, so E[grad-log-pi * Q_other] = 0 and the
+        # estimator stays unbiased while shedding their variance -- the same
+        # Propositions that cover ccf, applied to the filtered recursion.
+        if self.causal_scheme == 'cfgae' and hasattr(credits, 'transition_history'):
+            discounts = self._smdp_discounts()
+            T = rewards_ep.shape[0]
+            comp, step_rw = credits.component_step_rewards()
+            # Mask the BUFFER's own reward stream -- do not rebuild it. Step
+            # rewards are populated in causal mode too (verified: identical to
+            # the ppo arm, sum 9.00 over 8 nonzero steps on s1), so rebuilding
+            # them from the trace only introduced attribution error. The trace
+            # supplies component LABELS; the rewards stay exactly PPO's, which
+            # is what makes the K=1 reduction exact by construction.
+            if len(comp) >= T and T > 0:
+                comp = list(comp[:T])
+                lab = [0] * T                      # component label per step
+                for t in range(min(T, len(step_rw))):
+                    if step_rw[t]:
+                        lab[t] = max(step_rw[t], key=lambda x: abs(x[0]))[1]
+                    elif t < len(comp):
+                        lab[t] = comp[t]
+                n_comp = max(max(comp, default=0), max(lab, default=0)) + 1
+                adv_ep = torch.zeros(T, dtype=torch.float32)
+                for c in range(n_comp):
+                    keep = torch.tensor([1.0 if lab[t] == c else 0.0
+                                         for t in range(T)], dtype=torch.float32)
+                    a_c = smdp_gae(rewards_ep * keep, values_ep, discounts,
+                                   self.lam, dones=dones_ep)
+                    for t in range(T):
+                        if comp[t] == c:
+                            adv_ep[t] = a_c[t]
+                returns_ep = adv_ep + values_ep     # PPO's own value target
+            else:                                   # misaligned trace -> plain PPO
+                adv_ep = smdp_gae(rewards_ep, values_ep, discounts, self.lam,
+                                  dones=dones_ep)
+                returns_ep = adv_ep + values_ep
+            if self.returns_.numel() == 0:
+                self.returns_ = returns_ep.clone(); self.advantages_ = adv_ep.clone()
+            else:
+                self.returns_ = torch.cat([self.returns_, returns_ep], dim=0)
+                self.advantages_ = torch.cat([self.advantages_, adv_ep], dim=0)
+            self.start = self.end
+            return
+
+        if self.causal_scheme == 'cf':
+            discounts = self._smdp_discounts()
+            gae = smdp_gae(rewards_ep, values_ep, discounts, self.lam, dones=dones_ep)
+            adv_ep = gae.clone()
+            returns_ep = gae + values_ep
+            cf_adv = getattr(self, '_cf_adv', None)
+            cf_base = getattr(self, '_cf_base', None)
+            if cf_adv is not None and len(cf_adv) == adv_ep.numel():
+                for t, a in enumerate(cf_adv):
+                    if a is not None:
+                        adv_ep[t] = float(a)
+                        if cf_base is not None and cf_base[t] is not None:
+                            returns_ep[t] = float(cf_base[t])
+            if self.returns_.numel() == 0:
+                self.returns_ = returns_ep.clone(); self.advantages_ = adv_ep.clone()
+            else:
+                self.returns_ = torch.cat([self.returns_, returns_ep], dim=0)
+                self.advantages_ = torch.cat([self.advantages_, adv_ep], dim=0)
+            self.start = self.end
+            return
+
         # --- Handle credits if provided ---
         qoff_targets_ep = None
         if credits is not None:
@@ -637,6 +721,27 @@ class TrajectoryBuffer:
                     tid = getattr(act.get('transition'), '_id', None)
                     flags.append(bool(isinstance(tid, str) and tid.startswith('postpone_')))
                 postpone_mask = torch.tensor(flags, dtype=torch.bool)
+            elif self.causal_scheme == 'ls_hca':
+                # ls_hca's credits arrive as a plain combined list (PURE +
+                # hindsight-corrected CONTESTED, built in Agent.run_episode —
+                # see its ls_hca block), not the trace object, so `credits`
+                # has no .transition_history here. Postpone gets 0 lineage
+                # credit there too (same consistent-support convention as
+                # lrq2/ccf/s_ccf); Agent.run_episode stashes the flags it
+                # already has from the trace onto the buffer.
+                flags = getattr(self, '_ls_hca_postpone', None)
+                if flags is not None:
+                    postpone_mask = torch.tensor(flags, dtype=torch.bool)
+            elif self.causal_scheme == 'cgae_cflow2':
+                # cgae_cflow2 drops postpone from the causal DAG entirely (as
+                # producer, consumer and reward owner), so it emits 0 credit
+                # there by construction; the SMDP-TD substitution below is what
+                # actually prices it. Same stashed-flags route as ls_hca, since
+                # the cgae schemes hand finish() a plain credit vector rather
+                # than the trace object.
+                flags = getattr(self, '_cgae_postpone', None)
+                if flags is not None:
+                    postpone_mask = torch.tensor(flags, dtype=torch.bool)
 
             # LRQ: the intra-lineage discount uses TRACE decision times u_t,
             # while the SMDP sojourns below use BUFFER times (pn.clock read

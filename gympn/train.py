@@ -115,7 +115,7 @@ def make_parser():
     alg.add_argument('--causal_scheme',
                      type=str,
                      default='lrq',
-                     choices=['lrq', 'lrq2', 'lrq2c', 'ccf', 's_ccf', 'lrq3', 'lqi', 'lcv', 'lva', 'mc_q', 'cf', 'ls_hca', 'alin', 'cgae', 'cgae_flow', 'cfgae'],
+                     choices=['lrq', 'lrq2', 'lrq2c', 'ccf', 's_ccf', 'lrq3', 'lqi', 'lcv', 'lva', 'mc_q', 'cf', 'ls_hca', 'alin', 'cgae', 'cgae_flow', 'cgae_cflow', 'cgae_cflow2', 'cgae_cap', 'cgae_dag', 'cfgae'],
                      help='causal credit scheme. "ls_hca" (Lineage-Structured Hindsight Credit '
                           'Assignment, FORKFREE_LINEAGE_RETHINK.md Idea 1) is the fork-free dual of '
                           '"cf": PURE/EXOGENOUS reward-types are read off the static provenance DAG '

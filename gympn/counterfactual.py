@@ -39,6 +39,34 @@ _TRACE_ERR = (
     "run_suite.train_cell's env_causal.")
 
 
+def _continue_discounted(agent, env, obs, t0, beta, lookahead, disc,
+                         done=False, value_tail=True):
+    """The greedy while-loop body shared by ``_discounted_suffix`` (fires a
+    forced first action, then calls this) and the coupling-truncated paired
+    rollout (``_paired_coupled_suffixes``, which needs to CONTINUE an
+    already-started rollout from a shared reconvergence point, with no
+    "first action" of its own to fire). ``disc`` is the running beta-
+    discounted total so far; returns the updated total after finishing the
+    rollout or hitting the lookahead cutoff (value-tail-bootstrapped, see
+    ``_discounted_suffix``'s docstring for why ``value_tail`` is a switch).
+    """
+    while not done:
+        if float(env.pn.clock) - t0 > lookahead:
+            v = 0.0
+            if value_tail:
+                try:
+                    with torch.no_grad():
+                        v = float(agent.value_model(obs).reshape(-1)[0])
+                except Exception:
+                    v = 0.0
+            disc += math.exp(-beta * (float(env.pn.clock) - t0)) * v
+            break
+        a = agent.act(obs, deterministic=True)
+        obs, r, done, _, _ = env.step(a)
+        disc += r * math.exp(-beta * max(0.0, float(env.pn.clock) - t0))
+    return disc
+
+
 def _discounted_suffix(agent, env, obs, first_idx, t0, beta, lookahead,
                        value_tail=True):
     """Fire ``first_idx`` then continue greedily; return the beta-discounted
@@ -53,21 +81,8 @@ def _discounted_suffix(agent, env, obs, first_idx, t0, beta, lookahead,
     """
     obs2, r, done, _, _ = env.step(first_idx)
     disc = r * math.exp(-beta * max(0.0, float(env.pn.clock) - t0))
-    while not done:
-        if float(env.pn.clock) - t0 > lookahead:
-            v = 0.0
-            if value_tail:
-                try:
-                    with torch.no_grad():
-                        v = float(agent.value_model(obs2).reshape(-1)[0])
-                except Exception:
-                    v = 0.0
-            disc += math.exp(-beta * (float(env.pn.clock) - t0)) * v
-            break
-        a = agent.act(obs2, deterministic=True)
-        obs2, r, done, _, _ = env.step(a)
-        disc += r * math.exp(-beta * max(0.0, float(env.pn.clock) - t0))
-    return disc
+    return _continue_discounted(agent, env, obs2, t0, beta, lookahead, disc,
+                                done=done, value_tail=value_tail)
 
 
 def _lineage_return(ct, roots, root_rec_id, t0, beta):
@@ -326,6 +341,159 @@ def _lineage_suffix(agent, env, obs, first_idx, t0, beta, lookahead):
     return _lineage_return(ct, roots, root_rec_id, t0, beta)
 
 
+def _paired_coupled_suffixes(agent, env, snap_pn, snap_i, action, alt, t0, beta,
+                             lookahead, value_tail=True):
+    """CRN-paired rollout of BOTH branches (``action`` vs ``alt``) in
+    LOCKSTEP, one step each per round, truncating BOTH the instant they
+    reconverge to the same PN state.
+
+    "Same state" = ``gympn.mcts_planner.state_fingerprint``: canonical
+    (symmetry-collapsed) marking + clock — the identical machinery the MCTS
+    planner already uses for its coupling-truncation transposition table
+    (``AEPN_NATIVE_LEARNING.md`` §3.2), reused here rather than reinvented.
+
+    Once two branches share a state, E[future reward | state] is identical
+    for both — it is the same state — so instead of continuing to simulate
+    BOTH branches separately for the rest of the lookahead window, the
+    remaining rollout is simulated ONCE from the shared state and the SAME
+    resulting value is added to both branches' running totals. This is EXACT
+    for the quantity cfpk actually consumes downstream
+    (``dif = returns[action] - returns[alt]``): adding an IDENTICAL value to
+    both sides of a difference cancels exactly, regardless of what that
+    single shared value happens to realize — unlike a naive "same marking
+    implies same future" argument, this does NOT require the two branches'
+    RNG-stream positions to still be aligned at the reconvergence point (a
+    much stronger, not-generally-guaranteed condition); it only needs "same
+    state -> same value distribution", which is definitional for any MDP.
+
+    Cost win: once coupled, `env.step` calls drop from 2/round to 0 for the
+    remainder of the lookahead window (a single shared continuation instead
+    of two independent ones) — this is exactly the gap `CFPK_EXPLAINED.md`
+    names as unaddressed (measured ~3.6x cost vs. the intended <2x).
+
+    NOT SUPPORTED for ``lineage=True`` (see ``maybe_fork``'s gating):
+    ``_lineage_suffix`` computes its return via a post-hoc analysis of ONE
+    complete causal trace per branch; sharing a tail between two separate
+    per-branch traces has no well-defined lineage meaning. Coupling
+    truncation is scoped to the plain (non-lineage) suffix that `cfpk`
+    itself actually uses in production.
+
+    Returns ``(total_a, total_b, coupled_at_round: int | None)`` — the last
+    element is the lockstep round at which reconvergence triggered (0 =
+    immediately after both branches' first, distinguishing action), or
+    ``None`` if the branches never coupled before both were finished.
+    """
+    from gympn.mcts_planner import state_fingerprint
+
+    def _fire_first(idx):
+        env.pn = copy.deepcopy(snap_pn)
+        env.i = snap_i
+        obs2, r, done, _, _ = env.step(idx)
+        disc = r * math.exp(-beta * max(0.0, float(env.pn.clock) - t0))
+        return {'pn': env.pn, 'i': env.i, 'obs': obs2, 'disc': disc,
+                'active': not done}
+
+    def _finish_with_tail(branch):
+        v = 0.0
+        if value_tail:
+            try:
+                with torch.no_grad():
+                    v = float(agent.value_model(branch['obs']).reshape(-1)[0])
+            except Exception:
+                v = 0.0
+        branch['disc'] += math.exp(-beta * (float(branch['pn'].clock) - t0)) * v
+        branch['active'] = False
+
+    def _step(branch):
+        env.pn, env.i = branch['pn'], branch['i']
+        a = agent.act(branch['obs'], deterministic=True)
+        branch['obs'], r, done, _, _ = env.step(a)
+        branch['disc'] += r * math.exp(-beta * max(0.0, float(env.pn.clock) - t0))
+        branch['pn'], branch['i'] = env.pn, env.i
+        branch['active'] = not done
+
+    A = _fire_first(action)
+    B = _fire_first(alt)
+    round_idx = 0
+    while True:
+        if A['active'] and float(A['pn'].clock) - t0 > lookahead:
+            _finish_with_tail(A)
+        if B['active'] and float(B['pn'].clock) - t0 > lookahead:
+            _finish_with_tail(B)
+        if not (A['active'] and B['active']):
+            break   # at most one side still going -> nothing left to couple
+
+        if state_fingerprint(A['pn']) == state_fingerprint(B['pn']):
+            env.pn, env.i = A['pn'], A['i']
+            shared = _continue_discounted(agent, env, A['obs'], t0, beta, lookahead,
+                                          disc=0.0, done=False, value_tail=value_tail)
+            return A['disc'] + shared, B['disc'] + shared, round_idx
+
+        _step(A)
+        _step(B)
+        round_idx += 1
+
+    return A['disc'], B['disc'], None
+
+
+def fork_cf_advantage(agent, env, state, action, logpis, cfg, rng=_random):
+    """Measured counterfactual (COMA) advantage for the taken action.
+
+    For every action at this decision state, fork the simulator under COMMON
+    RANDOM NUMBERS (same exogenous draws across actions within a rep) and roll
+    out a greedy continuation, tallying ONLY the reward causally descended from
+    the forked action (the lineage-restricted return G_lin(a) -- the scoped
+    DAG-replay). Then
+
+        baseline b = sum_a pi(a) * G_lin(a)        (action-independent -> unbiased)
+        advantage  = G_lin(taken) - b
+
+    b is the counterfactual value estimate; because the exogenous draws are
+    shared across the actions (CRN), the exogenous component cancels in the
+    difference, so the advantage is unbiased AND exogenous-noise-free. Returns
+    ``(advantage, baseline)`` (baseline doubles as the critic value target), or
+    ``(None, None)`` when no fork was possible (single action / ordering drift).
+    """
+    acts = state.get('actions_dict') if isinstance(state, dict) else None
+    pn = getattr(env, 'pn', None)
+    if acts is None or pn is None or len(acts) < 2:
+        return None, None
+    n_actions = len(acts)
+    reps = int(cfg.get('reps', 1))
+    beta = cfg['beta']
+    lookahead = cfg['lookahead']
+    pi = torch.softmax(logpis.detach().reshape(-1)[:n_actions], dim=0).cpu().numpy()
+    s = float(pi.sum())
+    pi = pi / s if s > 1e-12 else np.full(n_actions, 1.0 / n_actions)
+
+    base_seed = rng.randrange(2 ** 31 - 1)
+    snap_pn = copy.deepcopy(env.pn)
+    snap_i = env.i
+    snap_rnd = rng.getstate()
+    t0 = float(getattr(env.pn, 'clock', 0.0))
+    try:
+        G = np.zeros(n_actions)
+        for a_idx in range(n_actions):
+            vals = []
+            for rep in range(reps):
+                env.pn = copy.deepcopy(snap_pn)
+                env.i = snap_i
+                obs_b = env.pn.get_graph_observation()
+                if len(obs_b['actions_dict']) != n_actions:
+                    return None, None                     # ordering drift -> abort
+                rng.seed(base_seed + rep)                 # CRN: shared across actions
+                vals.append(_lineage_suffix(agent, env, obs_b, a_idx, t0, beta,
+                                            lookahead))
+            G[a_idx] = float(np.mean(vals))
+        baseline = float((pi * G).sum())
+        return float(G[action] - baseline), baseline
+    finally:
+        env.pn = copy.deepcopy(snap_pn)
+        env.i = snap_i
+        rng.setstate(snap_rnd)
+        env.pn.get_graph_observation()
+
+
 def maybe_fork(agent, env, state, action, logpis, cfg, rng=_random):
     """Possibly fork the current decision state into (taken, alternative).
 
@@ -414,25 +582,50 @@ def maybe_fork(agent, env, state, action, logpis, cfg, rng=_random):
             rng.setstate(snap_rnd)
             env.pn.get_graph_observation()
 
+    # Coupling truncation (see _paired_coupled_suffixes): lockstep the two
+    # branches instead of running action-then-alt sequentially, truncating
+    # both the instant their PN states reconverge. Scoped to the non-lineage
+    # suffix (lineage's per-branch trace accounting has no defined meaning
+    # for a shared tail — see _paired_coupled_suffixes' docstring). Off by
+    # default (cfg.get('coupling_truncate', False)) — the sequential loop
+    # below is byte-identical to before when it's False.
+    coupling_truncate = bool(cfg.get('coupling_truncate', False)) and not lineage
+    coupled_rounds = []
+
     try:
         returns = {action: [], alt: []}
-        for idx in (action, alt):
+        if coupling_truncate:
             for rep in range(reps):
                 env.pn = copy.deepcopy(snap_pn)
                 env.i = snap_i
-                obs_b = env.pn.get_graph_observation()
-                if len(obs_b['actions_dict']) != n_actions:
-                    # restored ordering unexpectedly diverged — abort fork
+                obs_chk = env.pn.get_graph_observation()
+                if len(obs_chk['actions_dict']) != n_actions:
                     return True, None, None
                 rng.seed(base_seed + rep)  # identical across idx => exact CRN
-                if lineage:
-                    val = _lineage_suffix(agent, env, obs_b, idx, t0, beta,
-                                          cfg['lookahead'])
-                else:
-                    val = _discounted_suffix(agent, env, obs_b, idx, t0, beta,
-                                             cfg['lookahead'],
-                                             value_tail=value_tail)
-                returns[idx].append(val)
+                val_a, val_b, coupled_at = _paired_coupled_suffixes(
+                    agent, env, snap_pn, snap_i, action, alt, t0, beta,
+                    cfg['lookahead'], value_tail=value_tail)
+                returns[action].append(val_a)
+                returns[alt].append(val_b)
+                coupled_rounds.append(coupled_at)
+        else:
+            for idx in (action, alt):
+                for rep in range(reps):
+                    env.pn = copy.deepcopy(snap_pn)
+                    env.i = snap_i
+                    obs_b = env.pn.get_graph_observation()
+                    if len(obs_b['actions_dict']) != n_actions:
+                        # restored ordering unexpectedly diverged — abort fork
+                        return True, None, None
+                    rng.seed(base_seed + rep)  # identical across idx => exact CRN
+                    if lineage:
+                        val = _lineage_suffix(agent, env, obs_b, idx, t0, beta,
+                                              cfg['lookahead'])
+                    else:
+                        val = _discounted_suffix(agent, env, obs_b, idx, t0, beta,
+                                                 cfg['lookahead'],
+                                                 value_tail=value_tail)
+                    returns[idx].append(val)
 
         dif = np.asarray(returns[action]) - np.asarray(returns[alt])
         gap = float(dif.mean())
@@ -445,7 +638,14 @@ def maybe_fork(agent, env, state, action, logpis, cfg, rng=_random):
             w, l = (action, alt) if gap > 0 else (alt, action)
             pref = {'state': state, 'winner': w, 'loser': l,
                     'gap': gap, 'se': se}
-        return True, pref, {'gap': gap, 'se': se, 'passed': bool(passed)}
+        diag = {'gap': gap, 'se': se, 'passed': bool(passed)}
+        if coupling_truncate:
+            # Mechanism telemetry: how often (and how early) the two branches
+            # actually reconverged this fork -- the number to check that
+            # coupling truncation is doing something, not just a config no-op.
+            diag['coupled_reps'] = sum(1 for c in coupled_rounds if c is not None)
+            diag['coupled_rounds'] = coupled_rounds
+        return True, pref, diag
     finally:
         env.pn = copy.deepcopy(snap_pn)
         env.i = snap_i

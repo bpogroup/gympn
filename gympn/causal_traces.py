@@ -273,11 +273,23 @@ class CausalTraces:
         # successor combination is a FLOW-WEIGHTED SUM rather than a mean, which
         # drops the single-successor assumption (A2) from the theorem. On a
         # chain the two coincide exactly, so they differ only under fan-out.
-        if scheme in ("cgae", "cgae_flow"):
+        # CGAE-DAG: set-semantics rewards over the descendant closure (making
+        # Proposition 3(i) exact) plus a convex k-step critic mixture. Not a
+        # weighted path sum, so it needs its own routine.
+        if scheme in ("cgae_dag", "cgae_cdag"):
+            return self._redistribute_cgae_dag(
+                action_transitions, token_to_action, record_to_action,
+                redistribution, beta, get_parents, values, lam,
+                conditioned=(scheme == "cgae_cdag"))
+
+        if scheme in ("cgae", "cgae_flow", "cgae_cflow", "cgae_cflow2", "cgae_cap"):
             return self._redistribute_cgae(
                 action_transitions, token_to_action, record_to_action,
                 redistribution, beta, get_parents, values, lam,
-                flow=(scheme == "cgae_flow"))
+                flow=(scheme in ("cgae_flow", "cgae_cflow", "cgae_cflow2", "cgae_cap")),
+                convex=(scheme in ("cgae_cflow", "cgae_cflow2")),
+                skip_postpone=(scheme == "cgae_cflow2"),
+                cap=(scheme == "cgae_cap"))
 
         # ALIN: anti-lineage. mc_q MINUS the rewards a decision provably could
         # not have influenced. Subtraction, not restriction -- see
@@ -661,7 +673,8 @@ class CausalTraces:
 
     def _redistribute_cgae(self, action_transitions, token_to_action,
                            record_to_action, redistribution, beta, get_parents,
-                           values=None, lam=1.0, flow=False):
+                           values=None, lam=1.0, flow=False, convex=False,
+                           skip_postpone=False, cap=False):
         """CGAE — GAE propagated along the CAUSAL successor, not the time one.
 
         Standard GAE accumulates TD errors along the trajectory index:
@@ -722,6 +735,80 @@ class CausalTraces:
         fan-out is 1.07 on ncopies N=4 (93% of decisions have <=1 successor).
         It matters on s1 (1.34, 34.5% multi-successor), where cgae measures as
         null against PPO anyway.
+
+        ``convex`` (scheme ``cgae_cflow``) FIXES A REAL DEFECT IN ``flow``, and
+        is the variant to prefer. (*) normalizes over PREDECESSORS of s, but
+        the recursion sums over SUCCESSORS of d, so the coefficient actually
+        multiplying the bootstrap is the ROW sum
+
+            R(d) = sum over s in succ(d) of w(d->s)
+
+        which (*) does not constrain at all. A TD backup needs that coefficient
+        to be a convex combination: A[d] carries `-V[d]` and picks up
+        `R(d)*rho*V[s]`, so unless R(d)*rho ~ 1 the value terms do not cancel
+        and the advantage retains a spurious term proportional to V whose size
+        is set by the local DAG topology rather than by the action. The policy
+        gradient then chases fan structure.
+
+        Measured (_diag_cgae_fix_proto.py, 5 random rollouts):
+
+            env           R(d) mean   SD     range          |R-1|>0.25
+            ncopies N=4     1.000    0.430   0.083..3.667      24.1%
+            s1              1.008    0.542   0.143..3.429      55.3%
+
+        Mean 1 in aggregate, but off by >25% on a QUARTER of ncopies decisions
+        and on OVER HALF of s1's -- which is why `cgae_flow` merely lags on
+        ncopies (0.888 vs cgae's 0.936) yet collapses on s1 (0.166 normalized
+        vs 0.650 for cgae, 0.668 for PPO, on 5 CRN seeds).
+
+        ``convex`` divides by R(d), i.e. normalizes the weights over successors
+        and keeps the inflow shares only as RELATIVE weights:
+
+            what(d->s) = w(d->s) / R(d),      sum over s of what = 1
+            A[d] = owned[d] - V[d]
+                   + sum_s what(d->s) * rho(dt_s) * ( V[s] + lam * A[s] )
+
+        Properties: on a chain what == 1, so chain-exactness with both existing
+        variants is preserved; under EQUAL inflow shares what == 1/k, which is
+        the `mean` variant (exactly so when the successor discounts coincide,
+        and up to per-successor vs averaged discount folding otherwise). The
+        mean is therefore no longer an underived shrinkage but the equal-share
+        SPECIAL CASE, and the bootstrap enters the global critic exactly once,
+        which is what assumption (A2') was covering for.
+
+        The cost is honest and worth stating: the convex form estimates the
+        credit of a MEAN causal continuation, not the SUM over k continuations,
+        so a decision enabling several independent earners is under-credited.
+        That is a bounded shrinkage; the unnormalized sum's error is an
+        unbounded, depth-compounding, topology-driven distortion of the
+        baseline. It does NOT repair the separate fan-IN dilution both variants
+        share (P3 identity ratio on s1: flow 0.577, mean 0.602, convex 0.626
+        against an ideal 1.000) -- see _diag_prop3_identity.py.
+
+        ``skip_postpone`` (scheme ``cgae_cflow2``) makes postpone TRANSPARENT in
+        the causal DAG. The motivation is measured, not aesthetic: forking every
+        action at a decision state under common random numbers
+        (_diag_R_action_invariance.py) shows R(d) is NOT action-measurable --
+        identical across actions at only 18.8% of ncopies fork points and 6.2%
+        of s1's -- and that POSTPONE IS THE DOMINANT VIOLATOR, carrying 2.25x
+        (ncopies) to 2.66x (s1) the row sum of production actions. The cause is
+        mechanical: a token-flow postpone re-emits the WHOLE marking, so it
+        shadows the real producers and its causal successor set is the entire
+        downstream. Excluding it, ncopies becomes nearly invariant (68.8% of
+        fork points identical, median spread 0.000); s1 improves to 12.5% but
+        stays action-dependent, so this NARROWS the violation rather than
+        removing it.
+
+        Postpone is therefore dropped from all three roles in which it is an
+        artifact -- as a producer (``out_tok``), as a consumer/successor, and as
+        a candidate reward OWNER -- while the provenance walk still passes
+        THROUGH its re-emitted tokens to the true upstream producers, exactly as
+        in ``lrq2``. Its emitted credit is consequently 0; ``data.py``'s
+        ``finish()`` replaces that with the SMDP-TD advantage
+        ``A(postpone) = e^{-beta*tau} V(s') - V(s)`` via the postpone mask, the
+        same consistent-support treatment lrq2/ccf/s_ccf receive. That is the
+        point: postpone gates nothing, it only spends time, so its opportunity
+        cost belongs in the clock term rather than in a lineage credit.
         """
         import math
 
@@ -737,9 +824,19 @@ class CausalTraces:
                 return 1.0
             return math.exp(-beta * max(0.0, float(dt)))
 
+        # Postpone sentinels, when they are to be made transparent. Dropping
+        # them from out_tok is what lets `_producers` walk THROUGH a postpone's
+        # re-emitted tokens to the real upstream producer instead of stopping
+        # at the postpone that merely re-emitted them.
+        pp_idx = set()
+        if skip_postpone:
+            pp_idx = {rec[0] for rec in record_to_action.values() if rec[1]}
+
         # ---- causal successors: d -> decisions consuming d's descendants --- #
         out_tok = {}
         for idx, act in enumerate(action_transitions):
+            if idx in pp_idx:                  # transparent as a PRODUCER
+                continue
             for t in act.get('output_tokens', ()) or ():
                 out_tok[t] = idx
         succ = [set() for _ in range(n)]
@@ -763,6 +860,8 @@ class CausalTraces:
             return found
 
         for idx, act in enumerate(action_transitions):
+            if idx in pp_idx:                  # transparent as a CONSUMER too
+                continue
             inputs = list(act.get('input_tokens', ()) or ())
             if not flow:
                 seen, stack = set(), list(inputs)
@@ -827,7 +926,12 @@ class CausalTraces:
                 continue
             se = record_to_action.get(id(tr))
             decs = lineage(tr.get('input_tokens', []), se[0] if se else None)
-            decs = [d for d in decs if 0 <= d < n]
+            # Postpone is excluded as an OWNER as well: it is always the latest
+            # decision on any lineage it sits in (token-flow re-emits the whole
+            # marking every time it fires), so leaving it in would hand it the
+            # reward under the argmax-time rule -- the v1 postpone-aggregation
+            # collapse. Ownership falls to the latest PRODUCTION decision.
+            decs = [d for d in decs if 0 <= d < n and d not in pp_idx]
             if not decs:
                 continue
             owner = max(decs, key=lambda d: (times[d] is not None, times[d] or 0.0))
@@ -847,8 +951,45 @@ class CausalTraces:
             if flow:
                 # Proposition 3(iii): weighted SUM, discount folded per
                 # successor rather than averaged across them.
-                v_next = sum(w_edge.get((d, s), 0.0) * disc(dts[s]) * V[s] for s in nxt)
-                a_next = sum(w_edge.get((d, s), 0.0) * disc(dts[s]) * A[s] for s in nxt)
+                wts = {s: w_edge.get((d, s), 0.0) for s in nxt}
+                if cap:
+                    # SUB-STOCHASTIC flow weights: divide by max(R,1), so the
+                    # bootstrap coefficient is min(R,1) <= 1.
+                    #
+                    # Motivated by a measured ASYMMETRY the convex form misses.
+                    # The two failure modes sit on opposite tails of R:
+                    #   R > 1 (fan-out)  -> cgae_flow multiplies the critic by
+                    #                       R and the recursion stops being a
+                    #                       contraction. s1: R>1 on 24.0% of
+                    #                       decisions, and it COLLAPSES (0.166).
+                    #   R < 1 (fan-in)   -> cgae_cflow renormalizes the
+                    #                       coefficient back UP to 1, claiming
+                    #                       the whole continuation for a
+                    #                       decision that only partly caused its
+                    #                       successor. ncopies N=2: R<1 on 10.1%
+                    #                       of decisions, and cgae_cflow is
+                    #                       SIGNIFICANTLY WORSE than cgae_flow
+                    #                       (0.401 vs 0.837, 4W/14L, p=0.0043).
+                    #
+                    # A TD backup needs the coefficient <= 1 to contract; it
+                    # never needs it forced UP to 1. Capping keeps cgae_flow's
+                    # conservative attribution where R<1 and cgae_cflow's
+                    # normalization where R>1, so it is the weaker (and here,
+                    # the only sufficient) of the two corrections.
+                    R = sum(wts.values())
+                    if R > 1.0:
+                        wts = {s: w / R for s, w in wts.items()}
+                elif convex:
+                    # Normalize over SUCCESSORS so the bootstrap coefficient is
+                    # exactly 1: (*) constrains the predecessor sum, which does
+                    # not pin down the row sum the recursion actually uses.
+                    R = sum(wts.values())
+                    if R > 0.0:
+                        wts = {s: w / R for s, w in wts.items()}
+                    else:               # no attributable inflow: uniform = mean
+                        wts = {s: 1.0 / len(nxt) for s in nxt}
+                v_next = sum(wts[s] * disc(dts[s]) * V[s] for s in nxt)
+                a_next = sum(wts[s] * disc(dts[s]) * A[s] for s in nxt)
                 A[d] = owned[d] + v_next - V[d] + lam * a_next
             else:
                 g = sum(disc(dt) for dt in dts.values()) / len(nxt)
@@ -858,6 +999,273 @@ class CausalTraces:
 
         for d in range(n):
             redistribution[d] = A[d] + V[d]       # consumed as Q, like every scheme
+        return redistribution
+
+    def _cgae_structure(self, action_transitions, token_to_action,
+                        record_to_action, get_parents):
+        """Causal successor edges, inflow shares, and the reward-ownership
+        partition -- the three objects every cgae variant is defined on.
+
+        Split out so `cgae_dag` shares one construction with `_redistribute_cgae`
+        rather than a copy that can drift. Returns (succ, w_edge, owned, times).
+        """
+        n = len(action_transitions)
+        out_tok = {}
+        for idx, act in enumerate(action_transitions):
+            for t in act.get('output_tokens', ()) or ():
+                out_tok[t] = idx
+
+        def _producers(start_tid, self_idx):
+            found, seen, stack = set(), set(), [start_tid]
+            while stack:
+                tid = stack.pop()
+                if tid in seen:
+                    continue
+                seen.add(tid)
+                src = out_tok.get(tid)
+                if src is not None and src != self_idx:
+                    found.add(src)
+                    continue                   # nearest producer only
+                for p in get_parents(tid):
+                    if p not in seen:
+                        stack.append(p)
+            return found
+
+        succ, w_edge = {}, {}
+        for idx, act in enumerate(action_transitions):
+            contrib, n_attributed = {}, 0
+            for tid in list(act.get('input_tokens', ()) or ()):
+                prods = _producers(tid, idx)
+                if not prods:
+                    continue
+                n_attributed += 1
+                share = 1.0 / len(prods)
+                for d_ in prods:
+                    contrib[d_] = contrib.get(d_, 0.0) + share
+            if n_attributed == 0:
+                continue
+            for d_, c in contrib.items():
+                succ.setdefault(d_, set()).add(idx)
+                w_edge[(d_, idx)] = c / n_attributed
+
+        times = [act.get('time') for act in action_transitions]
+
+        def lineage(input_ids, firing_idx):
+            found = set()
+            if firing_idx is not None:
+                found.add(firing_idx)
+            seen, stack = set(), list(input_ids)
+            while stack:
+                tid = stack.pop()
+                if tid in seen:
+                    continue
+                seen.add(tid)
+                hit = token_to_action.get(tid)
+                if hit is not None:
+                    found.add(hit[0])
+                for p in get_parents(tid):
+                    if p not in seen:
+                        stack.append(p)
+            return found
+
+        owned = [0.0] * n
+        for tr in self.transition_history.transitions:
+            rv = tr.get('reward', 0.0)
+            if rv == 0.0:
+                continue
+            se = record_to_action.get(id(tr))
+            decs = lineage(tr.get('input_tokens', []), se[0] if se else None)
+            decs = [d for d in decs if 0 <= d < n]
+            if not decs:
+                continue
+            owner = max(decs, key=lambda d: (times[d] is not None, times[d] or 0.0))
+            owned[owner] += rv
+        return succ, w_edge, owned, times
+
+    def _redistribute_cgae_dag(self, action_transitions, token_to_action,
+                               record_to_action, redistribution, beta,
+                               get_parents, values=None, lam=1.0,
+                               conditioned=False):
+        """CGAE-DAG -- the variant that makes Proposition 3(i) true rather than
+        approximately true, by dropping edge weights entirely.
+
+        WHY WEIGHTS CANNOT WORK. Proposition 3(i) states
+
+            A_d = sum_{j : own(j) in desc(d)} rho_d(t_j) * r_j            (P3)
+
+        i.e. each owned reward of a causal DESCENDANT counts exactly once. That
+        is a statement about a SET -- the descendant closure -- but every cgae
+        variant so far computes it as a weighted sum over PATHS, and on a
+        re-convergent DAG those are different quantities:
+
+          * weight 1 per edge over-counts, once per distinct path. Measured on
+            s1: 42.1% of (d, j) pairs have >=2 distinct causal paths, up to 52.
+          * inflow-normalized weights (`cgae_flow`, `cgae_cflow`) suppress that
+            over-count, but they charge the same discount to plain JOINT
+            CAUSATION, where only one path exists and the correct weight is 1.
+            On s1 54.1% of successors have in-degree 1 and 45.9% >= 2: a
+            `start_i` consumes a task token AND an employee token, so both
+            predecessors are charged 0.5 for a reward each of them fully caused.
+
+        The two errors do not cancel; they compound along a chain. Measured P3
+        ratio (lam=1, V=0, ideal 1.000) -- s1: flow 0.577, mean 0.602, cflow
+        0.626, decaying monotonically with causal depth (1.000 at depth 1 to
+        0.329 at depth 14). ncopies N=4 is much milder (0.886/0.887/0.905),
+        which is why the defect stayed invisible on the headline benchmark.
+
+        No edge-weighted linear recursion computes (P3) on a re-convergent DAG,
+        so this variant uses SET semantics for the rewards and keeps weights
+        only where they belong -- the critic bootstrap:
+
+            Q[d] = sum_{j in desc*(d)} lam^{k_d(j)} * rho(t_j - t_d) * owned[j]
+                 + (1-lam) * sum_{k>=1} lam^{k-1}
+                            * sum_s mu_k(d -> s) * rho(t_s - t_d) * V[s]
+
+        where desc*(d) is the descendant closure INCLUDING d, k_d(j) is j's
+        minimum causal depth from d, and mu_k is the k-step convex successor
+        distribution (`cgae_cflow`'s normalized weights, so sum_s mu_k = 1) with
+        causal sinks absorbing into a terminal state of value 0.
+
+        This is exactly GAE, generalized to a DAG. On a chain mu_k is a point
+        mass and k_d(j) = k, and expanding the standard identity
+        A = sum_k (gamma*lam)^k delta_k gives
+
+            A = sum_k (gamma lam)^k r_k - V_0
+                + (1-lam) sum_{k>=1} lam^{k-1} gamma^k V_k
+
+        term for term, so ordinary SMDP-GAE is recovered. At lam=1 the bootstrap
+        vanishes and Q is precisely (P3) -- the estimand, computed rather than
+        approximated. Since desc(d) is contained in the component c(d), every
+        cross-component reward is still dropped exactly as in ccf, so
+        Proposition 1's unbiasedness argument transfers unchanged; and because
+        desc(d) is a STRICT subset of c(d), the credit is strictly finer than
+        ccf's.
+
+        Assumption status relative to the earlier variants: (A2) single causal
+        successor is not used, (A2') clock-exogeneity of a multiply-counted
+        global critic is not needed -- mu_k is a probability distribution, so
+        the critic is entered exactly once at each depth.
+        """
+        import math
+
+        n = len(action_transitions)
+        if n == 0:
+            return redistribution
+        V = list(values) if values is not None else [0.0] * n
+        if len(V) < n:
+            V = V + [0.0] * (n - len(V))
+
+        succ, w_edge, owned, times = self._cgae_structure(
+            action_transitions, token_to_action, record_to_action, get_parents)
+
+        def disc(dt):
+            if beta == 0.0 or dt is None:
+                return 1.0
+            return math.exp(-beta * max(0.0, float(dt)))
+
+        # Convex successor distribution: cgae_cflow's normalized inflow shares.
+        prob = {}
+        for d, kids in succ.items():
+            kids = [s for s in kids if s != d]
+            if not kids:
+                continue
+            R = sum(w_edge.get((d, s), 0.0) for s in kids)
+            if R > 0.0:
+                prob[d] = {s: w_edge.get((d, s), 0.0) / R for s in kids}
+            else:
+                prob[d] = {s: 1.0 / len(kids) for s in kids}
+
+        # forward (increasing-time) order, for the conditioned DP
+        order_fwd = sorted(range(n), key=lambda i: (times[i] is not None,
+                                                    times[i] or 0.0))
+
+        # Depth cap: the DAG is finite and acyclic, so n levels always suffice.
+        for d in range(n):
+            t_d = times[d]
+
+            if conditioned:
+                # ---- DEPTH-CONDITIONED closure (scheme cgae_cdag) ---------- #
+                # c(d,j) = E[lam^L | walk visits j], computed as the ratio of
+                # two forward DPs over desc(d):
+                #     N[j] = sum over paths of (prod what) * lam^{len}
+                #     D[j] = sum over paths of (prod what)  = Pr[visit j]
+                # At lam=1, N==D so c==1 and this IS the closure estimand: the
+                # fan-out gap is closed. At lam<1 it inherits cgae_cflow's
+                # depth weighting CONDITIONED on actually reaching j, instead of
+                # the arbitrary lam^{min-depth} used by cgae_dag. The two
+                # factors of cgae_cflow's weight,
+                #     c_cflow(d,j) = Pr[visit j] * E[lam^L | visit j],
+                # are separable; this keeps the second and discards the first.
+                N = {d: 1.0}
+                D = {d: 1.0}
+                for x in order_fwd:
+                    if x not in N:
+                        continue
+                    px = prob.get(x)
+                    if not px:
+                        continue
+                    for s_, p_ in px.items():
+                        N[s_] = N.get(s_, 0.0) + N[x] * p_ * lam
+                        D[s_] = D.get(s_, 0.0) + D[x] * p_
+                total = disc(0.0) * owned[d]
+                for j, dj in D.items():
+                    if j == d or owned[j] == 0.0 or dj <= 0.0:
+                        continue
+                    dt = ((times[j] - t_d) if (times[j] is not None
+                          and t_d is not None) else 0.0)
+                    total += (N.get(j, 0.0) / dj) * disc(dt) * owned[j]
+            else:
+                # ---- reward term: descendant CLOSURE by minimum causal depth - #
+                total = disc(0.0) * owned[d]
+                visited = {d}
+                frontier = {d}
+                k = 0
+                while frontier and k < n:
+                    nxt = set()
+                    for x in frontier:
+                        for s_ in succ.get(x, ()):
+                            if s_ not in visited:
+                                nxt.add(s_)
+                    if not nxt:
+                        break
+                    k += 1
+                    visited |= nxt
+                    lam_k = lam ** k
+                    if lam_k == 0.0:
+                        break
+                    for j in nxt:
+                        if owned[j] == 0.0:
+                            continue
+                        dt = ((times[j] - t_d) if (times[j] is not None and t_d is not None)
+                              else 0.0)
+                        total += lam_k * disc(dt) * owned[j]
+                    frontier = nxt
+
+            # ---- bootstrap term: convex k-step mixture over the critic ------ #
+            if lam < 1.0:
+                mu = {d: 1.0}
+                k = 0
+                while mu and k < n:
+                    nxt = {}
+                    for x, m in mu.items():
+                        px = prob.get(x)
+                        if not px:
+                            continue          # causal sink: absorbs, V_terminal = 0
+                        for s, p in px.items():
+                            nxt[s] = nxt.get(s, 0.0) + m * p
+                    if not nxt:
+                        break
+                    k += 1
+                    coef = (1.0 - lam) * (lam ** (k - 1))
+                    if coef == 0.0:
+                        break
+                    for s, m in nxt.items():
+                        dt = ((times[s] - t_d) if (times[s] is not None and t_d is not None)
+                              else 0.0)
+                        total += coef * m * disc(dt) * V[s]
+                    mu = nxt
+
+            redistribution[d] = total          # consumed as Q, like every scheme
         return redistribution
 
     def _redistribute_mcq(self, action_transitions, redistribution, beta):
