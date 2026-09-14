@@ -1,0 +1,7 @@
+{
+  "env": "j_mixed_rework",
+  "random_mean": 25.5,
+  "random_std": 0.5,
+  "heuristic_mean": 30.0,
+  "heuristic_std": 0.0
+}

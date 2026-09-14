@@ -1,0 +1,7 @@
+{
+  "env": "s3_stoch_mixed",
+  "random_mean": 98.8,
+  "random_std": 11.303096920755832,
+  "heuristic_mean": 113.0,
+  "heuristic_std": 10.99090533122727
+}

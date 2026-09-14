@@ -1,0 +1,20 @@
+{
+  "baselines": {
+    "s1": {
+      "random_mean": 9.2,
+      "heuristic_mean": 14.6
+    },
+    "ncopies4": {
+      "random_mean": 31.2,
+      "heuristic_mean": 43.4
+    },
+    "foreclosure": {
+      "random_mean": 4.8,
+      "heuristic_mean": 13.0
+    },
+    "join": {
+      "random_mean": 284.0,
+      "heuristic_mean": 325.0
+    }
+  }
+}

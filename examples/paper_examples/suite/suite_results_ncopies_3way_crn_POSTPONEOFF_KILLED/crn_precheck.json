@@ -1,0 +1,17 @@
+{
+  "1": {
+    "non_causal": 7.35,
+    "causal": 7.35,
+    "match": true
+  },
+  "2": {
+    "non_causal": 15.4,
+    "causal": 15.4,
+    "match": true
+  },
+  "4": {
+    "non_causal": 31.25,
+    "causal": 31.25,
+    "match": true
+  }
+}
