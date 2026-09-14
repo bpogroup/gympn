@@ -1519,11 +1519,16 @@ predicts \emph{whether} component-scoped credit can help, not \emph{how much}}:
 it is a screening statistic, and the magnitude additionally requires headroom.
 We do not fit a trend through these five points.
 
-\gapdisc{Also pending: whether the $N=2$ point belongs in the paper at all. At
-the converged budget the spread across all seven arms there is $0.169$ and
-nothing is significant, while at the shorter budget it was $0.576$ and
-significant in the wrong direction. The defensible use is as the low-$K$ end of
-the scaling curve, explicitly not as a method comparison.}
+\paragraph{The restricted role of the $N{=}2$ configuration.}
+We use it as the low-$K$ end of this curve and for nothing else. It cannot
+discriminate between estimators: at the converged budget the spread across all
+seven arms there is $0.169$ with nothing significant, and at the shorter budget
+the same configuration produced a spread of $0.576$ that \emph{was} significant,
+in the wrong direction---the artifact that motivated the budget audit at the
+head of this section. A configuration that reverses its verdict between budgets
+and separates nothing at the longer one has too little headroom and too much
+seed variance to rank methods. It earns its place here only as a point on the
+$K$ axis, and we draw no conclusion from the ordering of arms within it.
 
 %===========================================================================
 %===========================================================================
@@ -1697,12 +1702,19 @@ nominally separate streams. And we
 do not claim superiority over
 prior component-factored schemes at converged budgets.
 
-\gapdisc{Add a paragraph on generality across OR problem classes once a second
-domain exists. The estimator requires rewards attached to discrete,
-token-consuming firings, which is the real scope boundary---not the problem
-domain. Admission control and network revenue management satisfy it (revenue on
-acceptance); multi-item inventory does not straightforwardly, because holding
-cost accrues per period rather than at a firing.}
+\paragraph{What the method requires, and what it does not.}
+The scope boundary is not the problem domain but the reward structure. Nothing
+in the estimator is specific to task assignment: it needs only that rewards
+attach to discrete, token-consuming firings whose provenance the simulator
+records, and that enough of the reward mass sit in distinct causal components
+for $K$ to exceed one. Admission control and network revenue management satisfy
+the first condition directly, since revenue is earned at an acceptance, which is
+a firing that consumes a request token. Multi-item inventory control does not
+satisfy it straightforwardly: holding cost accrues per period rather than at a
+firing, so there is no consuming transition for the reward to attach to, and the
+cost would have to be discretized onto firings before ownership is even
+well defined. We have not run a second domain, so this states what the
+construction requires rather than where it has been shown to work.
 
 %===========================================================================
 \section{Conclusion}
