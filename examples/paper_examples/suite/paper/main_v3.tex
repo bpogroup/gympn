@@ -553,6 +553,9 @@ R(d) = \sum_{s\in\suc(d)} w(d\!\to\!s), \qquad
 \sum_{s\in\suc(d)}\hat{w}(d\!\to\!s)=1 .
 \label{eq:sucsum}
 \end{equation}
+When $R(d)=0$---no consumed token of any successor is attributable to $d$---we
+set $\hat w(d\!\to\!s)=1/|\suc(d)|$, which is the equal-share instance discussed
+below.
 With $\rho(\Delta t)=e^{-\beta\Delta t}$ the SMDP discount applied at
 \emph{causal} depth, the estimator is
 \begin{equation}
@@ -574,22 +577,34 @@ self-consistent. Algorithm~\ref{alg:cflow} states the procedure.
 \begin{algorithmic}[1]
 \State \textbf{input:} decisions $\Ascr$ with clocks $u_d$; token history;
        critic values $V[\cdot]$; $\lambda$, $\beta$
-\State build $\suc(\cdot)$ and $w(\cdot\!\to\!\cdot)$ by nearest-producer walk
-       \Comment{$O(|E|)$}
+\State build $\suc(\cdot)$ and $w(\cdot\!\to\!\cdot)$: one backward
+       nearest-producer walk per consumed token
 \State $\mathrm{owned}[d]\gets 0$ for all $d$
 \ForAll{rewards $r_j$}
+  \If{$\Ascr(j)=\emptyset$}
+    \State \textbf{continue} \Comment{exogenous: enters no decision's credit}
+  \EndIf
   \State $\mathrm{owned}[\own(j)] \mathrel{+}= r_j$
          \Comment{latest decision on $j$'s lineage}
 \EndFor
 \ForAll{$d\in\Ascr$ in decreasing $u_d$}
-  \If{$\suc(d)=\emptyset$} \State $A[d]\gets \mathrm{owned}[d]-V[d]$
+  \State $S \gets \suc(d)\setminus\{d\}$
+  \If{$S=\emptyset$}
+    \State $A[d]\gets \mathrm{owned}[d]-V[d]$ \Comment{causal sink}
   \Else
-    \State $R\gets\sum_{s\in\suc(d)} w(d\!\to\!s)$
+    \State $R\gets\sum_{s\in S} w(d\!\to\!s)$
+    \If{$R>0$}
+      \State $\hat w(d\!\to\!s)\gets w(d\!\to\!s)/R$ \textbf{for} $s\in S$
+    \Else
+      \State $\hat w(d\!\to\!s)\gets 1/|S|$
+             \Comment{no attributable inflow: the equal-share case}
+    \EndIf
     \State $A[d]\gets \mathrm{owned}[d]-V[d]
-            +\sum_{s} \tfrac{w(d\to s)}{R}\rho(u_s\!-\!u_d)(V[s]+\lambda A[s])$
+            +\sum_{s\in S} \hat w(d\!\to\!s)\,\rho(u_s\!-\!u_d)\,
+             \bigl(V[s]+\lambda A[s]\bigr)$
   \EndIf
 \EndFor
-\State \textbf{return} $Q[d]=A[d]+V[d]$
+\State \textbf{return} $Q[d]=A[d]+V[d]$ for all $d$
 \end{algorithmic}
 \end{algorithm}
 
