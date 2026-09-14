@@ -214,187 +214,145 @@ divergence.
 \label{sec:related}
 
 \paragraph{DRL for dynamic task assignment and operational control.} A growing
-literature applies DRL to scheduling, routing, and business-process
-decision-making, typically encoding the problem instance as a graph consumed
-by a graph neural network policy: greedy graph-embedding heuristics for
-combinatorial construction \citep{khalil2017learning}, attention-based
-routing policies \citep{nazari2018vrp}, and GNN-based dispatching for job-shop
-scheduling \citep{zhang2020jobshop}, the last especially close in spirit to
-our setting. \citet{mazyavkina2021survey} survey this broader RL-for-
-combinatorial-optimization literature; \citet{bengio2021tour}, published in
-this journal, give the methodological tour d'horizon our OR framing draws on
-most directly. Within the A-E PN program, \citet{aepn2023} introduce the
-formalism and a taxonomy of assignment archetypes, \citet{aepn_repr2025} give
-a graph representation for infinite state/action spaces, and \citet{gympn2025}
-provide a library supporting partial observability and multiple decisions.
-Across this literature, the learning algorithm is almost universally a black
-box on top of the graph encoding; the simulator's own execution trace---which
-decisions caused which outcomes---is not itself treated as a source of
-learning signal. Our contribution is orthogonal to and compatible with all of
-the above: it is a credit-assignment mechanism, not a new policy architecture
-or problem encoding.
+literature applies DRL to scheduling, routing and business-process
+decision-making, typically encoding the instance as a graph consumed by a graph
+neural network policy: greedy graph-embedding heuristics for combinatorial
+construction \citep{khalil2017learning}, attention-based routing
+\citep{nazari2018vrp}, and GNN dispatching for job-shop scheduling
+\citep{zhang2020jobshop}, the last closest in spirit to our setting.
+\citet{mazyavkina2021survey} survey RL for combinatorial optimization, and
+\citet{bengio2021tour}, in this journal, give the methodological tour
+d'horizon our OR framing draws on most directly. Within the A-E PN program,
+\citet{aepn2023} introduce the formalism and a taxonomy of assignment
+archetypes, \citet{aepn_repr2025} a graph representation for infinite state and
+action spaces, and \citet{gympn2025} a library supporting partial observability
+and multiple decisions. Across this literature the learning algorithm is a
+black box on top of the encoding: the simulator's own execution trace---which
+decisions caused which outcomes---is not itself treated as a source of learning
+signal. Our contribution is orthogonal to and compatible with all of it, being
+a credit-assignment mechanism rather than a policy architecture or a problem
+encoding.
 
 \paragraph{Credit assignment in RL.} Return decomposition \citep{rudder2019}
-learns to redistribute return along a trajectory via a return-predicting
-model's contribution analysis; Hindsight Credit Assignment \citep{hca2019}
-reweights past actions by their learned likelihood of having caused an
-observed outcome. Both are \emph{learned} redistribution mechanisms trained
-on correlational patterns across trajectories. Our mechanisms differ in
-kind: token provenance in an A-E PN is not inferred, it is recorded exactly by
-the simulator, so \cflow{}'s credit signal carries no approximation
-error from the attribution step itself. This is close in motivation to
-model-free counterfactual credit assignment \citep{ccadeep2021}, which
-conditions value functions on future events to build low-variance
-counterfactual baselines; Simulator-replay counterfactual credit (\cfpk{}, which we treat as related
-rather than contributed work in this version) is the model-based analogue of the
-same goal, made exact because the simulator is itself an available,
-cheap-to-fork causal model. It sits at the exact end of the same spectrum, at a
-simulation cost \cflow{} avoids entirely.
+redistributes return along a trajectory via a return-predicting model's
+contribution analysis; Hindsight Credit Assignment \citep{hca2019} reweights
+past actions by their learned likelihood of having caused an observed outcome.
+Both are \emph{learned} redistributions, fitted to correlational patterns
+across trajectories. Token provenance is not inferred but recorded exactly by
+the simulator, so the attribution step contributes no approximation error. The
+motivation is shared with model-free counterfactual credit assignment
+\citep{ccadeep2021}, which conditions value functions on future events to build
+low-variance counterfactual baselines; simulator-replay counterfactual credit
+(\cfpk{}, which we treat as related rather than contributed work in this
+version) is the model-based analogue, made exact because the simulator is
+itself a cheap-to-fork causal model. It sits at the exact end of the same
+spectrum, at a simulation cost \cflow{} avoids entirely.
 
-\paragraph{Factored / multi-agent credit.} Difference rewards
-\citep{difference2002} credit each agent with its marginal contribution
-relative to a counterfactual baseline; COMA \citep{coma2018} learns this
-baseline via a centralized critic; value decomposition
-\citep{vdn2018,qmix2018} factors a joint value across agents under additivity
-or monotonicity constraints. These require the entity/agent partition to be
-given. A more recent line does not: MACCA \citep{macca2024} casts the
+\paragraph{Factored and multi-agent credit.} Difference rewards
+\citep{difference2002} credit each agent with its marginal contribution against
+a counterfactual baseline; COMA \citep{coma2018} learns that baseline with a
+centralized critic; value decomposition \citep{vdn2018,qmix2018} factors a
+joint value under additivity or monotonicity constraints. All require the
+entity partition to be supplied. MACCA \citep{macca2024} does not: it casts the
 generative process as a dynamic Bayesian network and \emph{learns} the causal
-structure from offline data, using a structure predictor with sparsity
-regularization to recover which state and action dimensions influence each
-agent's reward.
-
+structure from offline data, using a sparsity-regularized structure predictor
+to recover which state and action dimensions influence each agent's reward.
 The distinction we draw is therefore not \emph{given versus derived}---that
 would misrepresent \citet{macca2024}---but \emph{learned versus recorded}.
-MACCA estimates the causal structure statistically from
-$\{s,o,a,R,s'\}$ tuples, so the recovered graph carries estimation error,
-requires enough data to identify, and can be wrong. Token provenance in an
-A-E PN is not estimated at all: the simulator writes down, for each firing,
-exactly which tokens were consumed and produced, so the attribution step
-contributes \emph{zero} approximation error and needs no data beyond the
-episode being credited. The partition is also free to change shape per
-episode as the realized case mix changes, and a single-agent problem (one
-policy, many concurrent cases) is factored the same way a genuinely
-multi-agent one would be.
+MACCA estimates the structure statistically from $\{s,o,a,R,s'\}$ tuples, so
+the recovered graph carries estimation error, requires enough data to identify,
+and can be wrong; an A-E PN simply writes down, for each firing, which tokens
+were consumed and produced. Our partition is also free to change shape per
+episode as the realized case mix changes, and it factors a single-agent
+problem---one policy, many concurrent cases---the same way it would a genuinely
+multi-agent one.
 
 \paragraph{Treating the simulator as more than a black box.} Two recent lines
-share our premise---that a discrete-event simulator exposes structure worth
-exploiting---while exploiting different structure.
-\citet{diffdes2024} make the simulator \emph{differentiable} and compute
-pathwise policy gradients through it for queueing-network control, reporting
-gradient estimates orders of magnitude more accurate than REINFORCE-style
-estimators and large sample-efficiency gains. That approach needs a
-differentiable simulator and smooth surrogate event dynamics; ours needs only
-that the simulator record token identity, which A-E PN execution already does,
-and leaves the policy-gradient estimator otherwise untouched. The two are
-complementary rather than competing: pathwise differentiation improves the
-gradient of a given objective, whereas causal-order estimation changes which
-rewards enter a decision's advantage in the first place.
-\citet{eventdriven2026} control a semiconductor fab---an event-driven system
-much like ours, at industrial scale---and begin from an observation we share
-almost exactly: because an action initiates a temporally extended event that
-overlaps other events, ``the next decision point may correspond to a different
-event and thus be uninformative for credit assignment.'' We record this
-agreement explicitly, because it is independent evidence that the defect our
-method targets is real and is felt in practice.
+share our premise, that a discrete-event simulator exposes structure worth
+exploiting, while exploiting different structure. \citet{diffdes2024} make the
+simulator \emph{differentiable} and take pathwise policy gradients through it
+for queueing-network control, reporting gradient estimates orders of magnitude
+more accurate than REINFORCE-style ones and large sample-efficiency gains. That
+approach needs a differentiable simulator and smooth surrogate event dynamics;
+ours needs only that the simulator record token identity, and leaves the
+policy-gradient estimator otherwise untouched. The two are complementary rather
+than competing: pathwise differentiation improves the gradient of a given
+objective, whereas causal-order estimation changes which rewards enter a
+decision's advantage in the first place.
 
-Their response to it differs from ours in the variable it groups on. They
-define transitions over the temporal extent of the action-induced event rather
-than to the next arbitrary decision---an SMDP-style retiming, as they note---and
-then add an \emph{event-group} temporal-difference layer: all events falling in
-a sampled time segment $I_h=[t,t+h]$ form a group $G$, and training matches the
-group's aggregated TD discrepancy to a single system-level reward earned over
-that interval, $\mathcal{L}(\theta)=\bigl(|G|^{-1}\sum_{e\in G}\delta_e(\theta)
--r^g(I_h)\bigr)^2$. A weighted variant replaces the mean with normalized
-\emph{duration} shares $\omega_e \propto \Delta_e$ over the events overlapping a
-sampled event's interval. For policy optimization they set GAE aside as
-ill-suited to very long delays and use a group-relative surrogate
-$\tilde{A}_i \triangleq \delta_i - r^g$, which subtracts the shared broadcast
-reward from the critic-implied return in the manner of a group baseline.
+\citet{eventdriven2026} control a semiconductor fab and begin from an
+observation we share almost exactly: because an action initiates a temporally
+extended event that overlaps others, ``the next decision point may correspond
+to a different event and thus be uninformative for credit assignment.'' We
+record the agreement because it is independent evidence that the defect our
+method targets is felt in practice. Their response groups on a different
+variable. They retime transitions to the extent of the action-induced
+event---an SMDP-style step, as they note---and add an \emph{event-group}
+temporal-difference layer, in which all events falling in a sampled time window
+form a group whose aggregated TD discrepancy is matched to a single
+system-level reward earned over that interval, with a variant weighting events
+by elapsed \emph{duration}. That does redistribute a delayed global reward
+across decisions, so it is more than a retiming. But its group is a set of
+events that \emph{co-occur in time}, where ours is the set of decisions a
+reward causally \emph{descends from}, and its weights are shares of duration
+where ours are shares of token flow. The two partitions disagree in both
+directions: lots processed in one window are grouped there whatever their
+provenance, and two decisions on one wafer's route are separated there once
+they fall in different windows. Their layer consequently needs a system-level
+reward defined over an interval to aggregate \emph{toward}, while ours needs
+only the rewards the episode already pays, each assigned to a single
+owner---which is what makes it a return decomposition rather than a
+reward-matching objective. Theirs applies to any simulator reporting event
+start and finish times; ours additionally requires recorded token identity, a
+stronger demand that A-E PN execution satisfies for free. And where they
+identify the theoretical status of their objective as open---``whether and when
+it admits, approximates, or preserves a Bellman-consistent fixed
+point''---Section~\ref{sec:theory} answers the corresponding question for ours,
+though for the weaker property of a bounded bias rather than a fixed-point
+guarantee.
 
-So their layer does redistribute a delayed global reward across decisions, and
-it would be wrong to call it only a retiming. But the group is a set of events
-that \emph{co-occur in time}, and the weights are shares of elapsed duration.
-Ours is the set of decisions a reward causally \emph{descends from}, and the
-weights are shares of token flow. The two coincide only by accident: two lots
-processed in the same 360-minute window are grouped together there whatever
-their provenance, and two decisions on one wafer's route are separated there
-once they fall in different windows, while our partition does the opposite in
-both cases. The consequences follow from that difference. Their aggregation
-needs a system-level reward signal defined over an interval to aggregate
-\emph{toward}; ours needs only the rewards the episode already pays, each
-assigned to a single owner, which is what makes it a return decomposition
-rather than a reward-matching objective. Theirs applies to any discrete-event
-simulator that reports event start and finish times; ours additionally requires
-that the simulator record token identity, which is a stronger demand that A-E PN
-execution happens to satisfy for free. And where they identify the theoretical
-status of their objective as open---``whether and when it admits, approximates,
-or preserves a Bellman-consistent fixed point''---the corresponding question for
-our estimator is what Section~\ref{sec:theory} answers, though for a weaker
-property: a bound on the bias relative to the closure estimand rather than a
-fixed-point guarantee.
+\paragraph{Decomposition in operations research.} Dantzig--Wolfe
+\citep{dantzig1960decomposition} and Benders \citep{benders1962partitioning}
+decomposition break a hard, structured optimization problem into a master
+problem and weakly-coupled subproblems along a hand-identified block structure.
+\cflow{} applies the same idea to the policy-gradient \emph{return},
+decomposing it along a block structure derived automatically, per episode, from
+the simulator's own causal record rather than fixed a priori in a constraint
+matrix.
 
-\paragraph{Potential-based reward shaping.} \citet{ng1999shaping} prove that
-adding a potential-based term to every step's reward cannot change an MDP's
-optimal policy, for any potential function. We use the SMDP-discounted
-generalization of this theorem not as a headline mechanism but as one of
-three falsified alternative routes in our boundary-condition investigation
-(Section~\ref{sec:boundary}): a theorem-safe, empirically counter-productive
-result at practical training budgets, included because it isolates
-sample-efficiency effects cleanly from the bias effects that are our main
-concern in Section~\ref{sec:theory}.
-
-\paragraph{Graph neural networks for combinatorial optimization and
-heterogeneous actor-critic architectures.} GNNs are now a standard state
-encoder for RL over combinatorial structures with variable size and topology
-\citep{khalil2017learning,zhang2020jobshop}; our environments use a
-heterogeneous variant, the Heterogeneous Graph Transformer
-\citep{hu2020hgt}, encoding places and transitions as distinct node types.
-Section~\ref{sec:boundary} documents an architectural finding of independent
-interest: a per-node actor decoder combined with directed-only (non-reversed)
-message-passing edges can be \emph{exactly} blind to state outside its
-forward-reachable neighborhood, a limitation the critic (which pools) does
-not share. To our knowledge this is not previously documented for
-heterogeneous actor-critic graph architectures, and the argument is
-orthogonal to the specific choice of GNN backbone.
-
-\paragraph{Decomposition in operations research.} Dantzig--Wolfe decomposition
-\citep{dantzig1960decomposition} and Benders decomposition
-\citep{benders1962partitioning} break a hard, structured optimization problem
-into a master problem and weakly-coupled subproblems along a hand-identified
-block structure. \cflow{} applies the same idea to the policy-gradient
-\emph{return}: decompose it along a block structure derived automatically,
-per episode, from the simulator's own causal record, rather than a static
-constraint matrix's block structure identified a priori.
-
-% ======================================================================
-
-\paragraph{Generalized advantage estimation, and deliberate bias.}
-Our estimator is GAE with one substitution, so GAE is the closest technical
-antecedent rather than background. Two features of it matter here. First, GAE
-with $\lambda<1$ is \emph{itself} a biased estimator---$\lambda=1$ is the
-unbiased Monte-Carlo case---and the biased settings are universally preferred in
+\paragraph{Generalized advantage estimation, and deliberate bias.} Our
+estimator is GAE \citep{gae2016} with one substitution, so GAE is the closest
+technical antecedent rather than background. Two features of it matter here. First, GAE
+with $\lambda<1$ is \emph{itself} biased---$\lambda=1$ is the unbiased
+Monte-Carlo case---and the biased settings are universally preferred in
 practice. Second, the bias it introduces is a shrinkage by \emph{temporal}
-distance, $\lambda^k$; the estimator below shrinks by \emph{causal} distance
-instead. The precedent is therefore direct: we are not introducing bias into an
-unbiased pipeline, we are relocating a shrinkage that is already there.
-
-\paragraph{Biased estimators as the norm.}
-It is worth stating plainly that deliberate bias is standard rather than
-exceptional in this literature: the clipped surrogate objective of PPO, truncated
+distance, $\lambda^k$, where ours shrinks by \emph{causal} distance: we are not
+introducing bias into an unbiased pipeline, we are relocating a shrinkage that
+is already there. Deliberate bias is in any case the norm rather than the
+exception in this literature---PPO's clipped surrogate objective, truncated
 importance weights in off-policy actor-critic, reward clipping in value-based
-control, restricted value factorizations in cooperative multi-agent learning, and
-discounting below the true horizon as a form of regularization. In statistics the
-same point is a theorem: shrinkage estimators dominate the unbiased maximum
-likelihood estimator in mean-squared error. We rely on this framing in
-Section~\ref{sec:theory}, where the estimator we ship is biased and the one that
-is exactly unbiased performs worse.
+control, restricted value factorizations in cooperative multi-agent learning,
+discounting below the true horizon as regularization---and in statistics the
+same point is a theorem, since shrinkage estimators dominate the unbiased
+maximum-likelihood estimator in mean-squared error.
+Section~\ref{sec:theory} relies on this framing: the estimator we ship is
+biased, and the one that is exactly unbiased performs worse.
 
-\paragraph{Positioning against factored and counterfactual credit.}
-Difference rewards, counterfactual multi-agent baselines and value-decomposition
-networks all require the entity partition to be supplied. Our factorization is
-\emph{read off} the provenance DAG per episode. Simulator-replay counterfactual
-credit obtains exact per-decision differences by forking the simulator; it sits
-at the exact end of the same spectrum, at a cost in simulation we avoid.
+\paragraph{Reward shaping and graph architectures.} \citet{ng1999shaping} prove
+that a potential-based term added to every step's reward cannot change an MDP's
+optimal policy, for any potential function. We use the SMDP-discounted
+generalization not as a headline mechanism but as one of three falsified
+alternative routes in our boundary-condition investigation
+(Section~\ref{sec:boundary}). That investigation also uses a heterogeneous GNN
+state encoder, the Heterogeneous Graph Transformer \citep{hu2020hgt}, in the
+now-standard role of encoding combinatorial structures of variable size and
+topology \citep{khalil2017learning,zhang2020jobshop}. It documents an
+architectural finding of independent interest: a per-node actor decoder
+combined with directed-only message-passing edges can be \emph{exactly} blind
+to state outside its forward-reachable neighborhood, a limitation the critic,
+which pools, does not share. To our knowledge this is not previously documented
+for heterogeneous actor-critic graph architectures, and the argument is
+orthogonal to the choice of GNN backbone.
 
 %===========================================================================
 \section{Background}

@@ -152,14 +152,14 @@
 \newblock \bibinfo{note}{ArXiv:2312.03644. Learns the causal DBN from offline
   $\{s,o,a,R,s'\}$ data via a structure predictor with sparsity regularization
   -- structure is LEARNED, not given, and uses no simulator provenance.}
-%Type = Article
+%Type = Inproceedings
 \bibitem[{Schulman et~al.(2016)Schulman, Moritz, Levine, Jordan and
   Abbeel}]{gae2016}
 \bibinfo{author}{Schulman, J.}, \bibinfo{author}{Moritz, P.},
   \bibinfo{author}{Levine, S.}, \bibinfo{author}{Jordan, M.},
   \bibinfo{author}{Abbeel, P.}, \bibinfo{year}{2016}.
 \newblock \bibinfo{title}{High-dimensional continuous control using generalized
-  advantage estimation} .
+  advantage estimation}, in: \bibinfo{booktitle}{ICLR}.
 %Type = Article
 \bibitem[{Schulman et~al.(2017)Schulman, Wolski, Dhariwal, Radford and
   Klimov}]{ppo2017}
