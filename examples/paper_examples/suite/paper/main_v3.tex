@@ -172,8 +172,10 @@ coefficient multiplying the bootstrap is a row sum that the conservation
 constraint does not bound. We show the resulting error is proportional to the
 critic, so the estimator degrades as the critic improves, and we observe exactly
 that: on the single-component environment the unnormalized form does not merely
-underperform, it \emph{diverges}, with variance growing sixfold between training
-budgets and one run falling from near-optimal to below random.
+underperform, it \emph{diverges}. Half its seeds---$10$ of $20$---end collapsed
+while only two are collapsed at their best checkpoint, so it is not failing to
+find a good policy but finding one and then destroying it, and extending the
+training budget makes it worse rather than better.
 
 \item \textbf{An ablation ladder in which computing the estimand \emph{exactly}
 does not pay} (Section~\ref{sec:exp}). \cdag{} computes the causal
