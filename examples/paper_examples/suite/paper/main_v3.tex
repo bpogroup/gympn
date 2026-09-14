@@ -286,17 +286,49 @@ and leaves the policy-gradient estimator otherwise untouched. The two are
 complementary rather than competing: pathwise differentiation improves the
 gradient of a given objective, whereas causal-order estimation changes which
 rewards enter a decision's advantage in the first place.
-\citet{eventdriven2026} address long-horizon control in semiconductor
-fabrication with an event-driven temporal-difference formulation over an
-interconnected process of discrete events, in a domain close to ours.
+\citet{eventdriven2026} control a semiconductor fab---an event-driven system
+much like ours, at industrial scale---and begin from an observation we share
+almost exactly: because an action initiates a temporally extended event that
+overlaps other events, ``the next decision point may correspond to a different
+event and thus be uninformative for credit assignment.'' We record this
+agreement explicitly, because it is independent evidence that the defect our
+method targets is real and is felt in practice.
 
-\gap{Position precisely against \citet{eventdriven2026} once its method
-section has been read. The open question is whether its event-driven TD
-formulation changes WHICH past decisions are credited for a reward (causal
-attribution, i.e.\ our contribution) or only WHEN transition boundaries fall
-(SMDP timing, which we also do and which is standard). If the former, the
-novelty claim in Section~1 needs restating; if the latter, this paragraph
-should say so explicitly. Do not submit without resolving this.}
+Their response to it differs from ours in the variable it groups on. They
+define transitions over the temporal extent of the action-induced event rather
+than to the next arbitrary decision---an SMDP-style retiming, as they note---and
+then add an \emph{event-group} temporal-difference layer: all events falling in
+a sampled time segment $I_h=[t,t+h]$ form a group $G$, and training matches the
+group's aggregated TD discrepancy to a single system-level reward earned over
+that interval, $\mathcal{L}(\theta)=\bigl(|G|^{-1}\sum_{e\in G}\delta_e(\theta)
+-r^g(I_h)\bigr)^2$. A weighted variant replaces the mean with normalized
+\emph{duration} shares $\omega_e \propto \Delta_e$ over the events overlapping a
+sampled event's interval. For policy optimization they set GAE aside as
+ill-suited to very long delays and use a group-relative surrogate
+$\tilde{A}_i \triangleq \delta_i - r^g$, which subtracts the shared broadcast
+reward from the critic-implied return in the manner of a group baseline.
+
+So their layer does redistribute a delayed global reward across decisions, and
+it would be wrong to call it only a retiming. But the group is a set of events
+that \emph{co-occur in time}, and the weights are shares of elapsed duration.
+Ours is the set of decisions a reward causally \emph{descends from}, and the
+weights are shares of token flow. The two coincide only by accident: two lots
+processed in the same 360-minute window are grouped together there whatever
+their provenance, and two decisions on one wafer's route are separated there
+once they fall in different windows, while our partition does the opposite in
+both cases. The consequences follow from that difference. Their aggregation
+needs a system-level reward signal defined over an interval to aggregate
+\emph{toward}; ours needs only the rewards the episode already pays, each
+assigned to a single owner, which is what makes it a return decomposition
+rather than a reward-matching objective. Theirs applies to any discrete-event
+simulator that reports event start and finish times; ours additionally requires
+that the simulator record token identity, which is a stronger demand that A-E PN
+execution happens to satisfy for free. And where they identify the theoretical
+status of their objective as open---``whether and when it admits, approximates,
+or preserves a Bellman-consistent fixed point''---the corresponding question for
+our estimator is what Section~\ref{sec:theory} answers, though for a weaker
+property: a bound on the bias relative to the closure estimand rather than a
+fixed-point guarantee.
 
 \paragraph{Potential-based reward shaping.} \citet{ng1999shaping} prove that
 adding a potential-based term to every step's reward cannot change an MDP's

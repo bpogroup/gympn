@@ -133,17 +133,6 @@
 \newblock \bibinfo{title}{Policy invariance under reward transformations:
   Theory and application to reward shaping}, in: \bibinfo{booktitle}{ICML}, pp.
   \bibinfo{pages}{278--287}.
-%Type = Article
-\bibitem[{{Politecnico di Milano and
-  STMicroelectronics}(2026)}]{eventdriven2026}
-\bibinfo{author}{{Politecnico di Milano and STMicroelectronics}},
-  \bibinfo{year}{2026}.
-\newblock \bibinfo{title}{Event-driven reinforcement learning enables
-  long-horizon control in semiconductor fabrication}.
-\newblock \bibinfo{journal}{arXiv preprint arXiv:2606.10705}
-  \bibinfo{note}{AUTHOR LIST AND VENUE NEED VERIFYING. Method section not yet
-  read: unresolved whether its event-driven TD formulation performs causal
-  attribution or only SMDP retiming.}
 %Type = Inproceedings
 \bibitem[{Rashid et~al.(2018)Rashid, Samvelyan, de~Witt, Farquhar, Foerster and
   Whiteson}]{qmix2018}
@@ -191,6 +180,16 @@
 \newblock \bibinfo{title}{Optimal payoff functions for members of collectives}.
 \newblock \bibinfo{journal}{Advances in Complex Systems} \bibinfo{volume}{4},
   \bibinfo{pages}{265--279}.
+%Type = Article
+\bibitem[{Yeganeh et~al.(2026)Yeganeh, Shekari, Frigerio, Pagano and
+  Matta}]{eventdriven2026}
+\bibinfo{author}{Yeganeh, Y.}, \bibinfo{author}{Shekari, M.},
+  \bibinfo{author}{Frigerio, N.}, \bibinfo{author}{Pagano, D.},
+  \bibinfo{author}{Matta, A.}, \bibinfo{year}{2026}.
+\newblock \bibinfo{title}{Event-driven reinforcement learning enables
+  long-horizon control in semiconductor fabrication}.
+\newblock \bibinfo{journal}{arXiv preprint arXiv:2606.10705}
+  \bibinfo{note}{Preprint, submitted 9 June 2026}.
 %Type = Inproceedings
 \bibitem[{Zhang et~al.(2020)Zhang, Song, Cao, Zhang, Tan and
   Xu}]{zhang2020jobshop}
