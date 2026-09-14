@@ -175,13 +175,14 @@ that: on the single-component environment the unnormalized form does not merely
 underperform, it \emph{diverges}, with variance growing sixfold between training
 budgets and one run falling from near-optimal to below random.
 
-\item \textbf{An ablation ladder in which fidelity to the causal estimand is
-nearly uncorrelated with learning performance} (Section~\ref{sec:exp}). The
-variant that satisfies the target identity \emph{exactly} ranks second-worst of
-nine and is beaten decisively, while the variant that satisfies it at $0.626$ is
-statistically indistinguishable from six others---plain PPO among them. What
-separates working from failing estimators is not faithfulness but whether the
-error is bounded.
+\item \textbf{An ablation ladder in which computing the estimand \emph{exactly}
+does not pay} (Section~\ref{sec:exp}). \cdag{} computes the causal
+estimand by construction and ranks second-worst of nine, beaten decisively by three biased
+variants; the one variant that fails catastrophically is the one whose error is
+\emph{unbounded}. What separates working from failing estimators here is
+boundedness, not exactness---a distinction we can support, in contrast to
+several mechanisms we tested and rejected
+(Appendix~\ref{app:falsified}).
 
 \item \textbf{A pre-training diagnostic.} The number of reward-bearing causal
 components $K$, and the mean causal fan-out, are computable from a handful of
@@ -726,8 +727,12 @@ owned reward exactly once, with no path weighting at all,
   A^{\star}[d] \;=\; \sum_{j\,:\,\own(j)\in\desc^{*}(d)} \rho_d(t_j)\,r_j .
   \label{eq:star}
 \end{equation}
-It is realized exactly by \cdag, whose measured identity ratio against
-\eqref{eq:star} is $1.000$. Because ownership is a partition
+It is realized by \cdag{} \emph{by construction} rather than to within a
+measured tolerance: at $\lambda=1$ with $V\equiv0$ its bootstrap term vanishes
+and what the recursion computes is \eqref{eq:star} itself. We verify the
+implementation matches the definition---the two agree to $0$ units in the last
+place over $191$ decisions---but this is a check on code, not an estimate of a
+quantity. Because ownership is a partition
 (Section~\ref{sec:method}), each reward enters \eqref{eq:star} at most once
 even when its owner is reachable from $d$ along several distinct paths---the
 set semantics is what distinguishes it from the path-summing variants, and it
@@ -1372,6 +1377,7 @@ counts because it manifests as occasional catastrophic runs rather than as a
 uniformly lower mean.
 
 \subsection{The successor normalization is necessary}
+\label{sec:normneeded}
 
 \begin{table}[t]
 \centering
@@ -1430,31 +1436,58 @@ best-checkpoint precisely because checkpoint restoration is a partial guard
 against the late-training divergence described above; no conclusion in this
 section depends on the choice.
 
-\subsection{Fidelity to the causal estimand does not predict performance}
+\subsection{Computing the estimand exactly does not pay}
+\label{sec:exactness}
 
-\cdag{} computes the target identity of \eqref{eq:unroll} \emph{exactly}: its
-measured identity ratio is $1.000$ against \cflow's $0.626$, it reproduces
-textbook GAE on a chain to machine precision, and it counts a re-convergent
-diamond's reward once rather than twice. It is the unbiased member of the family.
-It ranks second-worst of nine. The structural reason is visible in
-Table~\ref{tab:envs}: on a single-component environment the descendant closure is
-most of the remaining episode ($S=0.474$, and $0.712$ on a related environment),
-so the exact estimand approaches the unscoped return and exactness buys no
-scoping at all.
+\cdag{} computes \eqref{eq:star} by construction: it reproduces textbook GAE on
+a chain to machine precision, and it counts a re-convergent diamond's reward
+once rather than twice. It is the unbiased member of the family. It ranks
+second-worst of nine.
 
-\gapdisc{This subsection is the paper's most interesting claim and currently
-rests on an association rather than an isolated mechanism. Four candidate
-explanations were tested and falsified---postpone-driven action dependence, DAG
-sparsity, per-state ranking fidelity against a measured counterfactual
-(\emph{inverted}: \cdag{} $\rho=+0.681$ and top-1 agreement $83.3\%$ against
-\cflow's $+0.435$ and $33.3\%$), and credit signal-to-noise ratio
-(\emph{inverted}). The only variable separating working from failing arms is
-final policy entropy ($0.27$--$0.56$ against $0.13$--$0.15$, no overlap), and
+The structural reason is visible in Table~\ref{tab:envs}. On a single-component
+environment the descendant closure is most of the remaining episode
+($S=0.474$, and $0.712$ on a related environment), so the exact estimand
+approaches the unscoped return and exactness buys no scoping at all. Exactness
+is a property of the target, and on a one-blob environment that target barely
+varies with the action.
+
+\paragraph{The weighted variants under-recover the estimand, and the shortfall
+compounds with causal depth.} Every path-weighted variant places total weight
+$c_d(j)\le1$ on a descendant's owned reward, so it recovers only a fraction of
+\eqref{eq:star}. Measured at $\lambda=1$, $V\equiv0$, $\beta=0$ over five random
+rollouts, the mean recovered fraction is $0.58$--$0.63$ on the single-component
+environment and $0.89$--$0.91$ at four copies, against \cdag's $1$ by
+construction, and it decays monotonically with causal depth---for \cflow{} on
+the single-component environment, from $1.00$ at depth $1$ to $0.49$ at depth
+$9$.
+
+We report this as a property of the estimators rather than as an explanation of
+the ordering, because on its own it cannot be one. Advantages are standardized
+per batch before each policy update (Appendix~\ref{app:repro}), so a
+\emph{uniform} shrinkage of all credit is invisible to the gradient by
+construction; only the dispersion of $c_d$ can act, and that dispersion does not
+order the variants either---on the single-component environment \cflowraw{} has
+the \emph{lowest} coefficient of variation of the four ($0.42$ against
+$0.49$--$0.64$) and is the arm that collapses. What the measurement does
+establish is the fan-in dilution that motivates \cdag{} in the first place, and
+that the dilution is systematic in depth rather than incidental.
+
+\paragraph{What we could not explain.} The ordering of the four working arms is
+not accounted for by any mechanism we tested. Six candidates were probed and all
+six failed, two of them \emph{inverted}---per-state ranking fidelity against a
+common-random-number counterfactual put \cdag{} first ($\rho=+0.681$, top-1
+agreement $83.3\%$) against \cflow's $+0.435$ and $33.3\%$, and credit
+signal-to-noise ratio likewise favoured the losing arm.
+Appendix~\ref{app:falsified} reports each probe with the measurement that
+rejected it. The only variable that separates working from failing arms without
+overlap is final policy entropy ($0.27$--$0.56$ against $0.13$--$0.15$), and
 whether that is cause or symptom is untested; the decisive experiment is an
-entropy-bonus intervention. All four probes were static and used a random policy,
-which may simply be the wrong regime. Decide before submission whether to
-present this as an open question (honest, and defensible) or to run the
-intervention.}
+entropy-bonus intervention, which we have not run. We also note that all six
+probes were static and used a random policy, which may be the wrong regime for
+the question. We therefore state the ordering as an open question. What the
+ladder does support---and all it needs to support---is the negative claim in
+Section~\ref{sec:normneeded}: exactness is not what separates the working
+estimators from the failing one, and boundedness is.
 
 \subsection{Scaling}
 \label{sec:scaling}
@@ -1640,11 +1673,15 @@ Table~\ref{tab:family} is the same algorithm and the implementation choice is
 irrelevant.
 
 \paragraph{What the ablation ladder teaches.}
-Fidelity to a causal estimand is not the design objective; bounded error is. The
-precedent is GAE itself, whose $\lambda<1$ settings are biased and universally
-preferred over the unbiased $\lambda=1$ case. Our unbiased member performs worse
-than three biased ones, and the one variant that fails catastrophically is the
-one whose error is \emph{unbounded}.
+Exactness is not the design objective; bounded error is. The precedent is GAE
+itself, whose $\lambda<1$ settings are biased and universally preferred over the
+unbiased $\lambda=1$ case. Our unbiased member performs worse than three biased
+ones, and the one variant that fails catastrophically is the one whose error is
+\emph{unbounded}. We put this negatively on purpose: it says what does
+\emph{not} determine the outcome. Which of the bounded variants to prefer is not
+something our evidence settles, and Section~\ref{sec:exactness} records the six
+mechanisms we tested and rejected rather than offering a seventh we cannot
+support.
 
 \paragraph{Limitations.}
 Five problem configurations drawn from three environment families.
@@ -1967,9 +2004,9 @@ collected graphs. No arm requires forked simulation.
 \section{Falsified mechanisms}
 \label{app:falsified}
 
-Section~\ref{sec:exp} reports that fidelity to the causal estimand does not
-predict learning performance, and offers only a partial structural account of
-why. That claim would be easy to dress up with a plausible mechanism. We
+Section~\ref{sec:exactness} reports that computing the causal estimand exactly
+does not pay, and offers only a partial structural account of why the remaining
+variants order as they do. That claim would be easy to dress up with a plausible mechanism. We
 instead record every mechanism we tested and rejected, with the measurement
 that rejected it, so a reader can judge how much of the ordering is explained
 and how much is not. All six were pre-registered in the sense that the
