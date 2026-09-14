@@ -26,7 +26,33 @@ LEN = 20
 EPOCHS = 40
 EPISODES = 8
 SEEDS = 12
-METHODS = ("ppo", "ccf")
+for _a in sys.argv[1:]:
+    if _a.startswith('seeds='):
+        SEEDS = int(_a.split('=', 1)[1])
+# mc_q added 2026-08-06: the LINEAGE ABLATION, missing here as it was on
+# the ncopies sweep. ccf beats ppo by +6.46 (+9.9%, 9W/2L, p=.0048) on
+# multisite_bf, but ppo is not the control that isolates the lineage --
+# mc_q is the same SMDP return-to-go estimator without the lineage test.
+# On ncopies at N=8 that ablation showed mc_q == ppo (+0.12, p=.97) with
+# ccf carrying the entire +14.97, so the prior is that the multisite
+# margin is the decomposition too -- but at K_realized=12 that is an
+# inference, not a measurement. Resumable by cell file: the stored
+# ppo/ccf cells are untouched.
+# cgae_cflow added 2026-08-12: the v3 headline method. This is the paper's
+# ONLY realistic environment and cgae_cflow had never been run here, so
+# "safe everywhere we tried" excluded the realism argument. ccf is the right
+# comparison target -- it is the anchor this env established (0.519 vs ppo
+# 0.146 at 12 seeds) and cgae_cflow already beats it on ncopies N=4 (+0.199,
+# p=0.0032). Note allow_postpone=False here, so none of the postpone
+# pathologies (row-sum inflation, ownership capture) can arise.
+# Resumable by cell file: stored ppo/ccf/mc_q cells are untouched.
+# cgae added 2026-08-12: the arm that actually rivals cgae_cflow. On ncopies
+# N=4 the two are a DEAD HEAT (+0.019, 10W/9L, p=0.691) while cgae_cflow beats
+# ccf by +0.199 (p=0.0032) -- so ccf is a much lower bar than cgae, and until
+# cgae runs here the convex-normalization contribution is not load-bearing on
+# the realistic env. Queued to start after the cgae_cflow arm completes.
+METHODS = ("ppo", "ccf", "mc_q", "cgae_cflow", "cgae")
+CAUSAL = ("ccf", "mc_q", "cgae_cflow", "cgae")
 OUT_DIR = "suite_results_multisite_bf"   # brute-force run (30ep/6seed kept separately)
 
 
@@ -57,8 +83,8 @@ def _args(method, seed, cfg, logdir):
         "test_in_train": True, "test_freq": cfg.test_freq, "test_episodes": 12,
         "save_freq": 10**9, "name": f"{method}__s{seed}", "datetag": False, "logdir": logdir,
     }
-    if method == "ccf":
-        a.update({"causal_rl": True, "causal_scheme": "ccf"})
+    if method in CAUSAL:
+        a.update({"causal_rl": True, "causal_scheme": method})
     else:
         a.update({"causal_rl": False, "smdp_discount": True})
     return a
@@ -67,7 +93,7 @@ def _args(method, seed, cfg, logdir):
 def train_cell(method, seed, cfg, logdir, baselines):
     _set_seed(seed)
     env = make_multisite(N_SITES, N_LOCAL, N_FLEX,
-                         causal_rl=(method == "ccf"), allow_postpone=False)
+                         causal_rl=(method in CAUSAL), allow_postpone=False)
     saved = sys.argv; sys.argv = sys.argv[:1]
     t0 = time.time()
     try:

@@ -84,7 +84,8 @@ from envs import make_env, perfect_heuristic, HEURISTICS           # noqa: E402
 # choices. A method in here is forwarded as its own scheme; anything else runs
 # the default lrq credit. Mirrors gympn/train.py -- add new schemes to both.
 CAUSAL_SCHEMES = ("lrq", "lrq2", "lrq2c", "ccf", "s_ccf", "lrq3", "lqi", "lcv",
-                  "lva", "mc_q", "cf", "ls_hca", "alin", "cgae", "cgae_flow", "cfgae")
+                  "lva", "mc_q", "cf", "ls_hca", "alin", "cgae", "cgae_flow",
+                  "cgae_cflow", "cgae_cflow2", "cgae_cap", "cgae_dag", "cfgae")
 
 
 def _env_length(cfg: SuiteConfig, env_name: str) -> int:
@@ -137,7 +138,7 @@ def _net_kwargs(cfg: SuiteConfig) -> dict:
 
 
 def _make_args(env_name: str, method: str, seed: int, cfg: SuiteConfig, logdir_base: str) -> dict:
-    causal = method in ("lrq", "lrq2", "lrq3", "lqi", "lcv", "lva", "mc_q", "cf", "ls_hca", "ccf", "s_ccf", "alin", "cgae", "cgae_flow", "cfgae")
+    causal = method in ("lrq", "lrq2", "lrq3", "lqi", "lcv", "lva", "mc_q", "cf", "ls_hca", "ccf", "s_ccf", "alin", "cgae", "cgae_flow", "cgae_cflow", "cgae_cflow2", "cgae_cap", "cgae_dag", "cfgae")
     # lcv0: LCV's exact c_hat=0 limiting case -- plain SMDP-GAE PPO (the
     # STANDARD, non-causal_rl path with the per-sojourn discount switched on).
     # No lineage machinery at all, so it stays OUT of the causal_rl set above.
@@ -304,7 +305,7 @@ def _train_cell_worker(payload):
 
 def train_cell(env_name: str, method: str, seed: int, cfg: SuiteConfig, logdir_base: str) -> dict:
     _set_seed(seed)
-    causal = method in ("lrq", "lrq2", "lrq3", "lqi", "lcv", "lva", "mc_q", "cf", "ls_hca", "ccf", "s_ccf", "alin", "cgae", "cgae_flow", "cfgae")
+    causal = method in ("lrq", "lrq2", "lrq3", "lqi", "lcv", "lva", "mc_q", "cf", "ls_hca", "ccf", "s_ccf", "alin", "cgae", "cgae_flow", "cgae_cflow", "cgae_cflow2", "cgae_cap", "cgae_dag", "cfgae")
     # cfpl needs the ENV to record the causal trace (its forked branch returns
     # are lineage-restricted) while its AGENT stays on the standard SMDP-GAE
     # path -- _make_args keeps causal_rl False for it, and run_episode's

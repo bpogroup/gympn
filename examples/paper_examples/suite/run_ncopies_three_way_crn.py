@@ -40,7 +40,20 @@ CRN pre-check: the causal and non-causal envs must consume the global `random`
 stream identically or scenario alignment BETWEEN arms breaks. Measured with a
 scripted policy rather than assumed, and recorded in crn_precheck.json.
 
-Run: python run_ncopies_three_way_crn.py [workers]
+cgae_cflow added 2026-08-12 -- the discriminating run for it. cgae_flow's
+recursion multiplies the bootstrap by the ROW sum R(d) = sum_{s in succ(d)}
+w(d->s), which Proposition 3's predecessor-normalization leaves unconstrained;
+cgae_cflow normalizes over successors so the coefficient is exactly 1. The
+defect is mild here (|R-1| > 0.25 on 24.1% of N=4 decisions) and severe on s1
+(55.3%), which is why cgae_flow merely lagged here (0.888 vs cgae's 0.936) yet
+collapsed on s1 (0.166 vs ppo's 0.668). Fixing it restored s1 to 0.792, i.e.
+null against ppo (p=0.373) -- the negative control the paper needs. What that
+CANNOT show is whether cgae_cflow is actually the best method, because s1 is a
+null control by construction. This run is what decides that: N=4 is where the
+factorization has teeth (K=3.2 reward-bearing components) and where cgae leads
+at 0.936. Prediction is parity-to-mild-gain over cgae_flow, not a new win.
+
+Run: python run_ncopies_three_way_crn.py [workers] [seeds=N] [ns=2,4]
 """
 import json
 import os
@@ -59,9 +72,19 @@ from ncopies_env import make_n_copies, ncopies_heuristic  # noqa: E402
 NS = [1, 2, 4]
 SEEDS = 5
 LENGTH = 20
-METHODS = ("ppo", "ccf", "cgae", "cfgae", "cgae_flow")
+# cgae_cap added 2026-08-13: c = w/max(R,1). N=2 exposed that cgae_cflow and
+# cgae_flow fail on OPPOSITE tails of R -- flow inflates the critic when R>1
+# (s1: R>1 on 24.0%, collapses to 0.166), cflow renormalizes UP to 1 when R<1
+# (N=2: R<1 on 10.1%, 0.401 vs flow's 0.837, 4W/14L, p=0.0043). Capping only
+# ever divides, so the coefficient is min(R,1)<=1: contraction without
+# over-attribution.
+METHODS = ("ppo", "ccf", "cgae", "cfgae", "cgae_flow", "cgae_cflow", "cgae_cap")
 CAUSAL = {"ppo": False, "ccf": True, "cgae": True, "cfgae": True,
-          "cgae_flow": True}
+          "cgae_flow": True, "cgae_cflow": True, "cgae_cap": True,
+          # mc_q (the lineage ablation) and cgae_dag / cgae_cdag were reachable
+          # via run_n2_epochs.py's methods argument but absent from this dict,
+          # so train_cell raised KeyError. Both are causal schemes.
+          "mc_q": True, "cgae_dag": True, "cgae_cdag": True}
 EVAL_SEED = 555_000
 OUTDIR = "suite_results_ncopies_3way_crn"
 

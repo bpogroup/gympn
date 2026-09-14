@@ -190,6 +190,116 @@ def make_s3_stoch_mixed(causal_rl=False, allow_postpone=True,
 
 
 # --------------------------------------------------------------------------
+# s4) stochastic mixed-credit with stage-2 rework — the LS-HCA testbed
+# --------------------------------------------------------------------------
+def make_s4_stoch_mixed_rework(causal_rl=False, allow_postpone=True,
+                               causal_postpone_tokenflow=False):
+    """The stochastic-tier port of `envs.make_j_mixed_rework`.
+
+    Why it exists: `j_mixed_rework` is the only topology with BOTH properties
+    LS-HCA needs -- a nonempty PURE set (24.8% of credit mass) and real
+    contested signal (I(A;Z|X)=0.0303 nats/record, the highest measured) --
+    but it is a DETERMINISTIC grid env and `lrq2` saturates it completely
+    (5/5 seeds at the exact optimum 30.0, sd 0), leaving nothing measurable
+    above the baseline. That is the same saturation this whole tier exists to
+    escape (see the module docstring). The PURE/CONTESTED split is a property
+    of the net TOPOLOGY, so it survives the port intact -- verify with
+    `_diag_pure_scan.py`.
+
+    Topology, unchanged from j: two stages with DISJOINT 3-employee pools,
+    each paying a private reward (`done1`/`done2`), plus `doneFinal` joining
+    both stages of the same case. Disjoint pools are what keep the private
+    rewards out of the sibling decision's reachable set (PURE), while
+    `doneFinal` is shared (CONTESTED). Stage-2 rework returns the case to
+    `waiting2` -- its OWN queue, never `waiting1` -- so start2 still cannot
+    reach `done1` and the PURE split survives the loop.
+
+    Stochastic per tier convention: one case per time unit, both stage tasks
+    drawn independently U{0,1}, service = base(match 1 / cross 2 /
+    generalist 3) + U{0,1}.
+
+    Rework stays DETERMINISTIC in (task_type, employee) on purpose. The
+    simulator calls `behavior` and `reward_function` in separate invocations,
+    so a coin flip inside either would be drawn twice and the two would
+    disagree -- a reworked firing could still pay out. Keying both off the
+    same deterministic predicate makes them agree by construction; the
+    stochasticity that unsaturates the env comes from arrivals, types and
+    service times instead.
+
+    Success at stage 2 is `code_employee % 2 == task_type`, deliberately the
+    same matching rule `_tier_heuristic(n_types=2)` uses, so the anchor and
+    the reward structure agree (the generalist, code 2, therefore succeeds on
+    type 0 but slowly). A random policy fails ~50% of stage-2 attempts and
+    pays the rework, so assignment quality drives the return.
+
+    Suggested horizon 25 (thread via SuiteConfig.env_length; the default 10
+    is far too short for this tier).
+    """
+    ag = GymProblem(allow_postpone=allow_postpone, causal_rl=causal_rl,
+                    causal_postpone_tokenflow=causal_postpone_tokenflow)
+    arrival = ag.add_var("arrival", var_attributes=['task_type', 'case_id'])
+    waiting1 = ag.add_var("waiting1", var_attributes=['task_type', 'case_id'])
+    busy1 = ag.add_var("busy1", var_attributes=['task_type', 'code_employee', 'case_id'])
+    waiting2 = ag.add_var("waiting2", var_attributes=['task_type', 'case_id'])
+    busy2 = ag.add_var("busy2", var_attributes=['task_type', 'code_employee', 'case_id'])
+    completed1 = ag.add_var("completed1", var_attributes=['task_type', 'case_id'])
+    completed2 = ag.add_var("completed2", var_attributes=['task_type', 'case_id'])
+    arrival.put({'task_type': 0, 'case_id': 0})
+    employee1 = ag.add_var("employee1", var_attributes=['code_employee'])
+    employee2 = ag.add_var("employee2", var_attributes=['code_employee'])
+    for eid in range(3):
+        employee1.put({'code_employee': eid})
+        employee2.put({'code_employee': eid})
+    # warm start: one case already in flight on both stages
+    waiting1.put({'task_type': 0, 'case_id': 0})
+    waiting2.put({'task_type': 1, 'case_id': 0})
+
+    def arrive(a):
+        # One case per time unit, spawning BOTH stage tasks under a shared
+        # case_id so doneFinal's join always has a partner to pair with.
+        cid = a['case_id'] + 1
+        return [SimToken({'task_type': 0, 'case_id': cid}, delay=1),
+                SimToken({'task_type': random.randint(0, 1), 'case_id': cid}),
+                SimToken({'task_type': random.randint(0, 1), 'case_id': cid})]
+
+    ag.add_event([arrival], [arrival, waiting1, waiting2], arrive, name='arrive')
+
+    def start(c, r):
+        if c['task_type'] == r['code_employee']:
+            base = 1
+        elif r['code_employee'] < 2:
+            base = 2
+        else:
+            base = 3  # generalist
+        return [SimToken((c, r), delay=base + random.randint(0, 1))]
+
+    # stage 1: no rework, private reward
+    ag.add_action([waiting1, employee1], [busy1], behavior=start, name="start1")
+    ag.add_event([busy1], [employee1, completed1],
+                 lambda b: [SimToken(b[-1]), SimToken(b[0])], name='done1',
+                 reward_function=lambda x: 1)
+
+    # stage 2: rework back into its OWN queue, private reward on success only
+    ag.add_action([waiting2, employee2], [busy2], behavior=start, name="start2")
+
+    def _s2_ok(b):
+        return (b[-1]['code_employee'] % 2) == b[0]['task_type']
+
+    def complete2(b):
+        if _s2_ok(b):
+            return [SimToken(b[-1]), None, SimToken(b[0])]   # resource, -, done
+        return [SimToken(b[-1]), SimToken(b[0]), None]       # resource, rework, -
+
+    ag.add_event([busy2], [employee2, waiting2, completed2], complete2,
+                 name='done2', reward_function=lambda b: 1 if _s2_ok(b) else 0)
+
+    ag.add_event([completed1, completed2], [], behavior=lambda x, y: [],
+                 name='doneFinal', reward_function=lambda x, y: 1,
+                 guard=lambda e1, e2: e1['case_id'] == e2['case_id'])
+    return ag
+
+
+# --------------------------------------------------------------------------
 # Tier heuristics: strong myopic anchors (NOT optima; normalized > 1 is
 # possible and means "the policy beat the myopic rule").
 # --------------------------------------------------------------------------
@@ -242,14 +352,22 @@ s2_heuristic = _tier_heuristic(["assign"], n_types=3)
 s3_heuristic = _tier_heuristic(["start_L2", "start_L1", "start_S"], n_types=1)
 
 
+# s4: same matching rule as the stage-2 success predicate (code % 2 ==
+# task_type), and stage 2 first — finishing WIP is what pays doneFinal, and a
+# reworked case re-queues at stage 2, so leaving it behind starves the join.
+s4_heuristic = _tier_heuristic(["start2", "start1"], n_types=2)
+
+
 STOCH_BUILDERS = {
     "s1_stoch_sequence": make_s1_stoch_sequence,
     "s2_stoch_scaled": make_s2_stoch_scaled,
     "s3_stoch_mixed": make_s3_stoch_mixed,
+    "s4_stoch_mixed_rework": make_s4_stoch_mixed_rework,
 }
 
 STOCH_HEURISTICS = {
     "s1_stoch_sequence": s1_heuristic,
     "s2_stoch_scaled": s2_heuristic,
     "s3_stoch_mixed": s3_heuristic,
+    "s4_stoch_mixed_rework": s4_heuristic,
 }

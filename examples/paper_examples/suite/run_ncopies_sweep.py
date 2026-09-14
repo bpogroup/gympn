@@ -24,9 +24,17 @@ from ncopies_env import (make_n_copies, ncopies_heuristic,  # noqa: E402
                          make_n_copies_hard, ncopies_hard_heuristic)
 
 NS = [1, 2, 4, 8]
-SEEDS = 3
+SEEDS = 12
 LENGTH = 20
-METHODS = ("ppo", "ccf")
+# mc_q added 2026-08-06: the LINEAGE ABLATION. ccf beats ppo here by
+# +14.97 at N=8 (p=.0001) but ppo is not the control that isolates the
+# lineage -- mc_q is the same SMDP return-to-go estimator with the
+# lineage test removed, and it was never run on this sweep. The only
+# env where both exist (spectrum ncopies4, n=8) puts ccf just +3.93
+# over mc_q at p=.13, so how much of the headline margin is the
+# decomposition rather than the return-to-go machinery is UNKNOWN.
+# Resumable by cell file, so the stored ppo/ccf cells are untouched.
+METHODS = ("ppo", "ccf", "mc_q")
 
 # selected by mode (set in main): base match/cross vs hard 3-type/2-employee
 HARD = False
@@ -68,8 +76,8 @@ def _args(method, seed, cfg, logdir):
         "save_freq": 1_000_000, "name": f"{method}__s{seed}",
         "datetag": False, "logdir": logdir,
     }
-    if method == "ccf":
-        a.update({"causal_rl": True, "causal_scheme": "ccf"})
+    if method in ("ccf", "mc_q"):
+        a.update({"causal_rl": True, "causal_scheme": method})
     else:  # ppo: discount-matched baseline (SMDP-GAE at the same beta)
         a.update({"causal_rl": False, "smdp_discount": True})
     return a
@@ -77,7 +85,7 @@ def _args(method, seed, cfg, logdir):
 
 def train_cell(n, method, seed, cfg, logdir, baselines):
     _set_seed(seed)
-    env = MAKE(n, causal_rl=(method == "ccf"), allow_postpone=False)
+    env = MAKE(n, causal_rl=(method in ("ccf", "mc_q")), allow_postpone=False)
     args = _args(method, seed, cfg, logdir)
     saved = sys.argv; sys.argv = sys.argv[:1]
     t0 = time.time()

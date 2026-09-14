@@ -5,11 +5,14 @@ fresh `GymProblem`, parameterized by `causal_rl` and `allow_postpone` so the sam
 topology can be trained under either method and evaluated with or without the
 postpone action.
 
-The 8 environments form a 2x4 grid:
+The first 8 environments form a 2x4 grid:
     {sequence, parallel, loop, exclusive-choice} x {joint, disjoint}
 "joint" = the two stages/queues share a single resource pool; "disjoint" = each
-stage has its own pool. All use the same `perfect_heuristic` (assign task-type t
-to the employee that is fastest for it: type 0 -> employee 0, type 1 -> employee 1).
+stage has its own pool. A 9th, `i_mixed_credit`, sits outside the grid: it is
+the one topology whose reward-types split non-degenerately into LS-HCA's PURE
+and CONTESTED sets (see its own comment block). All use the same
+`perfect_heuristic` (assign task-type t to the employee that is fastest for it:
+type 0 -> employee 0, type 1 -> employee 1).
 """
 from simpn.simulator import SimToken
 from gympn.simulator import GymProblem
@@ -319,6 +322,163 @@ def make_h_exclusive_choice_disjoint(causal_rl=False, allow_postpone=True, causa
     return ag
 
 
+# ---------------------------------------------------------------------------
+# i) mixed credit — the only env in the suite where LS-HCA's PURE/CONTESTED
+#    split is non-degenerate.
+#
+# Motivation (`_diag_pure_scan.py`): every other env sits at a trivial corner
+# of `_pure_contested_reward_types`. Nine are 100% CONTESTED (PURE=set(), so
+# the exact lineage term is identically zero and LS-HCA reduces to plain HCA);
+# `h_exclusive_choice_disjoint` and `s2_stoch_scaled` are 100% PURE (nothing
+# left for the hindsight correction, so LS-HCA reduces to exact lineage credit,
+# which lrq2 already computes). LS-HCA's actual premise -- lineage credits part
+# of the return exactly, hindsight only patches the shared remainder -- was
+# therefore never exercised by any env in the suite.
+#
+# This is `d_parallel_disjoint` with one change: `done1`/`done2` now carry
+# their own reward. That is enough, because reachability decides the split:
+#   reaches(start1) = {done1, doneFinal},  reaches(start2) = {done2, doneFinal}
+#   => PURE(start1) = {done1},  CONTESTED(start1) = {doneFinal}
+# The private rewards are unreachable from the sibling decision (disjoint
+# pools, so the reachability walk cannot cross over via a shared resource
+# hand-back), while `doneFinal` needs a completed token from BOTH stages of
+# the same case and so is genuinely shared. Per case the mass splits 2:1
+# pure:contested (1 + 1 private, 1 shared), all rewards 1 as everywhere else
+# in the grid.
+#
+# There is deliberately no "joint" counterpart: sharing one pool puts every
+# reward-type in reach of both decisions (exactly why `c_parallel_joint` is
+# all-CONTESTED), so disjoint pools are a precondition for a nonempty PURE
+# set, not a free variation.
+# ---------------------------------------------------------------------------
+def make_i_mixed_credit(causal_rl=False, allow_postpone=True, causal_postpone_tokenflow=False):
+    ag = GymProblem(allow_postpone=allow_postpone, causal_rl=causal_rl,
+                    causal_postpone_tokenflow=causal_postpone_tokenflow)
+    arrival = ag.add_var("arrival", var_attributes=['task_type', 'case_id'])
+    waiting1 = ag.add_var("waiting1", var_attributes=['task_type', 'case_id'])
+    busy1 = ag.add_var("busy1", var_attributes=['task_type', 'code_employee', 'case_id'])
+    waiting2 = ag.add_var("waiting2", var_attributes=['task_type', 'case_id'])
+    busy2 = ag.add_var("busy2", var_attributes=['task_type', 'code_employee', 'case_id'])
+    completed1 = ag.add_var("completed1", var_attributes=['task_type', 'case_id'])
+    completed2 = ag.add_var("completed2", var_attributes=['task_type', 'case_id'])
+    arrival.put({'task_type': 0, 'case_id': 0})
+    arrival.put({'task_type': 1, 'case_id': 0})
+    employee1 = _pool(ag, "employee1")
+    employee2 = _pool(ag, "employee2")
+
+    def arrive(a):
+        a['case_id'] += 1
+        if a['task_type'] == 0:
+            return [SimToken(a, delay=1), SimToken(a), None]
+        return [SimToken(a, delay=1), None, SimToken(a)]
+
+    ag.add_event([arrival], [arrival, waiting1, waiting2], arrive)
+    ag.add_action([waiting1, employee1], [busy1], behavior=_start, name="start1")
+    ag.add_event([busy1], [employee1, completed1],
+                 lambda b: [SimToken(b[-1]), SimToken(b[0])], name='done1',
+                 reward_function=lambda x: 1)
+    ag.add_action([waiting2, employee2], [busy2], behavior=_start, name="start2")
+    ag.add_event([busy2], [employee2, completed2],
+                 lambda b: [SimToken(b[-1]), SimToken(b[0])], name='done2',
+                 reward_function=lambda x: 1)
+    ag.add_event([completed1, completed2], [], behavior=lambda x, y: [], name='doneFinal',
+                 reward_function=lambda x, y: 1, guard=lambda e1, e2: e1['case_id'] == e2['case_id'])
+    return ag
+
+
+# ---------------------------------------------------------------------------
+# j) mixed credit + stage-2 rework — PURE floor AND a contested reward whose
+#    lineage the ACTION actually moves. The env LS-HCA was designed for.
+#
+# Motivation (`_diag_ls_hca_step0.py` across four envs). Two things must hold
+# at once for LS-HCA to be more than either of its degenerate limits, and no
+# existing env had both:
+#   - a nonempty PURE set, so the exact lineage term carries real mass;
+#     `i_mixed_credit` has this (21%), the rest of the suite does not.
+#   - conditional signal I(A;Z|X) in the CONTESTED part, so the hindsight
+#     correction has something to say; the rework loops `e_loop_joint` /
+#     `f_loop_disjoint` have this (0.019/0.020 nats/record, 27-29x
+#     `i_mixed_credit`'s 0.00069), and they have PURE=set().
+# The two were mutually exclusive for a structural reason: a rework loop makes
+# every reward mutually reachable, so reachability-based PURE is impossible in
+# a loop.
+#
+# The way out is to CONFINE the loop to one stage. This is `i_mixed_credit`
+# with stage-2 rework that returns the case to `waiting2` -- its own queue --
+# rather than to `waiting1`. Then start2's reachable set stays
+# {done2, doneFinal}: the loop cycles through waiting2/employee2/busy2, none of
+# which lead to done1. So both private rewards remain PURE exactly as in
+# `i_mixed_credit`, while whether a given start2 decision ends up in
+# `doneFinal`'s lineage now depends on whether that attempt succeeded -- which
+# is a function of the ACTION, not just of which case was touched. (That
+# case-identity determinism is precisely why `i_mixed_credit`'s contested
+# signal is ~0: `doneFinal` is a join on case_id, so a decision's lineage
+# membership there is fixed before the action is chosen.)
+#
+# Stage 2 is the only stage with rework, mirroring `e`/`f`. `done2` rewards
+# only a SUCCESSFUL completion, so a rework firing hands the resource back and
+# returns the case without paying out; it remains a reward-type either way,
+# which is what keeps it in the PURE classification. The reworked token keeps
+# its case_id so `doneFinal`'s join still pairs the two streams correctly.
+# `perfect_heuristic` never triggers rework (it assigns type-1 tasks to
+# employee 1), so the optimum is clean while a random policy reworks often --
+# which should also widen the headroom this env inherits from
+# `d_parallel_disjoint`.
+#
+# Whether the contested signal actually materializes here is an empirical
+# question, not a claim: measure it with `_diag_ls_hca_step0.py j_mixed_rework`.
+# ---------------------------------------------------------------------------
+def _stage2_ok(b):
+    """Stage-2 assignment is correct iff the task went to its fast employee."""
+    return ((b[0]['task_type'] == 0 and b[1]['code_employee'] == 0) or
+            (b[0]['task_type'] == 1 and b[1]['code_employee'] == 1))
+
+
+def make_j_mixed_rework(causal_rl=False, allow_postpone=True, causal_postpone_tokenflow=False):
+    ag = GymProblem(allow_postpone=allow_postpone, causal_rl=causal_rl,
+                    causal_postpone_tokenflow=causal_postpone_tokenflow)
+    arrival = ag.add_var("arrival", var_attributes=['task_type', 'case_id'])
+    waiting1 = ag.add_var("waiting1", var_attributes=['task_type', 'case_id'])
+    busy1 = ag.add_var("busy1", var_attributes=['task_type', 'code_employee', 'case_id'])
+    waiting2 = ag.add_var("waiting2", var_attributes=['task_type', 'case_id'])
+    busy2 = ag.add_var("busy2", var_attributes=['task_type', 'code_employee', 'case_id'])
+    completed1 = ag.add_var("completed1", var_attributes=['task_type', 'case_id'])
+    completed2 = ag.add_var("completed2", var_attributes=['task_type', 'case_id'])
+    arrival.put({'task_type': 0, 'case_id': 0})
+    arrival.put({'task_type': 1, 'case_id': 0})
+    employee1 = _pool(ag, "employee1")
+    employee2 = _pool(ag, "employee2")
+
+    def arrive(a):
+        a['case_id'] += 1
+        if a['task_type'] == 0:
+            return [SimToken(a, delay=1), SimToken(a), None]
+        return [SimToken(a, delay=1), None, SimToken(a)]
+
+    ag.add_event([arrival], [arrival, waiting1, waiting2], arrive)
+
+    # stage 1: no rework, private reward
+    ag.add_action([waiting1, employee1], [busy1], behavior=_start, name="start1")
+    ag.add_event([busy1], [employee1, completed1],
+                 lambda b: [SimToken(b[-1]), SimToken(b[0])], name='done1',
+                 reward_function=lambda x: 1)
+
+    # stage 2: rework back into its OWN queue, private reward only on success
+    ag.add_action([waiting2, employee2], [busy2], behavior=_start, name="start2")
+
+    def complete2(b):
+        if _stage2_ok(b):
+            return [SimToken(b[-1]), None, SimToken(b[0])]   # resource, -, completed2
+        return [SimToken(b[-1]), SimToken(b[0]), None]       # resource, rework, -
+
+    ag.add_event([busy2], [employee2, waiting2, completed2], complete2, name='done2',
+                 reward_function=lambda b: 1 if _stage2_ok(b) else 0)
+
+    ag.add_event([completed1, completed2], [], behavior=lambda x, y: [], name='doneFinal',
+                 reward_function=lambda x, y: 1, guard=lambda e1, e2: e1['case_id'] == e2['case_id'])
+    return ag
+
+
 ENV_BUILDERS = {
     "a_sequence_joint": make_a_sequence_joint,
     "b_sequence_disjoint": make_b_sequence_disjoint,
@@ -328,6 +488,8 @@ ENV_BUILDERS = {
     "f_loop_disjoint": make_f_loop_disjoint,
     "g_exclusive_choice_joint": make_g_exclusive_choice_joint,
     "h_exclusive_choice_disjoint": make_h_exclusive_choice_disjoint,
+    "i_mixed_credit": make_i_mixed_credit,
+    "j_mixed_rework": make_j_mixed_rework,
 }
 
 

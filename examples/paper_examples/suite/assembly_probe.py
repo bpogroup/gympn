@@ -204,6 +204,33 @@ def make_independent(causal_rl=True, ra=5.0, rb=7.0):
     return ag
 
 
+def make_two_chains(causal_rl=True, r_hi=5.0, r_lo=2.0, r_b=4.0):
+    """Two INDEPENDENT decision-chains sharing an ABUNDANT resource type (2 units,
+    no contention). Chain A's decision picks a high- or low-reward task (both use
+    the shared resource); chain B always runs (reward r_b, action-independent of A).
+    Tests the abundant-resource RCPSP regime: does ccf factor (drop chain B's r_b)
+    while staying unbiased, and is s_ccf merely more conservative (keeps r_b)?"""
+    ag = GymProblem(allow_postpone=False, causal_rl=causal_rl)
+    R = ag.add_var("R", var_attributes=['u']); R.put({'u': 1}); R.put({'u': 1})
+    for nm in ("partA", "partB", "busyA_hi", "busyA_lo", "busyB", "done"):
+        ag.add_var(nm, var_attributes=['id'])
+    P = {p._id: p for p in ag.places}
+    P['partA'].put({'id': 1}); P['partB'].put({'id': 2})
+    ag.add_action([P['partA'], R], [P['busyA_hi']],
+                  behavior=lambda c, r: [SimToken((c, r), delay=1)], name='A_hi')
+    ag.add_action([P['partA'], R], [P['busyA_lo']],
+                  behavior=lambda c, r: [SimToken((c, r), delay=1)], name='A_lo')
+    ag.add_event([P['busyA_hi']], [P['done'], R], lambda b: [SimToken(b[0]), SimToken(b[1])],
+                 name='cA_hi', reward_function=lambda b: r_hi)
+    ag.add_event([P['busyA_lo']], [P['done'], R], lambda b: [SimToken(b[0]), SimToken(b[1])],
+                 name='cA_lo', reward_function=lambda b: r_lo)
+    ag.add_action([P['partB'], R], [P['busyB']],
+                  behavior=lambda c, r: [SimToken((c, r), delay=1)], name='B_run')
+    ag.add_event([P['busyB']], [P['done'], R], lambda b: [SimToken(b[0]), SimToken(b[1])],
+                 name='cB', reward_function=lambda b: r_b)
+    return ag
+
+
 def run_forced(choice_name, make_fn=make_assembly, beta=0.0, length=12, **rw):
     """Run one trajectory forcing d1 = choice_name; return (return, credits, forced)."""
     gympn.seed_everything(0)
@@ -284,3 +311,18 @@ if __name__ == "__main__":
     for s in ('mc_q', 'lrq', 'ccf', 's_ccf'):
         print(f"    {s:>5}: {np.round(c[s], 2).tolist()}   "
               f"(mc_q gives each decision both rewards=12; factoring drops the other's)")
+
+    # Motif 4: abundant SHARED resource (RCPSP regime). Chain A's decision (hi vs lo)
+    # is independent of chain B's r_b. Is ccf's finer factoring unbiased, and is
+    # s_ccf merely more conservative (keeps r_b)?
+    print("\n=== M4 abundant shared resource (RCPSP): ccf unbiased+finer vs s_ccf conservative? ===")
+    tH, cH, _ = run_forced('A_hi', make_two_chains, beta=0.0, r_hi=5, r_lo=2, r_b=4)
+    tL, cL, _ = run_forced('A_lo', make_two_chains, beta=0.0, r_hi=5, r_lo=2, r_b=4)
+    ref = float(cH['mc_q'][0] - cL['mc_q'][0])   # unbiased reference (true = r_hi-r_lo = 3)
+    print(f"    dA credit(hi)/credit(lo) and (hi-lo) [true={ref:+.1f}; factoring drops r_b=4]:")
+    for s in ('mc_q', 'lrq', 'ccf', 's_ccf', 'lib_s_ccf'):
+        dH, dL = float(cH[s][0]), float(cL[s][0])
+        diff = dH - dL
+        unb = "unbiased" if abs(diff - ref) < 1e-6 else "BIASED"
+        fac = "factors(drops r_b)" if dH < 5 - 1e-6 else "keeps r_b (conservative)"
+        print(f"    {s:>9}: hi={dH:.1f} lo={dL:.1f} (hi-lo)={diff:+.1f} [{unb}; {fac}]")
