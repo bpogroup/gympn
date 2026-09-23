@@ -31,6 +31,11 @@ import random as _random
 import numpy as np
 import torch
 
+try:
+    from simpn.simulator import SimVarTime
+except Exception:  # pragma: no cover
+    SimVarTime = ()  # type: ignore
+
 _TRACE_ERR = (
     "[cf] lineage mode is on but the env is not recording a causal trace. "
     "The ENV must be built with causal_rl=True (trace recording is gated "
@@ -341,16 +346,45 @@ def _lineage_suffix(agent, env, obs, first_idx, t0, beta, lookahead):
     return _lineage_return(ct, roots, root_rec_id, t0, beta)
 
 
+def _freeze(v):
+    """Recursively convert a token value into a hashable key."""
+    if isinstance(v, dict):
+        return tuple(sorted((k, _freeze(x)) for k, x in v.items()))
+    if isinstance(v, (list, tuple)):
+        return tuple(_freeze(x) for x in v)
+    return v
+
+
+def state_fingerprint(pn):
+    """Canonical identity of a PN state for coupling truncation: the multiset of
+    (place_id, frozen token value, token time) over the marking, plus the clock.
+
+    - Symmetry-canonical: interchangeable same-colour tokens collapse (the
+      value key, not a unique id), so reorderings of independent firings that
+      reach the same marking hash equal -- that is the coupling.
+    - Includes token TIMES (in-flight delays) and the CLOCK, so two states hash
+      equal only when their futures AND their discount-to-t0 are identical.
+    """
+    items = []
+    for p in getattr(pn, "places", []):
+        if SimVarTime and isinstance(p, SimVarTime):
+            continue  # the clock is captured separately below
+        pid = getattr(p, "_id", None)
+        for tok in getattr(p, "marking", []):
+            items.append((pid, _freeze(getattr(tok, "value", tok)),
+                          getattr(tok, "time", None)))
+    items.sort(key=repr)
+    return (tuple(items), float(getattr(pn, "clock", 0.0)))
+
+
 def _paired_coupled_suffixes(agent, env, snap_pn, snap_i, action, alt, t0, beta,
                              lookahead, value_tail=True):
     """CRN-paired rollout of BOTH branches (``action`` vs ``alt``) in
     LOCKSTEP, one step each per round, truncating BOTH the instant they
     reconverge to the same PN state.
 
-    "Same state" = ``gympn.mcts_planner.state_fingerprint``: canonical
-    (symmetry-collapsed) marking + clock — the identical machinery the MCTS
-    planner already uses for its coupling-truncation transposition table
-    (``AEPN_NATIVE_LEARNING.md`` §3.2), reused here rather than reinvented.
+    "Same state" = ``state_fingerprint`` (this module): canonical
+    (symmetry-collapsed) marking + clock.
 
     Once two branches share a state, E[future reward | state] is identical
     for both — it is the same state — so instead of continuing to simulate
@@ -383,8 +417,6 @@ def _paired_coupled_suffixes(agent, env, snap_pn, snap_i, action, alt, t0, beta,
     immediately after both branches' first, distinguishing action), or
     ``None`` if the branches never coupled before both were finished.
     """
-    from gympn.mcts_planner import state_fingerprint
-
     def _fire_first(idx):
         env.pn = copy.deepcopy(snap_pn)
         env.i = snap_i

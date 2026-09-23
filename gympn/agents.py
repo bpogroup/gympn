@@ -675,15 +675,6 @@ class Agent:
             return_history = self.run_episodes(env, episodes=episodes, max_episode_length=max_episode_length,
                                                store=True, num_workers=num_workers)
 
-            # === RUDDER: fit the return-predicting LSTM on this epoch's
-            # trajectories (added per-episode in run_episode) ===
-            if getattr(self, 'rudder_agent', None) is not None and self.rudder_agent.should_train():
-                rudder_loss = self.rudder_agent.train(num_epochs=5)
-                if wandb_logger and i % 10 == 0:
-                    wandb_logger.log({'rudder/loss': rudder_loss}, step=i)
-                self.rudder_agent.step_epoch()
-                get_logger().info(f"  [RUDDER] Training loss: {rudder_loss:.4f}")
-
             # Standard per-batch advantage normalization (default ON via
             # self.normalize_advantages). Needed to learn low-margin tasks; the
             # drift it can cause near convergence is handled by best-checkpoint
@@ -967,11 +958,6 @@ class Agent:
         times_batch = []
         value_batch_size = 8  # Compute values for 8 states at a time
 
-        # RUDDER baseline: per-step (feature, reward) sequence for the LSTM
-        # return predictor; consumed at episode end.
-        rudder_on = getattr(self, 'rudder_agent', None) is not None and buffer is not None
-        rudder_feats, rudder_rewards = [], []
-
         qoff_batch = []
         qoff_on = getattr(self, 'qoff_model', None) is not None and buffer is not None
 
@@ -1161,8 +1147,6 @@ class Agent:
             logprobs_batch.append(logprob)
             logpis_batch.append(logpis)
             times_batch.append(decision_time)
-            if rudder_on:
-                rudder_feats.append(self._rudder_features(state))
             if qoff_on:
                 # Rollout-time auxiliary prediction (old parameters, frozen at
                 # collection): q_off(s, a_taken) for lrq3/lqi; the state-only
@@ -1204,8 +1188,6 @@ class Agent:
                 reward = reward + self.phi_coef * (disc * phi_next - phi_s)
 
             rewards_batch.append(reward)
-            if rudder_on:
-                rudder_rewards.append(float(reward))
 
             episode_length += 1
 
@@ -1237,26 +1219,7 @@ class Agent:
             state = next_state
 
         if buffer is not None:
-            if rudder_on and rudder_feats:
-                # RUDDER baseline: add this episode to the LSTM's training set,
-                # redistribute its rewards with the CURRENT predictor (early
-                # epochs => near-uniform, standard RUDDER warm-up behaviour;
-                # 'contribution' conserves the episode return exactly), and
-                # feed the redistributed rewards through the ORDINARY GAE path.
-                feats_np = np.asarray(rudder_feats, dtype=np.float32)
-                rews_np = np.asarray(rudder_rewards, dtype=np.float32)
-                self.rudder_agent.add_trajectory(
-                    states=feats_np, actions=None, rewards=rews_np,
-                    episode_return=float(rews_np.sum()))
-                try:
-                    red = self.rudder_agent.redistribute_rewards(feats_np, rews_np)
-                    buffer.finish(credits=[float(x) for x in red],
-                                  mode="replace_rewards")
-                except Exception as e:
-                    get_logger().warning(f"[RUDDER] redistribution failed ({e}); "
-                                         f"falling back to raw rewards")
-                    buffer.finish(credits=None)
-            elif (self.causal_rl and 'eligibility_credits' in info
+            if (self.causal_rl and 'eligibility_credits' in info
                   and info['eligibility_credits'] is not None):
                 # NOTE the self.causal_rl guard: the ENV may record causal
                 # traces while the AGENT stays on the standard SMDP-GAE path
@@ -2708,11 +2671,9 @@ class Agent:
         """Featurize a graph observation: the marking vector (token count per
         node type, in a fixed metadata order). Cheap, Markov-ish and
         constant-dim regardless of which places are currently occupied.
-        Originally built for the RUDDER LSTM (``node_types`` defaults to
-        ``self._rudder_node_types``, from ``rudder_config``); reused as-is
-        for LS-HCA's state-conditional hindsight model (``node_types=self.
-        _ls_hca_state_node_types``) -- same general, task-assignment-agnostic
-        featurization, no new machinery."""
+        Originally built for the (since removed) RUDDER baseline; used by
+        LS-HCA's state-conditional hindsight model (``node_types=self.
+        _ls_hca_state_node_types``)."""
         g = state['graph'] if isinstance(state, dict) and 'graph' in state else state
         if node_types is None:
             node_types = getattr(self, '_rudder_node_types', []) or []
@@ -3281,35 +3242,11 @@ class PPOAgent(Agent):
 
     """
 
-    def __init__(self, policy_network, method='clip', eps=0.2, c=0.01, rudder_config=None, **kwargs):
+    def __init__(self, policy_network, method='clip', eps=0.2, c=0.01, **kwargs):
         super().__init__(policy_network, **kwargs)
         self.method = method
         self.eps = eps
         self.c = c
-        self.rudder_config = rudder_config or {}
-        self.rudder_agent = None
-
-        # Initialize RUDDER if enabled
-        if self.rudder_config.get('enabled', False):
-            try:
-                from gympn.rudder import RUDDERAgent
-                self.rudder_agent = RUDDERAgent(
-                    state_dim=self.rudder_config.get('state_dim', 128),
-                    hidden_dim=self.rudder_config.get('hidden_dim', 256),
-                    learning_rate=self.rudder_config.get('learning_rate', 1e-3),
-                    device=self.rudder_config.get('device', 'cpu'),
-                    training_frequency=self.rudder_config.get('training_frequency', 1),
-                    redistribution_method=self.rudder_config.get('redistribution_method', 'contribution')
-                )
-                get_logger().info(
-                    f"[RUDDER] agent initialized with state_dim={self.rudder_config.get('state_dim', 128)}")
-            except ImportError:
-                get_logger().warning("[RUDDER] module not available, skipping initialization")
-                self.rudder_agent = None
-        # Fixed node-type order for the marking-vector featurization
-        # (must match state_dim; threaded by train.make_agent from metadata).
-        self._rudder_node_types = self.rudder_config.get('node_types', [])
-
         # Instantiate picklable loss classes
         if method == 'clip':
             self.policy_loss = PPOClipLoss(eps=eps)

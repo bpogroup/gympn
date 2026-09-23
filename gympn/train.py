@@ -50,10 +50,6 @@ from gympn.environment import AEPN_Env
 from gympn.networks import HeteroActor, HeteroCritic, HeteroQOff
 from gympn.agents import PGAgent, PPOAgent
 
-from gympn.dcl_planner import PlannerConfig
-from gympn.agents_dcl import DCLAgent
-from gympn.mcts_planner import MCTSConfig
-from gympn.agents_mcts import MCTSAgent
 
 
 #train = True
@@ -76,7 +72,7 @@ def make_parser():
     alg = parser.add_argument_group('algorithm', 'algorithm parameters')
 
     alg.add_argument('--algorithm',
-                     choices=['ppo-clip', 'ppo-penalty', 'pg', 'dcl', 'mcts'],
+                     choices=['ppo-clip', 'ppo-penalty', 'pg'],
                      default='ppo-clip',
                      help='training algorithm')
 
@@ -233,7 +229,7 @@ def make_parser():
                     default=False,
                     help='Lockstep the two forked branches (taken vs alternative) and stop '
                          'BOTH the instant they reconverge to the same PN state (canonical '
-                         'marking + clock, gympn.mcts_planner.state_fingerprint), simulating '
+                         'marking + clock, gympn.counterfactual.state_fingerprint), simulating '
                          'the shared remaining tail ONCE instead of twice -- exact for the '
                          'paired gap the preference is built from (identical additions cancel '
                          'exactly in a difference), no RNG-alignment assumption needed. '
@@ -451,95 +447,6 @@ def make_parser():
                          type=lambda x: str(x).lower() == 'true',
                          default=True,
                          help='whether to automatically open W&B dashboard')
-
-    dcl = parser.add_argument_group('dcl', 'DCL planner parameters')
-    dcl.add_argument('--dcl_horizon', type=int, default=5)
-    dcl.add_argument('--dcl_rollouts', type=int, default=32)
-    dcl.add_argument('--dcl_temp', type=float, default=1.0)
-    dcl.add_argument('--dcl_lineage',
-                     type=lambda x: str(x).lower() == 'true',
-                     default=False,
-                     help='Use the structurally lineage-aware planner (sharing across '
-                          'independent candidates, budget pruning, coupling truncation). '
-                          'Requires the ENV to record causal traces (causal_rl=True).')
-    dcl.add_argument('--dcl_lineage_tally',
-                     type=lambda x: str(x).lower() == 'true',
-                     default=False,
-                     help='Score candidates by their lineage-RESTRICTED return. Lower '
-                          'variance and it is what enables rollout sharing, but biased on '
-                          'foreclosure-dominated envs (X13: -8%% finals on s1). Safe on '
-                          'direct-dominated envs (grid/E1).')
-    dcl.add_argument('--dcl_lineage_share',
-                     type=lambda x: str(x).lower() == 'true', default=True)
-    dcl.add_argument('--dcl_lineage_prune',
-                     type=lambda x: str(x).lower() == 'true', default=True)
-    dcl.add_argument('--dcl_lineage_truncate',
-                     type=lambda x: str(x).lower() == 'true', default=True)
-
-    mcts = parser.add_argument_group('mcts', 'AlphaZero-over-AEPN (Direction A) parameters')
-    mcts.add_argument('--mcts_sims', type=int, default=64,
-                      help='PUCT simulations per decision')
-    mcts.add_argument('--mcts_c_puct', type=float, default=1.5)
-    mcts.add_argument('--mcts_lookahead', type=float, default=8.0,
-                      help='search horizon in CLOCK units; value net bootstraps beyond')
-    mcts.add_argument('--mcts_max_depth', type=int, default=64,
-                      help='hard recursion-depth safety cap (real horizon is --mcts_lookahead)')
-    mcts.add_argument('--mcts_temp', type=float, default=1.0,
-                      help='visit-count temperature for the distilled target')
-    mcts.add_argument('--mcts_coupling_truncate',
-                      type=lambda x: str(x).lower() == 'true', default=True,
-                      help='coupling truncation: share tree nodes by state fingerprint '
-                           '(branches that coincide are searched once)')
-    mcts.add_argument('--mcts_couple_min_visits', type=int, default=0,
-                      help='>0 also short-circuits re-entry into a resolved coupled state '
-                           '(returns cached value, saves env steps). Raise on stochastic envs.')
-    mcts.add_argument('--mcts_rollout_backup',
-                      type=lambda x: str(x).lower() == 'true', default=False,
-                      help='rollout-based per-decision backup (whole return-to-go = mc_q '
-                           'inside the tree; the fair baseline for the lineage A/B). '
-                           'Requires causal_rl=True env.')
-    mcts.add_argument('--mcts_lineage_backup',
-                      type=lambda x: str(x).lower() == 'true', default=False,
-                      help='THE LINEAGE CONTRIBUTION: credit each decision edge only by its '
-                           'causal-descendant rewards (lrq inside the tree). Implies '
-                           'rollout backup; needs causal_rl=True env.')
-    mcts.add_argument('--mcts_dirichlet_alpha', type=float, default=0.0,
-                      help='root Dirichlet exploration noise weight (0=off)')
-    mcts.add_argument('--mcts_conflict_gate',
-                      type=lambda x: str(x).lower() == 'true', default=True,
-                      help='Direction B: collapse structurally-forced (all-commuting) '
-                           'nodes so search concentrates on genuine contested decisions')
-
-    rudder = parser.add_argument_group('rudder', 'RUDDER credit assignment parameters')
-    rudder.add_argument('--rudder_enabled',
-                        type=lambda x: str(x).lower() == 'true',
-                        default=False,
-                        help='whether to enable RUDDER credit assignment')
-    rudder.add_argument('--rudder_state_dim',
-                        type=int,
-                        default=128,
-                        help='state dimension for RUDDER network')
-    rudder.add_argument('--rudder_hidden_dim',
-                        type=int,
-                        default=256,
-                        help='hidden dimension for RUDDER LSTM')
-    rudder.add_argument('--rudder_learning_rate',
-                        type=float,
-                        default=1e-3,
-                        help='learning rate for RUDDER network')
-    rudder.add_argument('--rudder_training_freq',
-                        type=int,
-                        default=1,
-                        help='train RUDDER every N epochs')
-    rudder.add_argument('--rudder_redistribution_method',
-                        type=str,
-                        choices=['contribution', 'direct'],
-                        default='contribution',
-                        help='method for redistributing rewards (contribution or direct)')
-    rudder.add_argument('--rudder_device',
-                        type=str,
-                        default='cpu',
-                        help='device for RUDDER network (cpu or cuda)')
 
     save = parser.add_argument_group('saving')
     save.add_argument('--name',
@@ -759,23 +666,6 @@ def make_agent(args, metadata=None):
     causal_pg = getattr(args, 'causal_pg', False)
     causal_rl = getattr(args, 'causal_rl', False)
 
-    # RUDDER baseline: LSTM return predictor over marking vectors. state_dim
-    # and the feature order are derived from the env metadata (one token-count
-    # feature per node type), so --rudder_state_dim is ignored.
-    rudder_config = None
-    if getattr(args, 'rudder_enabled', False):
-        node_types = list(metadata[0]) if metadata else []
-        rudder_config = {
-            'enabled': True,
-            'state_dim': len(node_types),
-            'node_types': node_types,
-            'hidden_dim': getattr(args, 'rudder_hidden_dim', 128),
-            'learning_rate': getattr(args, 'rudder_learning_rate', 1e-3),
-            'training_frequency': getattr(args, 'rudder_training_freq', 1),
-            'redistribution_method': getattr(args, 'rudder_redistribution_method', 'contribution'),
-            'device': getattr(args, 'rudder_device', 'cpu'),
-        }
-
     if causal_scheme == 'lcv' and getattr(args, 'causal_rl', False):
         # LCV: state-only centering head v_off(s) ~ E[R_off | s] (a scalar
         # HeteroCritic, sized like the value net). Passed through the generic
@@ -827,7 +717,7 @@ def make_agent(args, metadata=None):
                         lr_schedule=getattr(args, 'lr_schedule', True))
     elif args.algorithm == 'ppo-clip':
         agent = PPOAgent(policy_network=policy_network, method='clip', eps=args.eps,
-                         rudder_config=rudder_config, qoff_network=qoff_network,
+                         qoff_network=qoff_network,
                          qlin_network=qlin_network,
                          policy_lr=args.policy_lr, policy_updates=args.policy_updates,
                          value_network=value_network, value_lr=args.value_lr, value_updates=args.value_updates,
@@ -843,7 +733,7 @@ def make_agent(args, metadata=None):
                          lr_schedule=getattr(args, 'lr_schedule', True))
     elif args.algorithm == 'ppo-penalty':
         agent = PPOAgent(policy_network=policy_network, method='penalty', c=args.c,
-                         rudder_config=rudder_config, qoff_network=qoff_network,
+                         qoff_network=qoff_network,
                          qlin_network=qlin_network,
                          policy_lr=args.policy_lr, policy_updates=args.policy_updates,
                          value_network=value_network, value_lr=args.value_lr, value_updates=args.value_updates,
@@ -860,64 +750,12 @@ def make_agent(args, metadata=None):
 
 
 
-    elif args.algorithm == 'dcl':
-        planner_cfg = PlannerConfig(
-            horizon=args.dcl_horizon,
-            rollouts_per_action=args.dcl_rollouts,
-            gamma=args.gam,
-            temperature=args.dcl_temp,
-            use_crn=True,
-            beta=float(getattr(args, 'causal_beta', 0.0)),
-            use_lineage=bool(getattr(args, 'dcl_lineage', False)),
-            lineage_tally=bool(getattr(args, 'dcl_lineage_tally', False)),
-            lineage_share=bool(getattr(args, 'dcl_lineage_share', True)),
-            lineage_prune=bool(getattr(args, 'dcl_lineage_prune', True)),
-            lineage_truncate=bool(getattr(args, 'dcl_lineage_truncate', True)),
-        )
-
-        agent = DCLAgent(
-            policy_network=policy_network,
-            value_network=value_network,
-            planner_cfg=planner_cfg,
-            policy_lr=args.policy_lr,
-            policy_updates=args.policy_updates,
-            value_lr=args.value_lr,
-            value_updates=args.value_updates,
-            gam=args.gam, lam=args.lam,
-            kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus)
-
-    elif args.algorithm == 'mcts':
-        mcts_cfg = MCTSConfig(
-            n_simulations=int(getattr(args, 'mcts_sims', 64)),
-            c_puct=float(getattr(args, 'mcts_c_puct', 1.5)),
-            lookahead=float(getattr(args, 'mcts_lookahead', 8.0)),
-            max_depth=int(getattr(args, 'mcts_max_depth', 64)),
-            temperature=float(getattr(args, 'mcts_temp', 1.0)),
-            beta=float(getattr(args, 'causal_beta', 0.0)),
-            dirichlet_alpha=float(getattr(args, 'mcts_dirichlet_alpha', 0.0)),
-            conflict_gate=bool(getattr(args, 'mcts_conflict_gate', True)),
-            coupling_truncate=bool(getattr(args, 'mcts_coupling_truncate', True)),
-            couple_min_visits=int(getattr(args, 'mcts_couple_min_visits', 0)),
-            rollout_backup=bool(getattr(args, 'mcts_rollout_backup', False)),
-            lineage_backup=bool(getattr(args, 'mcts_lineage_backup', False)),
-        )
-        agent = MCTSAgent(
-            policy_network=policy_network,
-            value_network=value_network,
-            mcts_cfg=mcts_cfg,
-            policy_lr=args.policy_lr,
-            policy_updates=args.policy_updates,
-            value_lr=args.value_lr,
-            value_updates=args.value_updates,
-            gam=args.gam, lam=args.lam,
-            kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus)
-
     else:
         raise Exception("Unknown algorithm! Are you sure it is spelled correctly?")
 
     # LS-HCA's state-conditional hindsight model (Agent._fit_ls_hca_hhat /
     # _ls_hca_predict_h) needs the same marking-vector node-type order
-    # already derived for RUDDER above; set post-construction (uniform
+    # derived from the env metadata; set post-construction (uniform
     # across every algorithm branch above, mirroring how
     # run_suite.py sets env.use_structural_features post-construction)
     # rather than threading a new constructor kwarg through every branch.
