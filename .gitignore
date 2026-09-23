@@ -10,9 +10,15 @@ __pycache__/
 
 # Experiment tracking / debug artifacts (regenerable)
 .wandb_offline/
-causal_debug.jsonl
-causal_episode_map.jsonl
 *.log
+
+# Evidence logs the v4 paper quotes verbatim (tables/appendix) stay tracked.
+!examples/paper_examples/suite/_diag_cosine_law.log
+!examples/paper_examples/suite/_diag_hard_n4_credit.log
+!examples/paper_examples/suite/_diag_k_all.log
+!examples/paper_examples/suite/suite_results_ncopies_hard_n4_ep40_run.log
+!examples/paper_examples/suite/suite_results_ppo_tuning_multisite_run.log
+!examples/paper_examples/suite/paper/build_main_v4.log
 
 # Heavy training outputs: checkpoints and tensorboard event files live next
 # to the suite's cell JSONs (which ARE committed — they're the paper data).
@@ -22,22 +28,15 @@ causal_episode_map.jsonl
 events.out.tfevents.*
 examples/paper_examples/suite/**/train/
 
-# LaTeX build artifacts
+# Diagnostic record dumps (regenerable by re-running the _diag_* script)
+*.pkl
+
+# LaTeX build artifacts (latexmk bookkeeping). .bbl is NOT ignored: Elsevier
+# wants it with the submission.
 *.aux
 *.out
 *.toc
 *.synctex.gz
-
-# Diagnostic record dumps (regenerable by re-running the _diag_* script that
-# wrote them; several MB of pickled rollouts each, from the demoted ls_hca work)
-*.pkl
-
-# Stray training-output dirs that the `**/train/` rule above misses because
-# they are named <probe>_train rather than train/
-examples/paper_examples/suite/*_train/
-
-# LaTeX build artifacts beyond aux/out (latexmk bookkeeping). .bbl is NOT
-# ignored: Elsevier wants it with the submission.
 *.fls
 *.fdb_latexmk
 *.blg

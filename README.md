@@ -5,7 +5,7 @@ GymPN is a Python library designed for creating and training reinforcement learn
 ## Features
 
 - **Action-Evolution Petri Nets (AEPN):** Define and simulate A-E PN environments.
-- **Customizable RL Agents:** Train agents using Proximal Policy Optimization (PPO) and Deep Causal Learning (DCL).
+- **Customizable RL Agents:** Train agents using Proximal Policy Optimization (PPO), with optional causal credit assignment.
 - **Graph Observations:** Generate graph-based observations for RL agents using PyTorch Geometric.
 - **Causal Reinforcement Learning:** Track reward origins and assign credit through causal chains.
 - **Strategic Postponement:** Defer decisions in complex temporal scenarios.
@@ -48,7 +48,7 @@ Complete documentation is available in the [docs directory](./docs/):
 ### Core Guides
 - **[Gentle Introduction](./docs/gentle_introduction.md)** - Learn basic concepts and build your first environment
 - **[Complete Example](./docs/complete_example.md)** - Full end-to-end example with all components
-- **[Algorithms Guide](./docs/algorithms.md)** - Understand PPO, DCL, and other algorithms
+- **[Algorithms Guide](./docs/algorithms.md)** - Understand PPO and the other algorithms
 - **[Agents Guide](./docs/agents_guide.md)** - Choose and configure the right agent
 
 ### Advanced Topics

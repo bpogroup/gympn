@@ -172,14 +172,6 @@ for param in agent.policy_net.parameters():
    agent = PGAgent(policy_net, value_net)
    ```
 
-6. **For DCL specifically: Reduce horizon or rollouts**
-   ```python
-   planner_cfg = PlannerConfig(
-       horizon=3,              # was 5
-       rollouts_per_action=16  # was 32
-   )
-   ```
-
 ---
 
 ### Environment Issues
@@ -387,16 +379,6 @@ if torch.isinf(obs['graph'].x_dict['place']).any():
            episodes=64,
            reward_scale=difficulty
        )
-   ```
-
-5. **Try DCL instead of PPO**
-   ```python
-   # DCL's planning may find better solutions
-   agent = DCLAgent(
-       policy_network=policy_net,
-       value_network=value_net,
-       planner_cfg=PlannerConfig(horizon=5, rollouts_per_action=32)
-   )
    ```
 
 #### Policy Overfits (High Train, Low Test)

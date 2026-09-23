@@ -21,7 +21,7 @@ This document provides a quick index of all available documentation and what eac
    - Perfect for: Those who learn by doing
 
 3. **[Algorithms Guide](./algorithms.md)** - Algorithm enthusiasts
-   - Detailed explanation of PPO, PPO-Clip, PPO-Penalty, PG, and DCL
+   - Detailed explanation of PPO-Clip, PPO-Penalty and PG
    - Hyperparameter tuning guide
    - When to use each algorithm
    - Perfect for: Understanding algorithm details
@@ -32,7 +32,6 @@ These documents explain key concepts and features:
 
 **[Agents Guide](./agents_guide.md)**
 - PPOAgent: Standard policy gradient agent
-- DCLAgent: Deep Causal Learning agent
 - Custom solver creation
 - Agent comparison and selection
 - When to use which agent
@@ -41,7 +40,6 @@ These documents explain key concepts and features:
 **[Advanced Features](./advanced_features.md)**
 - Graph Neural Networks (GNNs) for observations
 - Causal tracking and credit assignment
-- Deep Causal Learning (DCL)
 - Parallelization and performance optimization
 - Custom reward functions
 - ~45 minutes read
@@ -131,8 +129,8 @@ These documents explain key concepts and features:
 **Total time: ~1.5 hours** to production-ready
 
 ### Path 4: Advanced Features Only
-- [Algorithms Guide](./algorithms.md) - for DCL details
-- [Agents Guide](./agents_guide.md) - for DCLAgent setup
+- [Algorithms Guide](./algorithms.md) - for algorithm details
+- [Agents Guide](./agents_guide.md) - for agent setup
 - [Advanced Features](./advanced_features.md) - for GNNs and optimization
 - [Postponement and Causal RL](./postpone_causal.md) - for causal tracking
 - [Extending GymPN](./extending_gympn.md) - for custom components
@@ -147,7 +145,7 @@ These documents explain key concepts and features:
 ### "I want to create a custom Petri Net model"
 → [Gentle Introduction](./gentle_introduction.md) + [Extending GymPN](./extending_gympn.md)
 
-### "I want to understand PPO vs DCL"
+### "I want to understand the PPO variants"
 → [Algorithms Guide](./algorithms.md)
 
 ### "I want to optimize performance"
@@ -173,7 +171,7 @@ These documents explain key concepts and features:
 |----------|--------|-----------|--------|
 | Gentle Introduction | ~30 min | Beginner | Basics, first environment |
 | Complete Example | ~40 min | Beginner | Full example, best practices |
-| Algorithms | ~40 min | Intermediate | PPO, DCL, hyperparameters |
+| Algorithms | ~40 min | Intermediate | PPO variants, hyperparameters |
 | Agents Guide | ~40 min | Intermediate | Agent selection, custom solvers |
 | Advanced Features | ~45 min | Advanced | GNNs, causal tracking, optimization |
 | Postponement & Causal | ~60 min | Advanced | Postponement, credit assignment |
@@ -197,7 +195,6 @@ These documents explain key concepts and features:
 - **Proximal Policy Optimization (PPO)**: Algorithms, Agents Guide, Benchmarks
 - **PPO-Clip**: Algorithms, Agents Guide, Benchmarks
 - **PPO-Penalty**: Algorithms, Agents Guide, Benchmarks
-- **Deep Causal Learning (DCL)**: Algorithms, Agents Guide, Postponement & Causal
 
 ### Features
 - **Postponement**: Postponement & Causal, Extending GymPN

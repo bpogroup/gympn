@@ -2,10 +2,9 @@
 
 ## Overview
 
-GymPN provides two main types of agents for training in Action-Evolution Petri Net environments:
+GymPN provides one main agent for training in Action-Evolution Petri Net environments:
 
-1. **PPOAgent** - Proximal Policy Optimization (for standalone use)
-2. **DCLAgent** - Deep Causal Learning with planning (for complex environments)
+1. **PPOAgent** - Proximal Policy Optimization
 
 Additionally, you can create custom solvers for evaluation and heuristic strategies.
 
@@ -140,114 +139,6 @@ agent.train(
     epochs=100,
     batch_size=64,
     logdir='data/train'
-)
-```
-
-## DCLAgent
-
-### What it does
-
-DCLAgent combines PPO with a planning phase. At each decision point, it:
-1. Samples multiple rollout trajectories with a temperature-softened policy
-2. Evaluates trajectories using the value function
-3. Computes an improved policy distribution based on these evaluations
-4. Trains the policy to match the improved distribution
-
-This allows the agent to make better decisions by considering potential future outcomes.
-
-### Initialization
-
-```python
-from gympn.agents_dcl import DCLAgent
-from gympn.dcl_planner import PlannerConfig
-
-planner_config = PlannerConfig(
-    horizon=5,              # Lookahead depth
-    rollouts_per_action=32, # Trajectories per action
-    gamma=1.0,              # Discount factor
-    temperature=1.0,        # Softmax temperature
-    use_crn=True,           # Common Random Numbers
-    use_lineage=True        # Track token lineage
-)
-
-agent = DCLAgent(
-    policy_network=policy_net,
-    value_network=value_net,
-    planner_cfg=planner_config,
-    policy_lr=5e-4,
-    policy_updates=3,
-    value_lr=5e-4,
-    value_updates=5,
-    gam=1.0,
-    lam=0.99,
-    kld_limit=0.1,
-    ent_bonus=0.005
-)
-```
-
-### Key Parameters
-
-#### PlannerConfig
-
-| Parameter | Default | Meaning |
-|-----------|---------|---------|
-| `horizon` | 5 | Lookahead depth (steps) |
-| `rollouts_per_action` | 32 | Trajectories per action |
-| `gamma` | 0.99 | Discount factor |
-| `temperature` | 1.0 | Softmax temperature for action sampling |
-| `use_crn` | True | Use common random numbers for stability |
-| `use_lineage` | True | Track token lineage for causal RL |
-
-### When to Use DCL
-
-DCL is beneficial when:
-
-1. **Complex dependencies exist** between actions
-2. **Lookahead provides value** (not all decisions independent)
-3. **Causal structure matters** (rewards from past decisions)
-4. **Training speed is less critical** than quality
-
-DCL is slower (2-3x) but can achieve better policies in complex domains.
-
-### Example: Training with DCLAgent
-
-```python
-from gympn.agents_dcl import DCLAgent
-from gympn.dcl_planner import PlannerConfig
-
-# Create environment with causal RL
-env = GymProblem(allow_postpone=True, causal_rl=True)
-# ... define places, transitions, events ...
-
-# Create networks
-policy_net = GNNPolicyNetwork(...)
-value_net = GNNValueNetwork(...)
-
-# Create planner config
-planner_cfg = PlannerConfig(
-    horizon=5,
-    rollouts_per_action=32,
-    temperature=1.0,
-    use_lineage=True
-)
-
-# Create agent
-agent = DCLAgent(
-    policy_network=policy_net,
-    value_network=value_net,
-    planner_cfg=planner_cfg,
-    policy_lr=5e-4,
-    policy_updates=3,
-    value_lr=5e-4,
-    value_updates=5
-)
-
-# Train (slower but higher quality)
-agent.train(
-    env,
-    episodes=32,   # Fewer due to planning overhead
-    epochs=25,
-    batch_size=32
 )
 ```
 
@@ -414,7 +305,6 @@ for name, stats in results.items():
 Random:    12.5 ± 3.2
 Heuristic: 18.3 ± 2.1
 PPO:       22.1 ± 1.8
-DCL:       23.5 ± 1.6
 ```
 
 ## Troubleshooting Agents
@@ -440,17 +330,6 @@ DCL:       23.5 ± 1.6
 3. Increase batch_size
 4. Use PPO-Penalty instead of PPO-Clip
 5. Reduce ent_bonus
-
-### Issue: DCL is too slow
-
-**Symptoms:** Takes hours to train
-
-**Solutions:**
-1. Reduce dcl_horizon (5 → 3)
-2. Reduce dcl_rollouts (32 → 16)
-3. Use PPO-Clip instead
-4. Increase episodes (faster convergence can offset training time)
-5. Use GPU (set use_gpu=True)
 
 ### Issue: Agent overfits to training episodes
 

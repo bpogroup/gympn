@@ -32,8 +32,8 @@ pip install -r requirements.txt
 - **[Complete Example](./complete_example.md)** - Full end-to-end example with all components
 
 ### Core Concepts
-- **[Algorithms](./algorithms.md)** - Overview of PPO, PPO-Clip, PPO-Penalty, PG, and DCL algorithms with hyperparameter tuning
-- **[Agents Guide](./agents_guide.md)** - Detailed guide on PPOAgent, DCLAgent, and custom solvers
+- **[Algorithms](./algorithms.md)** - Overview of PPO-Clip, PPO-Penalty and PG algorithms with hyperparameter tuning
+- **[Agents Guide](./agents_guide.md)** - Detailed guide on PPOAgent and custom solvers
 - **[Advanced Features](./advanced_features.md)** - GNNs, causal tracking, Deep Causal Learning, parallelization
 
 ### Advanced Topics

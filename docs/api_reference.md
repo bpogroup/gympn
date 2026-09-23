@@ -113,37 +113,6 @@ returns, lengths = agent.run_episodes(
 )
 ```
 
-### DCLAgent
-
-```python
-from gympn.agents_dcl import DCLAgent
-from gympn.dcl_planner import PlannerConfig
-
-planner_cfg = PlannerConfig(
-    horizon=5,
-    rollouts_per_action=32,
-    temperature=1.0,
-    gamma=1.0,
-    use_crn=True,
-    use_lineage=True
-)
-
-agent = DCLAgent(
-    policy_network=policy_net,
-    value_network=value_net,
-    planner_cfg=planner_cfg,
-    policy_lr=5e-4,
-    policy_updates=3,
-    value_lr=5e-4,
-    value_updates=5,
-    gam=1.0,
-    lam=0.99,
-    ent_bonus=0.005
-)
-
-agent.train(env, episodes=32, epochs=25)
-```
-
 ## Solvers and Evaluation
 
 ```python
@@ -245,24 +214,6 @@ config = {
     "value_updates": 15,
     "eps": 0.1,
     "ent_bonus": 0.003,
-}
-```
-
-### Planning-Based (DCL)
-```python
-config = {
-    "algorithm": "dcl",
-    "episodes": 32,
-    "epochs": 25,
-    "batch_size": 32,
-    "policy_lr": 5e-4,
-    "value_lr": 5e-4,
-    "policy_updates": 3,
-    "value_updates": 5,
-    "dcl_horizon": 5,
-    "dcl_rollouts": 32,
-    "dcl_temp": 1.0,
-    "ent_bonus": 0.005,
 }
 ```
 
@@ -455,7 +406,7 @@ args = parser.parse_args()
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `--algorithm` | str | ppo-clip | Training algorithm: ppo-clip, ppo-penalty, pg, or dcl |
+| `--algorithm` | str | ppo-clip | Training algorithm: ppo-clip, ppo-penalty, or pg |
 | `--gam` | float | 1.0 | Discount factor γ (0-1) |
 | `--lam` | float | 0.99 | GAE lambda parameter λ (0-1) |
 | `--eps` | float | 0.2 | PPO clip range ε (ppo-clip only) |
@@ -515,14 +466,6 @@ args = parser.parse_args()
 | `--wandb_entity` | str | None | W&B entity (username/team name) |
 | `--open_wandb` | bool | True | Auto-open W&B dashboard |
 
-### DCL Arguments
-
-| Argument | Type | Default | Description |
-|----------|------|---------|-------------|
-| `--dcl_horizon` | int | 5 | Planning lookahead steps |
-| `--dcl_rollouts` | int | 32 | Monte Carlo rollouts per action |
-| `--dcl_temp` | float | 1.0 | Temperature for action sampling |
-
 ### Saving Arguments
 
 | Argument | Type | Default | Description |
@@ -543,13 +486,6 @@ python examples/example_simple_postpone.py \
   --epochs 100 \
   --policy_lr 5e-4 \
   --num_workers 4
-
-# DCL agent with planning
-python examples/example_simple_postpone.py \
-  --algorithm dcl \
-  --dcl_horizon 5 \
-  --dcl_rollouts 32 \
-  --num_workers 2
 
 # Causal RL enabled
 python examples/example_simple_postpone.py \
