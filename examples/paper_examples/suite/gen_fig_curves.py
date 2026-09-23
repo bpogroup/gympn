@@ -55,7 +55,7 @@ DASH = {
     "ppo":        (4, 2),            # dashed
     "ccf":        (1, 1.5),          # dotted
     "mc_q":       (6, 2, 1, 2),      # dash-dot
-    "cgae_dag":   (1, 1.5),          # dotted
+    "cgae_dag":   (3, 1, 1, 1),      # dash-dot-dot (ccf keeps the plain dotted)
     "cgae_flow":  (6, 2, 1, 2),      # dash-dot
     "cgae":       (5, 1, 1, 1),
 }
@@ -87,16 +87,20 @@ def curves(d, pat, arm, r, h, nseeds=20):
     return np.asarray(ep), A.mean(0), ci
 
 
+# Same six arms in both panels, one shared legend. On multi-site cgae-f is
+# bit-identical to cgae-cf (fan-out exactly 1) and overplots it; cgae-dag was
+# not run there, so panel (a) draws five curves and the caption says so.
+ARMS = ["cgae_cflow", "ccf", "mc_q", "ppo", "cgae_flow", "cgae_dag"]
 PANELS = [
-    ("(a) multi-site routing, $K{=}8$", "upper left",
-     "suite_results_multisite_bf", "%s__s%d.json", 62.9, 80.25,
-     ["cgae_cflow", "ccf", "ppo", "mc_q"]),
-    ("(b) single component, $K{=}1$", "lower right",
+    ("(a) multi-site routing, $K{=}8$", None,
+     "suite_results_multisite_protocol", "%s__s%d.json", 62.9, 80.25,
+     ARMS),
+    ("(b) single component, $K{=}1$", None,
      "suite_results_s1_ep40", "s1_stoch_sequence__%s__s%d.json", 9.85, 14.775,
-     ["cgae_cflow", "cgae_dag", "cgae_flow", "ppo_clip"]),
+     [("ppo_clip" if a == "ppo" else a) for a in ARMS]),
 ]
 
-fig, axes = plt.subplots(1, 2, figsize=(7.4, 3.0))
+fig, axes = plt.subplots(1, 2, figsize=(7.4, 3.4))
 for ax, (title, legloc, d, pat, r, h, arms) in zip(axes, PANELS):
     for arm in arms:
         key = "ppo" if arm == "ppo_clip" else arm
@@ -111,7 +115,6 @@ for ax, (title, legloc, d, pat, r, h, arms) in zip(axes, PANELS):
     ax.axhline(0.0, color="0.45", lw=0.7, dashes=(2, 3), zorder=1)
     ax.set_title(title, fontsize=9.5, pad=6)
     ax.set_xlabel("training epoch")
-    ax.legend(loc=legloc, ncol=1)
 
 axes[0].set_ylabel("normalized return")
 axes[0].text(40, 1.02, "heuristic", fontsize=7, color="0.35",
@@ -120,7 +123,10 @@ axes[0].text(2.5, 0.02, "random", fontsize=7, color="0.35",
              va="bottom", ha="left")
 axes[1].set_ylim(-0.6, 1.15)
 
-fig.tight_layout()
+handles, labels = axes[1].get_legend_handles_labels()
+fig.legend(handles, labels, loc="lower center", ncol=3, frameon=False,
+           bbox_to_anchor=(0.5, -0.02))
+fig.tight_layout(rect=(0, 0.11, 1, 1))
 fig.savefig(f"{OUT}/fig_curves_v3.pdf")
 fig.savefig(f"{OUT}/fig_curves_v3.png", dpi=170)
 print(f"wrote {OUT}/fig_curves_v3.pdf (+ .png)")

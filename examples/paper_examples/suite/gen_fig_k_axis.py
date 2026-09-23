@@ -55,11 +55,13 @@ SPECS = [
      "s1_stoch_sequence__%s__s*.json", "cgae_cflow", "ppo_clip"),
     ("$N{=}2$", 2.0, "suite_results_n2_ep40/cells",
      "N2__%s__s*.json", "cgae_cflow", "ppo"),
+    ("\n\nhard $N{=}4$", 3.1, "suite_results_ncopies_hard_n4_ep40/cells",
+     "N4__%s__s*.json", "cgae_cflow", "ppo"),
     ("$N{=}4$", 3.3, "suite_results_n4_ep40/cells",
      "N4__%s__s*.json", "cgae_cflow", "ppo"),
     ("$N{=}8$", 6.3, "suite_results_n8_ep40/cells",
      "N8__%s__s*.json", "cgae_cflow", "ppo"),
-    ("multi-site", 8.0, "suite_results_multisite_bf/cells",
+    ("multi-site", 8.0, "suite_results_multisite_protocol/cells",
      "%s__s*.json", "cgae_cflow", "ppo"),
 ]
 
@@ -96,8 +98,13 @@ ceil = np.array([r["ceiling"] for r in rows])
 fig, ax = plt.subplots(figsize=(6.6, 3.4))
 
 o = np.argsort(K)
-ax.plot(K[o], ceil[o], color=C_PPO, dashes=(5, 2), linewidth=1.4, zorder=2)
-ax.fill_between(K[o], ceil[o], 1.05, color=C_PPO, alpha=0.07, linewidth=0)
+# The ceiling is a property of each configuration, not a curve in K: the two
+# N=4 variants sit at nearly the same K with very different headroom, so it is
+# drawn as a short bar per configuration with its own shaded headroom band.
+HW = 0.16
+for k, c in zip(K, ceil):
+    ax.plot([k - HW, k + HW], [c, c], color=C_PPO, dashes=(5, 2), linewidth=1.4, zorder=2)
+    ax.fill_between([k - HW, k + HW], [c, c], [1.05, 1.05], color=C_PPO, alpha=0.07, linewidth=0)
 ax.axhline(0.0, color=MUTED, linewidth=0.8)
 
 sig = np.array([r["p"] < 0.05 for r in rows])
@@ -119,14 +126,14 @@ ax.set_xticklabels([rows[i]["name"] + NL + ("%.1f" % rows[i]["K"])
 ax.set_xlabel("$K$  (reward-bearing causal components, measured before training)")
 ax.set_ylabel("normalized gain over PPO")
 ax.set_xlim(0.4, 8.9)
-ax.set_ylim(-0.14, 1.02)
+ax.set_ylim(-0.14, 1.32)
 ax.legend(handles=[
     plt.Line2D([0], [0], color=C_METHOD, marker="o", lw=1.4, markersize=6,
                label="cgae-cf $-$ PPO, paired, 95% CI (20 seeds); filled $p<0.05$"),
     plt.Line2D([0], [0], color=C_METHOD, marker="o", lw=0, markersize=6,
                markerfacecolor="white", markeredgewidth=1.6, label="not significant"),
     plt.Line2D([0], [0], color=C_PPO, lw=1.4, dashes=(5, 2),
-               label="ceiling: headroom PPO leaves, $1-$PPO"),
+               label="ceiling: headroom PPO leaves, $1-$PPO (per configuration)"),
 ], loc="upper left", handlelength=2.2)
 
 os.makedirs(OUT, exist_ok=True)

@@ -181,3 +181,77 @@ if __name__ == "__main__":
         import numpy as _np
         print(f"  {name:<14} random={_np.mean(rnd):6.1f}  heuristic={_np.mean(heu):6.1f}  "
               f"lift={_np.mean(heu)-_np.mean(rnd):+.1f}")
+
+# --------------------------------------------------------------------------
+# CAPACITY-NEUTRAL COUPLING VARIANT
+#
+# `n_flex` above cannot be used to sweep coupling: flexible generalists are
+# added ON TOP of the specialists, so raising it raises total capacity and the
+# environment saturates (measured random->heuristic gap collapses 17.27 -> 7.12
+# -> 3.52 -> 3.20 for n_flex = 0, 2, 4, 8), and the all-pooled end is degenerate
+# because `_flex_start` is type-independent, so every worker is interchangeable,
+# no skill-matching decision remains and the heuristic scores BELOW random
+# (61.48 vs 61.85). Normalized return is undefined at one end of that dial and
+# noise-amplified in the middle.
+#
+# `make_multisite_mobile` varies coupling with capacity, skill heterogeneity and
+# the service-time distribution ALL held fixed. There are always 2*n_sites
+# workers; each is skilled exactly as a specialist is (fast on its own type,
+# slow otherwise, via `_local_start`); the only thing `n_mobile` changes is how
+# many of them draw from a cross-site pool instead of being bound to one site.
+# A mobile worker that serves site i, returns to the shared pool and then serves
+# site j is the contention channel Assumption A1 rules out.
+#
+# The mobile slots are chosen skill-balanced and spread across sites, so at even
+# `n_mobile` the pool holds equal numbers of each skill and no site is stripped
+# before any other. The heuristic needs no change: mobile workers carry codes 0
+# and 1, so rule 1 ("matched specialist first") picks them up unaltered, which
+# is what keeps the anchor comparable across the sweep.
+# --------------------------------------------------------------------------
+def mobile_slots(n_sites, n_mobile):
+    """The (site, skill) slots moved into the shared pool, in a fixed order that
+    keeps skills balanced and sites evenly stripped."""
+    order = [(i, (i + r) % 2) for r in (0, 1) for i in range(n_sites)]
+    return order[:n_mobile]
+
+
+def make_multisite_mobile(n_sites=4, n_mobile=0, causal_rl=False,
+                          allow_postpone=False, causal_postpone_tokenflow=False):
+    ag = GymProblem(allow_postpone=allow_postpone, causal_rl=causal_rl,
+                    causal_postpone_tokenflow=causal_postpone_tokenflow)
+    taken = mobile_slots(n_sites, n_mobile)
+
+    # shared pool of SKILLED, site-independent workers
+    pool = ag.add_var("pool", var_attributes=['code'])
+    for (_, skill) in taken:
+        pool.put({'code': skill})
+
+    for i in range(n_sites):
+        arrival = ag.add_var(f"arrival_{i}", var_attributes=['task_type'])
+        wait = ag.add_var(f"wait_{i}", var_attributes=['task_type'])
+        busy = ag.add_var(f"busy_{i}", var_attributes=['task_type', 'code'])
+        busym = ag.add_var(f"busym_{i}", var_attributes=['task_type', 'code'])
+        local = ag.add_var(f"local_{i}", var_attributes=['code'])
+
+        for skill in (0, 1):                 # this site keeps what was not taken
+            if (i, skill) not in taken:
+                local.put({'code': skill})
+
+        arrival.put({'task_type': 0})
+        wait.put({'task_type': 0})
+        wait.put({'task_type': 1})
+        ag.add_event([arrival], [arrival, wait], _arrive, name=f'arrive_{i}')
+
+        # site-bound worker: returns to its own site's pool
+        ag.add_action([wait, local], [busy], behavior=_local_start,
+                      name=f"local_start_{i}")
+        ag.add_event([busy], [local], _return_worker, name=f'local_done_{i}',
+                     reward_function=lambda x: 1)
+
+        # mobile worker: SAME skill-based service rule, returns to the SHARED
+        # pool -> its lineage can link this site's decisions to any other's
+        ag.add_action([wait, pool], [busym], behavior=_local_start,
+                      name=f"mobile_start_{i}")
+        ag.add_event([busym], [pool], _return_worker, name=f'mobile_done_{i}',
+                     reward_function=lambda x: 1)
+    return ag

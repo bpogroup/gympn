@@ -1,0 +1,376 @@
+[hard-n4] CRN pre-check: non-causal 52.6500 | causal 52.6500 -> MATCH
+[hard-n4] anchors: random=47.55 heuristic=75.25
+[hard-n4] 180 cells (9 arms x 20 seeds, 40 epochs), 4 workers
+[hard-n4] torch threads per worker: 1
+Causal RL enabled: each token has been assigned a unique identifier.
+Causal RL enabled: each token has been assigned a unique identifier.
+Causal RL enabled: each token has been assigned a unique identifier.
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cflow  s0  final=+0.439 (66.0 min; 66.1 total)
+[hard-n4] <<< ppo         s0  final=+0.085 (67.7 min; 67.9 total)
+[hard-n4] <<< cgae        s0  final=+0.462 (68.7 min; 68.9 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< ccf         s0  final=+0.298 (69.5 min; 69.6 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_flow   s0  final=-1.717 (62.5 min; 128.7 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cflow  s1  final=+0.330 (63.6 min; 132.4 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< ccf         s1  final=+0.280 (63.5 min; 133.1 total)
+[hard-n4] <<< ppo         s1  final=+0.220 (66.8 min; 134.7 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae        s1  final=+0.384 (62.8 min; 191.5 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_flow   s1  final=-1.717 (62.8 min; 195.3 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< ppo         s2  final=+0.392 (64.6 min; 197.7 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cflow  s2  final=+0.390 (63.5 min; 198.2 total)
+[hard-n4] <<< ccf         s2  final=+0.419 (65.7 min; 257.2 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae        s2  final=+0.334 (70.4 min; 265.7 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_flow   s2  final=-1.717 (70.3 min; 267.9 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< ppo         s3  final=+0.244 (69.9 min; 268.1 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cflow  s3  final=+0.451 (67.5 min; 324.7 total)
+[hard-n4] <<< ccf         s3  final=+0.347 (67.8 min; 333.5 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae        s3  final=+0.542 (69.0 min; 336.9 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_flow   s3  final=-1.717 (70.3 min; 338.4 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< ppo         s4  final=+0.204 (68.5 min; 393.3 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cflow  s4  final=+0.316 (67.7 min; 401.2 total)
+[hard-n4] <<< cgae        s4  final=+0.168 (67.2 min; 405.6 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< ccf         s4  final=+0.386 (69.8 min; 406.7 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_flow   s4  final=-1.717 (72.6 min; 465.9 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< ppo         s5  final=+0.162 (72.1 min; 473.3 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< ccf         s5  final=+0.487 (69.2 min; 475.9 total)
+[hard-n4] <<< cgae_cflow  s5  final=+0.370 (73.0 min; 478.6 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae        s5  final=+0.384 (60.4 min; 526.3 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cflow  s6  final=+0.316 (60.6 min; 539.2 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_flow   s5  final=-1.717 (66.8 min; 540.1 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< ppo         s6  final=+0.052 (64.5 min; 540.4 total)
+[hard-n4] <<< ccf         s6  final=+0.305 (61.9 min; 588.2 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae        s6  final=+0.332 (60.0 min; 599.1 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_flow   s6  final=-1.717 (59.4 min; 599.5 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< ppo         s7  final=-0.047 (61.7 min; 602.1 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cflow  s7  final=+0.245 (61.5 min; 649.7 total)
+[hard-n4] <<< cgae        s7  final=+0.357 (59.5 min; 659.0 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< ccf         s7  final=+0.356 (60.5 min; 659.6 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_flow   s7  final=-1.717 (60.1 min; 662.2 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< ppo         s8  final=+0.123 (60.2 min; 709.8 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< ccf         s8  final=+0.278 (57.5 min; 717.1 total)
+[hard-n4] <<< cgae_cflow  s8  final=+0.372 (59.0 min; 718.0 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae        s8  final=+0.222 (57.7 min; 719.9 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_flow   s8  final=-1.314 (60.1 min; 769.9 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< ppo         s9  final=-0.002 (60.8 min; 777.9 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cflow  s9  final=+0.451 (60.6 min; 778.6 total)
+[hard-n4] <<< ccf         s9  final=+0.267 (59.6 min; 779.5 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae        s9  final=+0.529 (61.3 min; 831.2 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cflow  s10 final=+0.421 (61.0 min; 840.5 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< ppo         s10 final=+0.211 (62.5 min; 841.1 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_flow   s9  final=-1.717 (64.1 min; 841.9 total)
+[hard-n4] <<< ccf         s10 final=+0.529 (61.5 min; 892.7 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae        s10 final=+0.536 (58.2 min; 898.6 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_flow   s10 final=+0.412 (58.5 min; 899.6 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< ppo         s11 final=+0.404 (58.7 min; 900.6 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+Traceback (most recent call last):
+  File "C:\Users\lobia\PycharmProjects\gympn\examples\paper_examples\suite\run_ncopies_hard_n4.py", line 276, in <module>
+    main(w)
+    ~~~~^^^
+  File "C:\Users\lobia\PycharmProjects\gympn\examples\paper_examples\suite\run_ncopies_hard_n4.py", line 261, in main
+    m, s, res, err = fut.result()
+                     ~~~~~~~~~~^^
+  File "C:\Users\lobia\AppData\Local\Programs\Python\Python313\Lib\concurrent\futures\_base.py", line 449, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\lobia\AppData\Local\Programs\Python\Python313\Lib\concurrent\futures\_base.py", line 401, in __get_result
+    raise self._exception
+concurrent.futures.process.BrokenProcessPool: A process in the process pool was terminated abruptly while the future was running or pending.
+[hard-n4] anchors: random=47.55 heuristic=75.25
+[hard-n4] 124 cells (9 arms x 20 seeds, 40 epochs), 4 workers
+[hard-n4] torch threads per worker: 2
+Causal RL enabled: each token has been assigned a unique identifier.
+Causal RL enabled: each token has been assigned a unique identifier.
+Causal RL enabled: each token has been assigned a unique identifier.
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_flow   s11 final=-1.717 (47.2 min; 47.3 total)
+[hard-n4] <<< cgae_cflow  s11 final=+0.361 (54.0 min; 54.2 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae        s11 final=+0.287 (55.0 min; 55.1 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< ccf         s11 final=+0.487 (57.7 min; 57.8 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< ppo         s12 final=+0.289 (54.6 min; 102.0 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cflow  s12 final=+0.505 (50.0 min; 104.1 total)
+[hard-n4] <<< ccf         s12 final=+0.287 (49.8 min; 104.9 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae        s12 final=+0.561 (47.1 min; 105.0 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_flow   s12 final=-1.717 (40.9 min; 142.9 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< ppo         s13 final=+0.054 (43.4 min; 147.5 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cflow  s13 final=+0.540 (43.8 min; 148.7 total)
+[hard-n4] <<< ccf         s13 final=+0.422 (44.0 min; 149.0 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae        s13 final=+0.475 (32.1 min; 175.0 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_flow   s13 final=-1.681 (29.1 min; 176.6 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< ppo         s14 final=+0.300 (33.1 min; 181.8 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cflow  s14 final=+0.392 (33.2 min; 182.1 total)
+[hard-n4] <<< cgae        s14 final=+0.495 (34.8 min; 211.4 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< ccf         s14 final=+0.278 (36.4 min; 211.4 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_flow   s14 final=-1.717 (33.2 min; 215.1 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< ppo         s15 final=+0.208 (36.5 min; 218.7 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< ccf         s15 final=+0.338 (46.1 min; 257.6 total)
+[hard-n4] <<< cgae_cflow  s15 final=+0.666 (48.9 min; 260.3 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae        s15 final=+0.449 (49.0 min; 264.1 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_flow   s15 final=-1.717 (47.3 min; 266.0 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< ppo         s16 final=+0.227 (41.8 min; 299.4 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cflow  s16 final=+0.449 (39.7 min; 300.0 total)
+[hard-n4] <<< ccf         s16 final=+0.235 (38.0 min; 302.0 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae        s16 final=+0.300 (36.5 min; 302.5 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_flow   s16 final=-1.717 (29.7 min; 329.1 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< ppo         s17 final=+0.116 (33.7 min; 333.7 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cflow  s17 final=+0.316 (36.9 min; 338.9 total)
+[hard-n4] <<< ccf         s17 final=+0.327 (37.9 min; 340.5 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae        s17 final=+0.155 (97.5 min; 426.6 total)
+[hard-n4] <<< cgae_flow   s17 final=-1.706 (94.0 min; 427.7 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cflow  s18 final=+0.339 (93.6 min; 434.0 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< ppo         s18 final=+0.377 (95.3 min; 434.2 total)
+[hard-n4] <<< ccf         s18 final=+0.500 (55.6 min; 482.2 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae        s18 final=+0.215 (57.3 min; 485.0 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_flow   s18 final=-1.717 (53.6 min; 487.7 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< ppo         s19 final=+0.038 (56.4 min; 490.7 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cflow  s19 final=+0.430 (52.8 min; 535.0 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< ccf         s19 final=+0.200 (54.6 min; 539.6 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae        s19 final=+0.567 (53.8 min; 541.5 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_flow   s19 final=-1.717 (51.3 min; 542.0 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cap    s0  final=+0.449 (39.1 min; 574.1 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_dag    s0  final=-1.717 (36.8 min; 578.8 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< mc_q        s0  final=+0.227 (40.6 min; 580.2 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cfgae       s0  final=-0.883 (39.0 min; 580.5 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cap    s1  final=+0.329 (41.3 min; 615.4 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_dag    s1  final=-1.717 (39.8 min; 620.3 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cfgae       s1  final=-1.717 (40.9 min; 621.1 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< mc_q        s1  final=+0.106 (42.8 min; 621.6 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cap    s2  final=+0.496 (42.0 min; 657.3 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_dag    s2  final=-1.191 (40.3 min; 662.0 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cfgae       s2  final=-1.554 (42.1 min; 663.2 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< mc_q        s2  final=+0.029 (44.3 min; 664.6 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cap    s3  final=+0.489 (43.1 min; 700.4 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_dag    s3  final=-1.681 (38.4 min; 703.0 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< mc_q        s3  final=-0.043 (42.9 min; 704.9 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cfgae       s3  final=-1.717 (42.0 min; 705.2 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cap    s4  final=+0.430 (42.6 min; 743.0 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_dag    s4  final=-1.540 (40.7 min; 745.9 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< mc_q        s4  final=+0.274 (43.9 min; 746.9 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cfgae       s4  final=+0.141 (44.4 min; 749.3 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cap    s5  final=+0.399 (41.8 min; 784.8 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_dag    s5  final=-1.717 (39.0 min; 788.3 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< mc_q        s5  final=+0.103 (43.3 min; 789.2 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cfgae       s5  final=-0.868 (42.8 min; 789.7 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cap    s6  final=+0.455 (41.6 min; 826.4 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_dag    s6  final=-1.175 (39.9 min; 829.6 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cfgae       s6  final=-1.403 (42.1 min; 831.3 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< mc_q        s6  final=+0.056 (43.9 min; 832.2 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cap    s7  final=+0.426 (41.4 min; 867.7 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_dag    s7  final=-1.616 (38.5 min; 870.7 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cfgae       s7  final=-1.717 (40.7 min; 872.0 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< mc_q        s7  final=+0.148 (42.7 min; 872.3 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cap    s8  final=+0.534 (42.8 min; 910.6 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_dag    s8  final=-1.437 (39.7 min; 912.0 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cfgae       s8  final=-1.646 (41.8 min; 913.8 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< mc_q        s8  final=+0.101 (44.1 min; 914.9 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cap    s9  final=+0.327 (42.4 min; 952.9 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_dag    s9  final=-1.717 (38.6 min; 953.4 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cfgae       s9  final=-1.717 (41.7 min; 955.5 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< mc_q        s9  final=+0.013 (44.2 min; 956.2 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cap    s10 final=+0.570 (41.8 min; 994.7 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_dag    s10 final=-1.437 (39.4 min; 995.6 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cfgae       s10 final=-1.717 (40.8 min; 996.3 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< mc_q        s10 final=+0.233 (43.0 min; 996.4 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_dag    s11 final=-1.717 (39.7 min; 1036.2 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cap    s11 final=+0.484 (42.5 min; 1037.2 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cfgae       s11 final=-1.067 (42.6 min; 1038.9 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< mc_q        s11 final=+0.025 (43.8 min; 1039.5 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cap    s12 final=+0.708 (42.5 min; 1078.7 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_dag    s12 final=-1.661 (40.4 min; 1079.9 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cfgae       s12 final=-1.717 (41.4 min; 1080.3 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< mc_q        s12 final=+0.103 (44.0 min; 1081.2 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_dag    s13 final=-1.446 (39.3 min; 1120.5 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cap    s13 final=+0.415 (42.4 min; 1121.1 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cfgae       s13 final=-0.662 (42.3 min; 1122.6 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< mc_q        s13 final=+0.097 (43.8 min; 1123.7 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cap    s14 final=+0.453 (40.8 min; 1161.3 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< mc_q        s14 final=+0.193 (42.3 min; 1163.4 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_dag    s14 final=-0.960 (40.6 min; 1164.3 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cfgae       s14 final=-1.410 (42.1 min; 1164.7 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_dag    s15 final=-1.688 (38.5 min; 1203.2 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cap    s15 final=+0.442 (42.8 min; 1204.1 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cfgae       s15 final=-1.717 (40.8 min; 1205.1 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< mc_q        s15 final=+0.227 (42.8 min; 1206.2 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cap    s16 final=+0.161 (41.9 min; 1245.1 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_dag    s16 final=-0.796 (39.7 min; 1245.9 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cfgae       s16 final=-1.717 (41.2 min; 1246.3 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< mc_q        s16 final=-0.004 (44.4 min; 1248.5 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cap    s17 final=+0.334 (41.8 min; 1286.9 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cfgae       s17 final=-1.717 (41.1 min; 1287.5 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_dag    s17 final=-1.182 (39.5 min; 1288.0 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< mc_q        s17 final=-0.368 (43.9 min; 1289.8 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_cap    s18 final=+0.200 (41.5 min; 1328.4 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_dag    s18 final=-1.635 (38.9 min; 1328.7 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< mc_q        s18 final=+0.184 (42.2 min; 1329.6 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cfgae       s18 final=-1.110 (41.7 min; 1329.8 total)
+Causal RL enabled: each token has been assigned a unique identifier.
+[hard-n4] <<< cgae_dag    s19 final=-1.684 (40.2 min; 1369.9 total)
+[hard-n4] <<< cgae_cap    s19 final=+0.332 (41.8 min; 1370.3 total)
+[hard-n4] <<< cfgae       s19 final=-1.310 (42.0 min; 1371.7 total)
+[hard-n4] <<< mc_q        s19 final=+0.278 (43.2 min; 1371.9 total)
+
+[hard-n4] anchors random=47.55 heuristic=75.25 (gap 27.70)
+  method        n   final    (SD)    best collapsed    ent
+  ppo          20   0.183   0.131   0.329        15   0.90
+  cgae_cflow   20   0.405   0.094   0.507         1   0.88
+  ccf          20   0.351   0.095   0.441         2   0.90
+  cgae         20   0.388   0.134   0.491         4   0.89
+  cgae_flow    20  -1.588   0.479  -1.001        19   0.76
+  cgae_cap     20   0.422   0.122   0.478         2   0.88
+  mc_q         20   0.099   0.145   0.263        18   0.91
+  cfgae        20  -1.361   0.494  -0.914        20   0.97
+  cgae_dag     20  -1.486   0.280  -1.463        20   0.56
