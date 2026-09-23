@@ -4,7 +4,7 @@ via `cfg['coupling_truncate']`). Run: python _test_coupling_truncation.py
 
 Addresses CFPK_EXPLAINED.md's documented-but-unbuilt speedup: "stop early
 once both playouts have clearly reconverged" (measured ~3.6x cost vs the
-intended <2x). Mirrors gympn/mcts_planner.py's state_fingerprint transposition
+intended <2x). Uses gympn/counterfactual.py's state_fingerprint transposition
 mechanism (reused directly, not reinvented).
 """
 import sys, os, types, uuid

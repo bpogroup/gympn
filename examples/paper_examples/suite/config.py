@@ -36,44 +36,9 @@ ALL_ENVS: List[str] = [
 #            return-to-go instead of only its lineage. The lrq-vs-mc_q gap
 #            prices the lineage itself; the mc_q-vs-ppo gap prices the
 #            estimator form (MC + wall-clock discount vs bootstrapped GAE).
-# "rudder" = RUDDER baseline: BiLSTM return predictor over marking vectors,
-#            'contribution' redistribution (return-conserving), consumed
-#            through the ordinary GAE path — the learned-decomposition
-#            competitor to LRQ's model-given lineage.
-# "lva"    = Lineage Value Auxiliary: identical policy path to lcv0 (plain
-#            SMDP-GAE PPO, no CV, no credit advantages) but the critic gets a
-#            second head on its shared encoder regressed on the per-decision
-#            lrq2 lineage credit (weight causal_aux_coef). The lineage enters
-#            as an auxiliary REPRESENTATION task only — bias cannot reach the
-#            policy gradient (floor by construction), yet the critic consumes
-#            the full per-decision credit vector instead of LCV's one
-#            epoch-level scalar. [lva - lcv0] isolates the aux task's value.
-# "lcv0"   = LCV's exact c_hat=0 limiting case: plain SMDP-GAE PPO (STANDARD,
-#            non-causal_rl path with the per-sojourn discount e^{-beta*tau}
-#            switched on via smdp_discount=True), no CV/lineage term at all.
-#            Isolates the time-discount choice from the CV term: [lcv-lcv0] =
-#            the CV alone, [lcv0-ppo_clip] = the discount alone. Not in
-#            ALL_METHODS by default — add explicitly where needed (see
-#            PAPER_PLAN_LCV.md §5 X0/X1/X6).
-# "ccf"    = Causal-Component-Factored return-to-go: union-find the REALIZED
-#            lineage of each reward into components, credit each decision its
-#            component's full return-to-go. Unbiased ONLY when a component's
-#            membership doesn't depend on the action taken (fails at AND-joins/
-#            shared-resource handoffs — see assembly_probe.py M1/M2, proven in
-#            EJOR_PROPOSITIONS.md) — kept for the ablation, not recommended.
-# "s_ccf"  = the fix: STATIC (topology-only, action-invariant) component
-#            partition instead of ccf's realized one — unbiased BY
-#            CONSTRUCTION (assumption A1 holds automatically), proven +
-#            variance-reduced by a provable factor on genuinely decomposable
-#            envs (N-copies, multi-site: beats PPO decisively, p=.005), honest
-#            NULL (reduces exactly to mc_q/PPO) on single-component envs like
-#            s1/the grid. Conservative on some motifs (keeps action-independent
-#            reward a finer estimator could factor out — see M4 in
-#            assembly_probe.py) by design, not a bug — see CCF_EXPLAINED.md.
-#            THE MAIN RESULT of this whole causal-RL arc; every other scheme
 #            here is either an ablation of it or a documented attempt to do
 #            better on its honest null that didn't generalize.
-ALL_METHODS: List[str] = ["ppo_clip", "lrq", "rudder", "mc_q"]
+ALL_METHODS: List[str] = ["ppo_clip", "lrq", "mc_q"]
 
 
 @dataclass
@@ -172,12 +137,6 @@ class SuiteConfig:
     # LVA: weight of the critic's auxiliary lineage-credit regression
     # (value_loss + coef * MSE(V_aux, lrq2 credit)); only read by method "lva".
     causal_aux_coef: float = 0.5
-    # RUDDER baseline knobs. hidden_dim 64 matches the HGT nets' scale (the
-    # marking-vector inputs are ~11-13 dim); LSTM trains every epoch.
-    rudder_hidden_dim: int = 64
-    rudder_training_freq: int = 1
-    rudder_redistribution_method: str = "contribution"
-
     # --- network size (HGT actor+critic) ---
     # None => use the historical defaults (hidden=256, layers=3, residual on).
     # These are the dominant wall-clock knobs: profiling showed ~all training time
@@ -204,7 +163,7 @@ class SuiteConfig:
 def smoke_config() -> SuiteConfig:
     return SuiteConfig(
         envs=["d_parallel_disjoint"],
-        methods=["ppo_clip", "lrq", "rudder", "mc_q"],
+        methods=["ppo_clip", "lrq", "mc_q"],
         seeds=1,
         epochs=3,
         episodes_per_epoch=4,
@@ -242,7 +201,7 @@ def stoch_config() -> SuiteConfig:
     v2 is the method going forward."""
     return SuiteConfig(
         envs=["s1_stoch_sequence", "s2_stoch_scaled", "s3_stoch_mixed"],
-        methods=["ppo_clip", "lrq", "lrq2", "rudder", "mc_q"],
+        methods=["ppo_clip", "lrq", "lrq2", "mc_q"],
         seeds=10,
         epochs=30,
         test_freq=2,
@@ -265,7 +224,7 @@ def smoke8_config() -> SuiteConfig:
     """Tiny budget but ALL 8 envs — de-risks per-topology bugs before the full run."""
     return SuiteConfig(
         envs=list(ALL_ENVS),
-        methods=["ppo_clip", "lrq", "rudder", "mc_q"],
+        methods=["ppo_clip", "lrq", "mc_q"],
         seeds=1,
         epochs=2,
         episodes_per_epoch=4,
