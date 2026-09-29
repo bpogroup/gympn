@@ -52,7 +52,11 @@ arrives -- which is exactly what separates temporal from provenance credit.
 
 Shared conventions: one case per time unit per copy, reward 1 per good
 completion (throughput of good outcomes over a fixed horizon), warm start
-with one case of each risk level in every queue.
+with one case of each risk level in every queue. The warm start is
+DETERMINISTIC (bad = 1 only for the risk-2 case): build-time random draws
+would give the causal and non-causal builds different warm starts whenever
+they are constructed at different random-stream positions, which is exactly
+what the CRN pre-check caught on the first hard version.
 """
 import random
 
@@ -123,9 +127,9 @@ def make_next_activity(n=4, causal_rl=False, allow_postpone=True,
         employee = ag.add_var(f"employee_{i}", var_attributes=['skill'])
         employee.put({'skill': 0})
         employee.put({'skill': 1})
-        arrival.put(_draw_case())
-        for risk in (0, 1, 2):
-            waiting.put({'risk': risk, 'bad': 1 if random.random() < P_BAD[risk] else 0})
+        arrival.put({'risk': 0, 'bad': 0})
+        for risk in (0, 1, 2):          # deterministic warm start: no build-time draws
+            waiting.put({'risk': risk, 'bad': 1 if risk == 2 else 0})
         hidden[f"arrival_{i}"] = ['bad']
         hidden[f"waiting_{i}"] = ['bad']
         ag.add_event([arrival], [arrival, waiting], _arrive_na, name=f'arrive_{i}')
@@ -174,10 +178,9 @@ def make_rework(n=4, causal_rl=False, allow_postpone=True,
         employee = ag.add_var(f"employee_{i}", var_attributes=['skill'])
         employee.put({'skill': 0})
         employee.put({'skill': 1})
-        arrival.put(_draw_case(reworked=0))
-        for risk in (0, 1, 2):
-            waiting.put({'risk': risk, 'bad': 1 if random.random() < P_BAD[risk] else 0,
-                         'reworked': 0})
+        arrival.put({'risk': 0, 'bad': 0, 'reworked': 0})
+        for risk in (0, 1, 2):          # deterministic warm start: no build-time draws
+            waiting.put({'risk': risk, 'bad': 1 if risk == 2 else 0, 'reworked': 0})
         hidden[f"arrival_{i}"] = ['bad']
         hidden[f"waiting_{i}"] = ['bad']
         ag.add_event([arrival], [arrival, waiting], _arrive_rw, name=f'arrive_{i}')
