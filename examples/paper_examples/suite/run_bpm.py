@@ -14,6 +14,7 @@ arm name is accepted for ad-hoc checks.
 
 Run:  python run_bpm.py env=next_activity N=8 [workers] [seeds=20]
                         [methods=ppo,cgae_cflow,mc_q] [epochs=40] [threads=k]
+                        [beta=0.5]   (causal wall-clock discount; routes to *_beta<val>)
 Output: suite_results_bpm_<env>_n<N>_ep<epochs>/cells/N<N>__<method>__s<seed>.json
 (epochs != 40 routes to a *_smoke<epochs> dir). Resumable by cell file.
 """
@@ -41,6 +42,7 @@ TEST_EPISODES = 20
 EVAL_SEED = 555_000
 SEEDS = 20
 THREADS = None
+BETA = None                    # causal wall-clock discount override (cfg.causal_beta if None)
 METHODS = ["ppo", "cgae_cflow", "mc_q"]
 
 for _a in sys.argv[1:]:
@@ -56,12 +58,15 @@ for _a in sys.argv[1:]:
         EPOCHS = int(_a.split("=", 1)[1])
     elif _a.startswith("threads="):
         THREADS = int(_a.split("=", 1)[1])
+    elif _a.startswith("beta="):
+        BETA = float(_a.split("=", 1)[1])
 
 if ENV not in BPM_BUILDERS:
     raise SystemExit(f"unknown env {ENV!r}; choose from {sorted(BPM_BUILDERS)}")
 BUILD = BPM_BUILDERS[ENV]
 HEUR = BPM_HEURISTICS[ENV]
-OUTDIR = Path(f"suite_results_bpm_{ENV}_n{N}_ep{EPOCHS}" + ("" if EPOCHS == 40 else f"_smoke{EPOCHS}"))
+OUTDIR = Path(f"suite_results_bpm_{ENV}_n{N}_ep{EPOCHS}" + ("" if EPOCHS == 40 else f"_smoke{EPOCHS}")
+              + ("" if BETA is None else f"_beta{BETA:g}"))
 CAUSAL = {m: (m != "ppo") for m in METHODS}
 TAG = f"bpm-{ENV}-n{N}"
 
@@ -213,6 +218,9 @@ def summary(out, baselines):
 
 def main(workers):
     cfg = stoch_config()
+    if BETA is not None:
+        cfg.causal_beta = BETA
+        print(f"[{TAG}] causal_beta override: {BETA}", flush=True)
     OUTDIR.mkdir(parents=True, exist_ok=True)
     (OUTDIR / "cells").mkdir(exist_ok=True)
     logdir = str(OUTDIR / "train")
