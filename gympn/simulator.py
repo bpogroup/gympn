@@ -36,6 +36,19 @@ def _is_real_binding_tuple(b) -> bool:
     )
 
 
+class PostponeRef:
+    """Third element of a component-scoped postpone pseudo-binding
+    (['postpone'], clock, PostponeRef(c)): which component waits."""
+    __slots__ = ('comp', '_id')
+
+    def __init__(self, comp):
+        self.comp = comp
+        self._id = f"postpone_c{comp}"
+
+    def __repr__(self):
+        return f"PostponeRef({self.comp})"
+
+
 class GymProblem(SimProblem):
     """
         A decision problem GymProblem, which consists of a collection of simulation variables SimVar, a collection of simulation events SimEvent, and a collection of actions SimAction.
@@ -76,6 +89,20 @@ class GymProblem(SimProblem):
         self.reward_functions = {} # reward functions are associated to events/actions through a dictionary for backward compatibility with simpn events
         self.var_attributes = {} # similarly, places need to be associated with the attributes of their tokens
         self.reward = 0 #total cumulated reward (for DRL)
+        # Cumulated reward per net component ({component id: reward}), see
+        # net_partition(). Read by the nfgae scheme; the total stays in self.reward.
+        self.comp_reward = {}
+        self._net_partition_cache = None
+        self._net_place_partition = None
+        # Postpone scope. 'global' (default): one postpone pseudo-binding; choosing
+        # it blocks every action until the next event fires anywhere.
+        # 'component': one postpone_c per net component (net_partition) with an
+        # enabled action; choosing it blocks only c's actions, the decision round
+        # continues for the others, and c is asked again at its OWN next event.
+        # With a single component the two are identical. See
+        # suite/paper/NFGAE_THEORY.md (Theorem 1, condition C3').
+        self.postpone_scope = 'global'
+        self.postponed_comps = set()
 
         # helpers for expansion and translation to assignment graph
         # evolutions are events that happen independently of the policy (saved in self.events)
@@ -403,6 +430,16 @@ class GymProblem(SimProblem):
             for (binding, time) in self.event_bindings(a):
                 timed_bindings_act.append((binding, time, a))
 
+        if self._component_postpone() and self.postponed_comps:
+            if len(timed_bindings_evo) == 0:
+                # No event will ever fire again, so a waiting component would
+                # never be woken: wake everyone (the stated exception to
+                # component independence; never triggered with recurring arrivals).
+                self.postponed_comps.clear()
+            else:
+                timed_bindings_act = [b for b in timed_bindings_act
+                                      if not self._postponed_action(b[2])]
+
 
         if len(timed_bindings_evo) == 0 and len(timed_bindings_act) == 0:
             return [], False
@@ -512,6 +549,8 @@ class GymProblem(SimProblem):
 
         if isinstance(event, SimEvent) and not isinstance(event, SimAction):
             self.just_postponed = False
+            if getattr(self, 'postponed_comps', None):
+                self.postponed_comps.discard(self.net_partition().get(event._id))
 
         # process incoming places:
         variable_assignment = []
@@ -660,7 +699,7 @@ class GymProblem(SimProblem):
             if b_time <= self.clock:
                 transition_binding_map.append((binds, b_time, original_transition))
         if self.allow_postpone:
-            transition_binding_map.append((['postpone'], self.clock, None))
+            transition_binding_map.extend(self._postpone_entries(transition_binding_map))
         self.pn_actions = transition_binding_map
         return transition_binding_map
 
@@ -912,7 +951,9 @@ class GymProblem(SimProblem):
 
         self.pn_actions = transition_binding_map
 
-        if self.allow_postpone:
+        if self._component_postpone():
+            self._add_component_postpone_nodes(ret_graph, transition_binding_map)
+        elif self.allow_postpone:
             # postpone is a new node type that allows to delay actions
             # it is connected to all nodes if not just_postponed, otherwise it is isolated
             #postpone_node_feature = torch.tensor([[1.0 if not self.just_postponed else 0.0]]).type(torch.float32)
@@ -946,8 +987,30 @@ class GymProblem(SimProblem):
         if self.plot_observations:
             self.plotter.plot_side_by_side(self.expanded_pn, ret_graph)
 
+        if getattr(self, 'flat_obs', False):
+            ret_graph = self._to_flat(ret_graph)
+
         return {'graph': ret_graph, 'actions_dict': transition_binding_map}#{'graph': ret_graph, 'mask': mask_graph, 'actions_dict': transition_binding_map}
 
+
+    def _to_flat(self, ret_graph):
+        """HeteroData observation -> FlatGraph (flat_obs; see gympn/flat_graph.py).
+
+        The type vocabulary is make_metadata(), the same one the networks are
+        built from. The padding width must be the same for every observation of
+        this net (graphs of different widths cannot be batched), and the widest
+        type can be absent from a given observation (a_transition, a one-hot over
+        all actions, when nothing is enabled), so it is fixed on first use from
+        the net definition and that first observation."""
+        from gympn.flat_graph import feature_width, hetero_to_flat
+        if getattr(self, '_flat_meta', None) is None:
+            self._flat_meta = self.make_metadata()
+            a_w = len(self.actions) + (3 if self.use_structural_features else 0)
+            self._flat_width = max(feature_width(ret_graph.x_dict), a_w, len(self.events), 1)
+        if feature_width(ret_graph.x_dict) > self._flat_width:
+            raise ValueError(f"observation feature width {feature_width(ret_graph.x_dict)} > "
+                             f"fixed flat width {self._flat_width}")
+        return hetero_to_flat(ret_graph, self._flat_meta, self._flat_width)
 
     def remove_empty_nodes(self, ret_graph):
         """
@@ -1062,6 +1125,8 @@ class GymProblem(SimProblem):
         # Expand actions (transitions)
         transition_binding_map = []
         for t in self.actions:
+            if self._postponed_action(t):
+                continue        # its component is waiting (component postpone)
             transition_bindings = self.event_bindings(t)
             valid_transition_bindings = [(binding, time) for (binding, time) in transition_bindings if time <= self.clock]
             if len(valid_transition_bindings) == 0:
@@ -1128,6 +1193,8 @@ class GymProblem(SimProblem):
             "markings": markings,
             "clock": self.clock,
             "reward": self.reward,
+            "comp_reward": dict(getattr(self, "comp_reward", {})),
+            "postponed_comps": set(getattr(self, "postponed_comps", set())),
             "tag": self.network_tag.tag,
             "just_postponed": self.just_postponed,
         }
@@ -1166,6 +1233,8 @@ class GymProblem(SimProblem):
                 p.marking.add(copy.deepcopy(tok))
         self.clock = state["clock"]
         self.reward = state["reward"]
+        self.comp_reward = dict(state.get("comp_reward", {}))
+        self.postponed_comps = set(state.get("postponed_comps", set()))
         self.network_tag.tag = state["tag"]
         self.just_postponed = state["just_postponed"]
         ct = getattr(self, "causal_trace", None)
@@ -1549,6 +1618,135 @@ class GymProblem(SimProblem):
 
         return _obs(), self.clock > self.length or not active_model, i
 
+    def net_partition(self):
+        """Component id of every transition: the connected components of the
+        undirected place-transition graph (an edge joins a place to every
+        transition that consumes from or produces into it). Two transitions
+        sharing ANY place -- a queue, a resource pool -- are in one component,
+        so pre-emption never crosses a component boundary. Depends on the net
+        only, never on the marking or the trajectory: this is the influence
+        certificate of nfgae (suite/paper/NFGAE_THEORY.md, Theorem 1).
+        Postpone is a pseudo-binding, not a transition, so it never merges
+        components.
+
+        DEAD transitions are pruned first: a place is markable if it is marked
+        now or produced into by a live transition, a transition is live if all
+        its input places are markable (least fixpoint). This over-approximates
+        what can ever fire (it ignores token counts and guards), so pruning is
+        sound -- a dead transition never fires under any policy. It matters
+        for e.g. multi-site with n_flex=0, whose empty `flex` place would
+        otherwise glue every site into one component. Dead transitions map
+        to None (they never fire, so are never looked up). Computed on first use from the marking
+        at that time (the initial one, in practice) and cached; the topology
+        is fixed."""
+        cache = getattr(self, '_net_partition_cache', None)
+        if cache is not None:
+            return cache
+        parent = {}
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        transitions = list(self.actions) + list(self.events)
+        markable = {p._id for p in self.places if p.marking}
+        live, changed = set(), True
+        while changed:
+            changed = False
+            for t in transitions:
+                if t._id not in live and all(p._id in markable for p in t.incoming):
+                    live.add(t._id)
+                    markable.update(p._id for p in t.outgoing)
+                    changed = True
+
+        for t in transitions:
+            if t._id not in live:
+                parent.setdefault(('t', t._id), ('t', t._id))
+                continue
+            tk = ('t', t._id)
+            parent.setdefault(tk, tk)
+            for p in list(t.incoming) + list(t.outgoing):
+                pk = ('p', p._id)
+                parent.setdefault(pk, pk)
+                ra, rb = find(tk), find(pk)
+                if ra != rb:
+                    parent[ra] = rb
+        roots, comp = {}, {}
+        for t in transitions:
+            comp[t._id] = (roots.setdefault(find(('t', t._id)), len(roots))
+                           if t._id in live else None)     # dead: never fires
+        # Places inherit the component of the live transitions touching them
+        # (None if only dead transitions touch them).
+        self._net_place_partition = {
+            p._id: (roots.get(find(('p', p._id))) if ('p', p._id) in parent else None)
+            for p in self.places}
+        self._net_partition_cache = comp
+        return comp
+
+    def net_place_partition(self):
+        """Component id of every place (see net_partition)."""
+        self.net_partition()
+        return self._net_place_partition
+
+    def _component_postpone(self):
+        return self.allow_postpone and getattr(self, 'postpone_scope', 'global') == 'component'
+
+    def _postponed_action(self, t):
+        """True if t's component is currently waiting (component postpone)."""
+        return (self._component_postpone() and bool(self.postponed_comps)
+                and self.net_partition().get(t._id) in self.postponed_comps)
+
+    def _postpone_entries(self, transition_binding_map):
+        """Postpone pseudo-bindings to append after the production bindings.
+        Global scope: one (['postpone'], clock, None). Component scope: one
+        (['postpone'], clock, PostponeRef(c)) per component with an enabled
+        action, in increasing component id (the order of the postpone nodes)."""
+        if not self._component_postpone():
+            return [(['postpone'], self.clock, None)]
+        part = self.net_partition()
+        comps = sorted({part[b[2]._id] for b in transition_binding_map
+                        if not (isinstance(b[0], list) and b[0] == ['postpone'])})
+        return [(['postpone'], self.clock, PostponeRef(c)) for c in comps]
+
+    def _add_component_postpone_nodes(self, ret_graph, transition_binding_map):
+        """Component scope: one postpone node per postpone pseudo-binding, in
+        the same order, each receiving edges ONLY from its own component's
+        nodes (place nodes by place, a_transition nodes by binding, e_transition
+        nodes by event). Nodes of dead parts connect to nothing. With one
+        component this is exactly the global block (every live node -> the
+        single postpone node)."""
+        entries = self._postpone_entries(transition_binding_map)
+        comps = [e[2].comp for e in entries]
+        slot = {c: i for i, c in enumerate(comps)}
+        ret_graph['postpone'].x = torch.zeros((len(comps), 1), dtype=torch.float32)
+        part = self.net_partition()
+        place_part = self.net_place_partition()
+        a_comp = [part.get(b[2]._id) for b in transition_binding_map]
+        e_comp = [part.get(GymProblem._get_string_before_last_dot(t._id) if '.' in t._id else t._id)
+                  for t in self.expanded_pn.events] if getattr(self, 'expanded_pn', None) is not None else []
+        for n_t in list(ret_graph.node_types):
+            if n_t == 'postpone':
+                continue
+            num_nodes = ret_graph[n_t].x.size(0)
+            if n_t == 'a_transition':
+                node_comps = a_comp[:num_nodes]
+            elif n_t == 'e_transition':
+                node_comps = e_comp[:num_nodes]
+            else:
+                node_comps = [place_part.get(n_t)] * num_nodes
+            src = [i for i, c in enumerate(node_comps) if c in slot]
+            dst = [slot[node_comps[i]] for i in src]
+            edge_indices = torch.tensor([src, dst], dtype=torch.int64).reshape(2, -1)
+            edge_type = (n_t, 'to_postpone', 'postpone')
+            if edge_type not in ret_graph.edge_types:
+                ret_graph[edge_type].edge_index = edge_indices
+            else:
+                ret_graph[edge_type].edge_index = torch.cat(
+                    (ret_graph[edge_type].edge_index, edge_indices), dim=1)
+        transition_binding_map.extend(entries)
+
     def update_reward(self, timed_binding, result_tokens=None, agent_decision=True):
         """Accrue the firing's reward and, in causal mode, record it in the trace.
 
@@ -1576,6 +1774,8 @@ class GymProblem(SimProblem):
                     "Transition " + transition._id + ": reward function evaluate to a non-numeric type for values " + str(
                         variable_values) + ".")
             self.reward += r_f
+            c = self.net_partition().get(transition._id)
+            self.comp_reward[c] = self.comp_reward.get(c, 0.0) + r_f
 
         else:
             r_f = 0
@@ -1819,6 +2019,18 @@ class GymProblem(SimProblem):
                     time=0
                 )
 
+        if getattr(args, 'flat_obs', False):
+            flat_encoders = ('type_embed', 'temb', 'type_embed_film', 'tembf', 'aepn')
+            encs = [(getattr(args, k, None) or {}).get('encoder', 'aepn') for k in ('policy_kwargs', 'value_kwargs')]
+            if any(e not in flat_encoders for e in encs):
+                raise ValueError(f"flat_obs needs a flat encoder for actor and critic, got {encs}")
+            if args.causal_rl or getattr(args, 'causal_pg', False) or getattr(args, 'cf_config', None):
+                raise ValueError("flat_obs supports the plain PPO update path only (ppo, nfgae)")
+        # Set before AEPN_Env deep-copies the problem, so the frozen copy (reset)
+        # and the test env carry it too.
+        self.flat_obs = bool(getattr(args, 'flat_obs', False))
+        self._flat_meta = None
+
         env = AEPN_Env(self)
 
         if args.test_in_train:
@@ -1949,7 +2161,7 @@ class GymProblem(SimProblem):
             return bindings
 
         augmented = list(bindings)
-        augmented.append((['postpone'], self.clock, None))
+        augmented.extend(self._postpone_entries(bindings))
         return augmented
 
     def step(self, reporter=None, length=None):
@@ -1994,7 +2206,7 @@ class GymProblem(SimProblem):
                     timed_binding = obs['actions_dict'][max_index]
 
                     if self.allow_postpone and isinstance(timed_binding, tuple) and timed_binding[0] == ['postpone']:
-                        self.postpone()
+                        self.postpone(comp=getattr(timed_binding[2], 'comp', None))
                         print("Postponed!")
                     else:
                         output_tokens = self.fire(timed_binding)
@@ -2017,7 +2229,7 @@ class GymProblem(SimProblem):
                         timed_binding = (['postpone'], self.clock, None)
 
                     if postponed:
-                        self.postpone()
+                        self.postpone(comp=getattr(timed_binding[2], 'comp', None))
                         print("Postponed!")
                         #return timed_binding, active_model
                     else:
@@ -2250,14 +2462,29 @@ class GymProblem(SimProblem):
                 if attr not in self.var_attributes[k]:
                     raise Exception(f"Exception in setting unobservable token attrs. Unobservable attribute {attr} must be present in the place's attributes.")
 
-    def postpone(self):
+    def postpone(self, comp=None):
         """
         Postpones the current action by advancing the clock to the next valid evolution event.
+
+        Component scope (postpone_scope='component'): only component ``comp``
+        waits -- its actions are blocked until one of ITS events fires -- and the
+        decision round continues for the other components.
         Also registers all tokens that were available for action bindings but were not used
         because of the postpone into the eligibility trace with zero immediate reward.
         """
         if not self.allow_postpone:
             raise Exception("Postpone is not allowed in this A-E PN.")
+
+        if self._component_postpone():
+            if comp is None:
+                raise ValueError("component postpone needs the component id")
+            if self.causal_rl:
+                bindings, _ = self.bindings()
+                part = self.net_partition()
+                self.update_causal_trace_postpone(
+                    [b for b in bindings if part.get(b[2]._id) == comp])
+            self.postponed_comps.add(comp)
+            return
 
         if self.causal_rl:
             # collect current enabled bindings (timed bindings: (binding, time, transition))

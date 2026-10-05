@@ -141,6 +141,46 @@ def make_next_activity(n=4, causal_rl=False, allow_postpone=True,
     return ag
 
 
+def _arrive_na_half(a):
+    return [SimToken(_draw_case(), delay=2), SimToken(_draw_case())]
+
+
+def make_next_activity_split(n=4, causal_rl=False, allow_postpone=True,
+                             causal_postpone_tokenflow=False):
+    """DIAGNOSTIC variant of `make_next_activity`: each employee has its OWN
+    queue and arrival stream (one case every 2 time units, so a copy still
+    receives one case per time unit). Nothing is shared inside a copy, so the
+    two resource chains the provenance DAG finds at N=1 really are causally
+    independent (true K=2, no pre-emption). Paired with the shared-queue env
+    it separates the contention blind spot of cgae-cf from its critic /
+    bootstrap problem. Same rates, same decision table; the warm start puts
+    one case of each risk level in EACH employee's queue."""
+    ag = GymProblem(allow_postpone=allow_postpone, causal_rl=causal_rl,
+                    causal_postpone_tokenflow=causal_postpone_tokenflow)
+    hidden = {}
+    for i in range(n):
+        for skill in (0, 1):
+            k = f"{i}_{skill}"
+            arrival = ag.add_var(f"arrival_{k}", var_attributes=['risk', 'bad'])
+            waiting = ag.add_var(f"waiting_{k}", var_attributes=['risk', 'bad'])
+            busy = ag.add_var(f"busy_{k}", var_attributes=['risk', 'skill', 'activity', 'ok'])
+            employee = ag.add_var(f"employee_{k}", var_attributes=['skill'])
+            employee.put({'skill': skill})
+            arrival.put({'risk': 0, 'bad': 0})
+            for risk in (0, 1, 2):      # deterministic warm start: no build-time draws
+                waiting.put({'risk': risk, 'bad': 1 if risk == 2 else 0})
+            hidden[f"arrival_{k}"] = ['bad']
+            hidden[f"waiting_{k}"] = ['bad']
+            ag.add_event([arrival], [arrival, waiting], _arrive_na_half, name=f'arrive_{k}')
+            ag.add_action([waiting, employee], [busy], behavior=_approve, name=f"approve_{k}")
+            ag.add_action([waiting, employee], [busy], behavior=_investigate,
+                          name=f"investigate_{k}")
+            ag.add_event([busy], [employee], _na_done, name=f'done_{k}',
+                         reward_function=lambda b: b[2]['ok'])
+    ag.set_unobservable(token_attrs=hidden)
+    return ag
+
+
 # --------------------------------------------------------------------------
 # 3) rework / quality gate
 # --------------------------------------------------------------------------
@@ -231,10 +271,12 @@ rework_heuristic = _make_rate_heuristic('ship')
 BPM_BUILDERS = {
     "next_activity": make_next_activity,
     "rework": make_rework,
+    "next_activity_split": make_next_activity_split,   # diagnostic: no shared queue
 }
 BPM_HEURISTICS = {
     "next_activity": next_activity_heuristic,
     "rework": rework_heuristic,
+    "next_activity_split": next_activity_heuristic,
 }
 
 

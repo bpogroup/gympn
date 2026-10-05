@@ -57,14 +57,19 @@ class AEPN_Env(Env):
         required (node expansion).
         """
         old_rewards = self.pn.reward
+        old_comp = dict(getattr(self.pn, 'comp_reward', {}))
         if action < 0 or action >= len(self.pn.pn_actions):
             valid_len = len(self.pn.pn_actions) - 1
             raise ValueError(f"Action {action} is not valid. Must be between 0 and {valid_len}")
 
         # handle postpone
-        if action == len(self.pn.pn_actions) - 1 and self.pn.pn_actions[-1][0] == ['postpone']:
-            self.pn.postpone()
-            self.pn.just_postponed = True
+        chosen = self.pn.pn_actions[action]
+        if isinstance(chosen[0], list) and chosen[0] == ['postpone']:
+            if chosen[2] is None:                       # global postpone
+                self.pn.postpone()
+                self.pn.just_postponed = True
+            else:                                       # component postpone
+                self.pn.postpone(comp=chosen[2].comp)
             if self.debug:
                 print("Postpone!")
         else:
@@ -97,6 +102,11 @@ class AEPN_Env(Env):
         # (finish(mode='replace')), so restoring them changes nothing for
         # lrq/lrq2/mc_q at mu=0.
         reward = (self.pn.reward - old_rewards)
+        # Per-component share of this step's reward (nfgae; see
+        # GymProblem.net_partition). Sums to `reward`.
+        info['comp_reward'] = {c: v - old_comp.get(c, 0.0)
+                               for c, v in getattr(self.pn, 'comp_reward', {}).items()
+                               if v != old_comp.get(c, 0.0)}
 
         return observation, reward, terminated, False, info
 

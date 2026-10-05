@@ -111,7 +111,7 @@ def make_parser():
     alg.add_argument('--causal_scheme',
                      type=str,
                      default='lrq',
-                     choices=['lrq', 'lrq2', 'lrq2c', 'ccf', 's_ccf', 'lrq3', 'lqi', 'lcv', 'lva', 'mc_q', 'cf', 'ls_hca', 'alin', 'cgae', 'cgae_flow', 'cgae_cflow', 'cgae_cflow2', 'cgae_cap', 'cgae_dag', 'cfgae'],
+                     choices=['lrq', 'lrq2', 'lrq2c', 'ccf', 's_ccf', 'lrq3', 'lqi', 'lcv', 'lva', 'mc_q', 'cf', 'ls_hca', 'alin', 'cgae', 'cgae_flow', 'cgae_cflow', 'cgae_cflow2', 'cgae_cap', 'cgae_dag', 'cfgae', 'cgae_cflow_ct', 'nfgae'],
                      help='causal credit scheme. "ls_hca" (Lineage-Structured Hindsight Credit '
                           'Assignment, FORKFREE_LINEAGE_RETHINK.md Idea 1) is the fork-free dual of '
                           '"cf": PURE/EXOGENOUS reward-types are read off the static provenance DAG '
@@ -412,6 +412,11 @@ def make_parser():
                        type=bool,
                        default=False,
                        help='wether to load a previously trained policy as starting point for this run')
+    train.add_argument('--flat_obs',
+                       type=lambda x: str(x).lower() == 'true',
+                       default=False,
+                       help='convert observations to flat graphs (gympn/flat_graph.py) when they are '
+                            'built; needs a flat encoder (type_embed / aepn) and the PPO or nfgae path')
     train.add_argument('--test_in_train',
                        type=lambda x: str(x).lower() == 'true',
                        default=True,
@@ -539,6 +544,8 @@ def make_policy_network(args, metadata=None):
                 # that prevents the policy from settling. See INSTABILITY_ANALYSIS.md.
                 dropout=args.policy_kwargs.get("dropout", 0.0),
                 residual=args.policy_kwargs.get("residual", True),
+                encoder=args.policy_kwargs.get("encoder", "aepn"),
+                encoder_kwargs=args.policy_kwargs.get("encoder_kwargs"),
                 # Opt-in (default False = byte-identical to before): lets the
                 # actor condition each action's logit on pooled context from
                 # ALL action/postpone nodes (the same pooling HeteroCritic has
@@ -590,6 +597,8 @@ def make_value_network(args, metadata=None):
             # targets are regressed in train (dropout on). See INSTABILITY_ANALYSIS.md.
             dropout=args.value_kwargs.get("dropout", 0.0),
             residual=args.value_kwargs.get("residual", True),
+            encoder=args.value_kwargs.get("encoder", "aepn"),
+            encoder_kwargs=args.value_kwargs.get("encoder_kwargs"),
             # LVA: second scalar head on the shared encoder, regressed on the
             # per-decision lineage credit (set by make_agent for scheme 'lva').
             aux_head=args.value_kwargs.get("aux_head", False),
@@ -643,6 +652,8 @@ def make_agent(args, metadata=None):
             num_heads=args.policy_kwargs.get("num_heads", 1),
             dropout=args.policy_kwargs.get("dropout", 0.0),
             residual=args.policy_kwargs.get("residual", True),
+                encoder=args.policy_kwargs.get("encoder", "aepn"),
+                encoder_kwargs=args.policy_kwargs.get("encoder_kwargs"),
         )
         if causal_scheme == 'lqi':
             qlin_network = HeteroQOff(
@@ -653,6 +664,8 @@ def make_agent(args, metadata=None):
                 num_heads=args.policy_kwargs.get("num_heads", 1),
                 dropout=args.policy_kwargs.get("dropout", 0.0),
                 residual=args.policy_kwargs.get("residual", True),
+                encoder=args.policy_kwargs.get("encoder", "aepn"),
+                encoder_kwargs=args.policy_kwargs.get("encoder_kwargs"),
             )
     causal_mu = getattr(args, 'causal_mu', 0.0)
     phi_coef = getattr(args, 'phi_coef', 0.0)
@@ -678,6 +691,8 @@ def make_agent(args, metadata=None):
             num_heads=args.value_kwargs.get("num_heads", 1),
             dropout=args.value_kwargs.get("dropout", 0.0),
             residual=args.value_kwargs.get("residual", True),
+            encoder=args.value_kwargs.get("encoder", "aepn"),
+            encoder_kwargs=args.value_kwargs.get("encoder_kwargs"),
             metadata=metadata
         )
 

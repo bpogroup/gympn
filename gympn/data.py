@@ -12,6 +12,8 @@ import torch
 from torch_geometric.data import HeteroData
 from torch_geometric.loader import DataLoader
 
+from gympn.flat_graph import is_flat
+
 Tensor = torch.Tensor
 
 
@@ -291,6 +293,27 @@ def smdp_gae(rewards: Tensor, values: Tensor, discounts: Tensor, lam: float,
     return adv
 
 
+class _CachedBatches(list):
+    """The batches of a shuffle=False DataLoader, collated once and replayed on
+    every pass.
+
+    Starting to iterate a torch DataLoader draws one number from the global
+    torch RNG (its worker base seed), even with no workers. To keep training
+    bit-identical to iterating the DataLoader once per pass, collating here
+    leaves the RNG state untouched and every pass makes that same single draw.
+    Without this, the cache shifts the RNG stream and later rollouts sample
+    different actions (same computation, different random numbers)."""
+
+    def __init__(self, loader):
+        state = torch.get_rng_state()
+        super().__init__(loader)
+        torch.set_rng_state(state)
+
+    def __iter__(self):
+        torch.empty((), dtype=torch.int64).random_()
+        return super().__iter__()
+
+
 class TrajectoryBuffer:
     """
     DCL-ready episodic buffer.
@@ -437,8 +460,11 @@ class TrajectoryBuffer:
         # Record expected node counts at storage time (helps detect later mismatches)
         try:
             g = state['graph']
-            nA = g['a_transition'].num_nodes if hasattr(g, 'node_types') and 'a_transition' in g.node_types else 0
-            nP = g['postpone'].num_nodes if hasattr(g, 'node_types') and 'postpone' in g.node_types else 0
+            if is_flat(g):
+                nA, nP = g.a_idx.numel(), g.p_idx.numel()
+            else:
+                nA = g['a_transition'].num_nodes if hasattr(g, 'node_types') and 'a_transition' in g.node_types else 0
+                nP = g['postpone'].num_nodes if hasattr(g, 'node_types') and 'postpone' in g.node_types else 0
             self.logpis_meta.append({'nA': int(nA), 'nP': int(nP), 'total': int(nA + nP)})
         except Exception:
             self.logpis_meta.append({'nA': 0, 'nP': 0, 'total': 0})
@@ -571,6 +597,50 @@ class TrajectoryBuffer:
         # The old heuristic would incorrectly trigger causal mode when standard RL
         # step rewards happened to cancel to zero.
         is_causal = self.causal_rl
+
+        # --- nfgae: net-factored GAE -------------------------------------
+        # Per-component SMDP-GAE, each component on its OWN decision clock,
+        # with the component-indexed critic V_c (values_ep[t] = V_{c(t)}(s_t),
+        # see HeteroCritic pool_mask). For component c with epochs t_1<t_2<..:
+        #   R_i = c's rewards over steps [t_i, t_{i+1})   (undiscounted at t_i,
+        #         the same convention smdp_gae uses for a single step)
+        #   d_i = exp(-beta (time[t_{i+1}] - time[t_i])), 0 after c's last epoch
+        #   A_i = R_i + d_i V_c(s_{t_{i+1}}) - V_c(s_{t_i}) + lam d_i A_{i+1}
+        # With one component this is term-for-term the smdp_gae below (K=1
+        # exactness, NFGAE_THEORY.md Theorem 2a). Uses no causal trace.
+        nf_comp = getattr(self, '_nf_comp', None)
+        if self.causal_scheme == 'nfgae' and nf_comp is not None:
+            import math
+            T = rewards_ep.shape[0]
+            comp = list(nf_comp[:T])
+            rw = list(self._nf_rew[:T])
+            times = self.times[self.start:self.end]
+            beta = self.causal_beta
+            adv_ep = torch.zeros(T, dtype=torch.float32)
+            for c in set(comp):
+                idx = [t for t in range(T) if comp[t] == c]
+                gae = 0.0
+                for j in range(len(idx) - 1, -1, -1):
+                    t = idx[j]
+                    nxt = idx[j + 1] if j + 1 < len(idx) else None
+                    R = sum(rw[u].get(c, 0.0) for u in range(t, nxt if nxt is not None else T))
+                    if nxt is None:
+                        d, v_next = 0.0, 0.0
+                    else:
+                        d = math.exp(-beta * max(0.0, times[nxt] - times[t]))
+                        v_next = float(values_ep[nxt])
+                    delta = R + d * v_next - float(values_ep[t])
+                    gae = delta + d * self.lam * gae
+                    adv_ep[t] = gae
+            returns_ep = adv_ep + values_ep
+            self._nf_comp = self._nf_rew = None
+            if self.returns_.numel() == 0:
+                self.returns_ = returns_ep.clone(); self.advantages_ = adv_ep.clone()
+            else:
+                self.returns_ = torch.cat([self.returns_, returns_ep], dim=0)
+                self.advantages_ = torch.cat([self.advantages_, adv_ep], dim=0)
+            self.start = self.end
+            return
 
         # --- cf: measured counterfactual (COMA) advantage -----------------
         # The advantage is MEASURED at rollout time by CRN forks with
@@ -1106,7 +1176,7 @@ class TrajectoryBuffer:
             # graph. HeteroData.clone() copies the tensors at the torch level and
             # is far cheaper than copy.deepcopy walking the Python object graph;
             # the labels land on this clone, never on the buffered graph.
-            g: HeteroData = s['graph'].clone()
+            g = s['graph'].clone()                     # HeteroData, or FlatGraph (flat_obs)
             g.y = torch.tensor(actions[i], dtype=torch.long)
             # Ensure scalar shapes for value and advantage
             g.advantage = adv[i].reshape(()).detach()
@@ -1124,8 +1194,12 @@ class TrajectoryBuffer:
             g.logpis = lp  # optional: whole-step old policy for debugging
 
             # --- Split lp per node type by actual counts in THIS sample
-            nA = g['a_transition'].x.size(0) if 'a_transition' in g.node_types else 0
-            nP = g['postpone'].x.size(0) if 'postpone' in g.node_types else 0
+            flat = is_flat(g)
+            if flat:
+                nA, nP = int(g.a_idx.numel()), int(g.p_idx.numel())
+            else:
+                nA = g['a_transition'].x.size(0) if 'a_transition' in g.node_types else 0
+                nP = g['postpone'].x.size(0) if 'postpone' in g.node_types else 0
             total_expected = nA + nP
 
             if total_expected > 0:
@@ -1139,9 +1213,9 @@ class TrajectoryBuffer:
                         'expected_nA_nP': int(total_expected),
                         'nA': int(nA),
                         'nP': int(nP),
-                        'g_node_types': list(g.node_types) if hasattr(g, 'node_types') else None,
-                        'a_batch_len': int(getattr(g['a_transition'], 'batch', torch.tensor([], dtype=torch.int64)).numel()) if 'a_transition' in g.node_types else None,
-                        'p_batch_len': int(getattr(g['postpone'], 'batch', torch.tensor([], dtype=torch.int64)).numel()) if 'postpone' in g.node_types else None,
+                        'g_node_types': list(g.node_types) if hasattr(g, 'node_types') and not flat else None,
+                        'a_batch_len': int(getattr(g['a_transition'], 'batch', torch.tensor([], dtype=torch.int64)).numel()) if not flat and 'a_transition' in g.node_types else None,
+                        'p_batch_len': int(getattr(g['postpone'], 'batch', torch.tensor([], dtype=torch.int64)).numel()) if not flat and 'postpone' in g.node_types else None,
                         'stored_meta': self.logpis_meta[i] if i < len(self.logpis_meta) else None,
                     }
 
@@ -1161,9 +1235,13 @@ class TrajectoryBuffer:
                         lp = torch.cat([lp, torch.zeros(total_expected - lp.numel(), dtype=torch.float32)], dim=0)
 
             # Attach per-type old policy in the SAME order as actions_dict: [a_transition][postpone]
-            if 'a_transition' in g.node_types:
+            if flat:
+                empty = torch.tensor([], dtype=torch.float32)
+                g.logpis_a = lp[:nA] if total_expected else empty
+                g.logpis_p = lp[nA:nA + nP] if total_expected else empty
+            elif 'a_transition' in g.node_types:
                 g['a_transition'].logpis = lp[:nA] if total_expected else torch.tensor([], dtype=torch.float32)
-            if 'postpone' in g.node_types:
+            if not flat and 'postpone' in g.node_types:
                 g['postpone'].logpis = lp[nA:nA + nP] if total_expected else torch.tensor([], dtype=torch.float32)
 
             # --- DCL / targets (optional): split target_pi with same ordering
@@ -1175,11 +1253,15 @@ class TrajectoryBuffer:
             qf = q_first[i] if isinstance(q_first[i], torch.Tensor) else torch.tensor([0.0], dtype=torch.float32)
             g.q_first = qf
 
-            if 'a_transition' in g.node_types:
+            if flat:
+                empty = torch.tensor([], dtype=torch.float32)
+                g.target_pi_a = tpi[:nA] if tpi.numel() >= nA else empty
+                g.target_pi_p = tpi[nA:nA + nP] if tpi.numel() >= (nA + nP) else empty
+            elif 'a_transition' in g.node_types:
                 g['a_transition'].target_pi = (
                     tpi[:nA] if tpi.numel() >= nA else torch.tensor([], dtype=torch.float32)
                 )
-            if 'postpone' in g.node_types:
+            if not flat and 'postpone' in g.node_types:
                 g['postpone'].target_pi = (
                     tpi[nA:nA + nP] if tpi.numel() >= (nA + nP) else torch.tensor([], dtype=torch.float32)
                 )
@@ -1199,9 +1281,12 @@ class TrajectoryBuffer:
             keep = len(data_list) - (len(data_list) % batch_size)
             data_list = data_list[:keep]
 
-        loader = DataLoader(data_list, batch_size=batch_size, shuffle=False)
-
-        return loader
+        # Collate once and hand back the batches. Every consumer iterates the
+        # loader once per update pass (policy_updates + value_updates passes),
+        # and with shuffle=False each pass saw the same batches anyway, so this
+        # only removes the repeated HeteroData collation (the largest single cost
+        # in training at N>=4). No consumer writes into a batch.
+        return _CachedBatches(DataLoader(data_list, batch_size=batch_size, shuffle=False))
 
 
 def print_status_bar(i, epochs, history, verbose=1):

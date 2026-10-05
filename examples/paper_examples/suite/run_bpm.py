@@ -15,6 +15,11 @@ arm name is accepted for ad-hoc checks.
 Run:  python run_bpm.py env=next_activity N=8 [workers] [seeds=20]
                         [methods=ppo,cgae_cflow,mc_q] [epochs=40] [threads=k]
                         [beta=0.5]   (causal wall-clock discount; routes to *_beta<val>)
+                        [postpone=0] (no postpone; routes to *_nopp)
+                        [postpone=component] (one postpone per net component, the
+                                     scope nfgae's Theorem 1 allows; routes to *_ppc)
+Arm `nfgae` (net-factored GAE, paper/NFGAE_THEORY.md) runs on the plain SMDP-GAE
+path with no causal trace; it needs postpone=0.
 Output: suite_results_bpm_<env>_n<N>_ep<epochs>/cells/N<N>__<method>__s<seed>.json
 (epochs != 40 routes to a *_smoke<epochs> dir). Resumable by cell file.
 """
@@ -44,6 +49,11 @@ SEEDS = 20
 THREADS = None
 BETA = None                    # causal wall-clock discount override (cfg.causal_beta if None)
 METHODS = ["ppo", "cgae_cflow", "mc_q"]
+POSTPONE = True
+POSTPONE_SCOPE = "global"
+FLAT = False                   # flat=1: flat graph observations (needs net=temb|tembf|aepn; routes to *_flat)
+NET = "aepn"                   # net=hgt|temb|tembf|aepn: actor+critic encoder (default aepn; *_aepn dirs, hgt = the old unsuffixed dirs)
+BASES = None                   # bases=K: AEPNStack basis count (default 8; routes to *_b<K>)
 
 for _a in sys.argv[1:]:
     if _a.startswith("env="):
@@ -60,14 +70,31 @@ for _a in sys.argv[1:]:
         THREADS = int(_a.split("=", 1)[1])
     elif _a.startswith("beta="):
         BETA = float(_a.split("=", 1)[1])
+    elif _a.startswith("flat="):
+        FLAT = _a.split("=", 1)[1] not in ("0", "false", "False")
+    elif _a.startswith("bases="):
+        BASES = int(_a.split("=", 1)[1])
+    elif _a.startswith("net="):
+        NET = {"temb": "type_embed", "tembf": "type_embed_film"}.get(_a.split("=", 1)[1], _a.split("=", 1)[1])
+    elif _a.startswith("postpone="):
+        _v = _a.split("=", 1)[1]
+        POSTPONE = _v not in ("0", "false", "False")
+        if _v == "component":
+            POSTPONE_SCOPE = "component"
 
 if ENV not in BPM_BUILDERS:
     raise SystemExit(f"unknown env {ENV!r}; choose from {sorted(BPM_BUILDERS)}")
 BUILD = BPM_BUILDERS[ENV]
 HEUR = BPM_HEURISTICS[ENV]
 OUTDIR = Path(f"suite_results_bpm_{ENV}_n{N}_ep{EPOCHS}" + ("" if EPOCHS == 40 else f"_smoke{EPOCHS}")
-              + ("" if BETA is None else f"_beta{BETA:g}"))
-CAUSAL = {m: (m != "ppo") for m in METHODS}
+              + ("" if BETA is None else f"_beta{BETA:g}")
+              + ("" if POSTPONE else "_nopp")
+              + ("_ppc" if POSTPONE and POSTPONE_SCOPE == "component" else "")
+              + {"hgt": "", "type_embed": "_temb", "type_embed_film": "_tembf", "aepn": "_aepn"}[NET]
+              + ("" if BASES is None else f"_b{BASES}")
+              + ("_flat" if FLAT else ""))
+# nfgae needs no causal trace: it runs on the plain SMDP-GAE path.
+CAUSAL = {m: (m not in ("ppo", "nfgae")) for m in METHODS}
 TAG = f"bpm-{ENV}-n{N}"
 
 
@@ -103,8 +130,18 @@ def _args(method, seed, cfg, logdir):
         "save_freq": 1_000_000, "name": f"{method}__s{seed}", "datetag": False,
         "logdir": logdir,
     }
+    # Always explicit: the library default is aepn, so net=hgt must say so.
+    net_kw = {"encoder": NET}
+    if BASES is not None:
+        net_kw["encoder_kwargs"] = {"num_bases": BASES}
+    a["policy_kwargs"] = dict(net_kw)
+    a["value_kwargs"] = dict(net_kw)
+    if FLAT:
+        a["flat_obs"] = True
     if CAUSAL[method]:
         a.update({"causal_rl": True, "causal_scheme": method})
+    elif method == "nfgae":
+        a.update({"causal_rl": False, "causal_scheme": "nfgae", "smdp_discount": True})
     else:
         a.update({"causal_rl": False, "smdp_discount": True})
     return a
@@ -112,8 +149,9 @@ def _args(method, seed, cfg, logdir):
 
 def train_cell(method, seed, cfg, logdir, baselines):
     _set_seed(seed)
-    env = BUILD(N, causal_rl=CAUSAL[method], allow_postpone=True,
-                causal_postpone_tokenflow=CAUSAL[method])
+    env = BUILD(N, causal_rl=CAUSAL[method], allow_postpone=POSTPONE,
+                causal_postpone_tokenflow=CAUSAL[method] and POSTPONE)
+    env.postpone_scope = POSTPONE_SCOPE
     args = _args(method, seed, cfg, logdir)
     saved = sys.argv; sys.argv = sys.argv[:1]
     t0 = time.time()
@@ -159,8 +197,9 @@ def crn_precheck(episodes=20):
             return 0
 
     def build(causal):
-        pn = BUILD(N, causal_rl=causal, allow_postpone=True,
-                   causal_postpone_tokenflow=causal)
+        pn = BUILD(N, causal_rl=causal, allow_postpone=POSTPONE,
+                   causal_postpone_tokenflow=causal and POSTPONE)
+        pn.postpone_scope = POSTPONE_SCOPE
         pn.length = LENGTH
         if causal:
             import types, uuid
@@ -216,7 +255,20 @@ def summary(out, baselines):
                                                   "rows": rows}, indent=2))
 
 
+def _keep_awake():
+    """Windows: stop the machine from sleeping while cells run (the N=8 pilot
+    lost a night to modern standby on battery). ES_CONTINUOUS|ES_SYSTEM_REQUIRED;
+    the display may still turn off. No-op elsewhere."""
+    if os.name == "nt":
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | 0x00000001)
+        except Exception:
+            pass
+
+
 def main(workers):
+    _keep_awake()
     cfg = stoch_config()
     if BETA is not None:
         cfg.causal_beta = BETA

@@ -25,7 +25,14 @@ are run last, only so the identity can be re-verified on the new cells.
   tier 2: cgae, cgae_flow
 
 Run: python run_multisite_protocol.py [workers] [seeds=20] [methods=a,b,...] [epochs=40]
+                                      [net=aepn|hgt] [flat=1] [threads=T]
 (epochs != 40 routes to a scratch dir: smoke only). Resumable by cell file.
+net: actor+critic encoder, default aepn (gympn's default since 2026-10-05). Every
+cell in suite_results_multisite_protocol is HGT, so net=hgt keeps that directory
+and any other net routes to suite_results_multisite_protocol_<net>[_flat]: the
+two networks never share a results directory. flat=1: flat graph observations
+(gympn/flat_graph.py; non-HGT nets, ppo/nfgae only). threads=T overrides the
+per-worker torch threads (default: physical cores / workers).
 """
 import json
 import os
@@ -57,15 +64,28 @@ TIER1 = ["ppo", "cgae_cflow", "ccf", "cgae_cap", "mc_q"]
 TIER2 = ["cgae", "cgae_flow"]
 METHODS = TIER1 + TIER2
 
+NET = "aepn"
+FLAT = False
+THREADS = None
+
 for _a in sys.argv[1:]:
-    if _a.startswith("seeds="):
+    if _a.startswith("net="):
+        NET = _a.split("=", 1)[1]
+    elif _a.startswith("flat="):
+        FLAT = _a.split("=", 1)[1] not in ("0", "false", "False")
+    elif _a.startswith("threads="):
+        THREADS = int(_a.split("=", 1)[1])
+    elif _a.startswith("seeds="):
         SEEDS = int(_a.split("=", 1)[1])
     elif _a.startswith("methods="):
         METHODS = _a.split("=", 1)[1].split(",")
     elif _a.startswith("epochs="):
         EPOCHS = int(_a.split("=", 1)[1])
         OUTDIR = Path(f"suite_results_multisite_protocol_smoke{EPOCHS}")
-CAUSAL = {m: (m != "ppo") for m in METHODS}   # after argv: methods= may add arms
+if NET != "hgt" or FLAT:
+    OUTDIR = Path(f"{OUTDIR}_{NET}" + ("_flat" if FLAT else ""))
+CAUSAL = {m: (m not in ("ppo", "nfgae")) for m in METHODS}   # after argv: methods= may add arms
+# nfgae (paper/NFGAE_THEORY.md) needs no causal trace: plain SMDP-GAE path.
 
 
 def _args(method, seed, cfg, logdir):
@@ -83,9 +103,14 @@ def _args(method, seed, cfg, logdir):
         "eval_seed": EVAL_SEED,
         "save_freq": 1_000_000, "name": f"{method}__s{seed}", "datetag": False,
         "logdir": logdir,
+        "policy_kwargs": {"encoder": NET}, "value_kwargs": {"encoder": NET},
     }
+    if FLAT:
+        a["flat_obs"] = True
     if CAUSAL[method]:
         a.update({"causal_rl": True, "causal_scheme": method})
+    elif method == "nfgae":
+        a.update({"causal_rl": False, "causal_scheme": "nfgae", "smdp_discount": True})
     else:
         a.update({"causal_rl": False, "smdp_discount": True})
     return a
@@ -106,6 +131,7 @@ def train_cell(method, seed, cfg, logdir, baselines):
     m = _extract_metrics(getattr(env, "training_history", {}) or {}, cfx)
     m.update({"env": "multisite", "n_sites": N_SITES, "n_local": N_LOCAL, "n_flex": N_FLEX,
               "allow_postpone": False, "method": method, "seed": seed,
+              "net": NET, "flat_obs": FLAT,
               "epochs": EPOCHS, "episodes": EPISODES, "test_freq": TEST_FREQ,
               "test_episodes": TEST_EPISODES, "eval_seed": EVAL_SEED,
               "baselines": baselines, "minutes": (time.time() - t0) / 60.0})
@@ -228,10 +254,11 @@ def main(workers):
     # seeds outer, arms inner within a tier: partial results stay balanced across arms
     pending = [(m, s) for tier in (t1, t2) for s in range(SEEDS) for m in tier
                if not (OUTDIR / "cells" / f"{m}__s{s}.json").exists()]
-    tpw = _threads_per_worker(workers)
+    tpw = THREADS if THREADS is not None else _threads_per_worker(workers)
     print(f"[multisite-protocol] {len(pending)} cells ({len(METHODS)} arms x {SEEDS} seeds, "
           f"{EPOCHS} epochs x {EPISODES} episodes, eval every {TEST_FREQ} on {TEST_EPISODES}), "
-          f"{workers} workers x {tpw} threads, eval_seed={EVAL_SEED}", flush=True)
+          f"{workers} workers x {tpw} threads, eval_seed={EVAL_SEED}, net={NET}"
+          + (", flat" if FLAT else "") + f" -> {OUTDIR}", flush=True)
 
     if pending:
         import multiprocessing as mp

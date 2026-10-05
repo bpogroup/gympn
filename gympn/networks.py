@@ -4,8 +4,10 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import HGTConv, global_max_pool
+from torch_geometric.nn import HGTConv, TransformerConv, global_max_pool
 from torch_geometric.utils import softmax as pyg_softmax
+
+from gympn.flat_graph import cat_flat, feature_width, flatten_hetero, is_flat
 
 
 # ---------------------------------------------------------------------
@@ -85,6 +87,12 @@ def _batch_index_for(graph, ntype, n, device):
     each node belongs to), defaulting to all-zeros (single graph) when the
     type carries no PyG `.batch` attribute (the common case outside a
     batched training update)."""
+    if is_flat(graph):
+        idx = graph.a_idx if ntype == 'a_transition' else graph.p_idx
+        b = getattr(graph, 'batch', None)
+        if b is None:
+            return torch.zeros(idx.numel(), dtype=torch.int64, device=device)
+        return b[idx].to(device)
     try:
         if ntype in graph.x_dict and hasattr(graph[ntype], 'batch'):
             return graph[ntype].batch
@@ -109,6 +117,37 @@ def _pool_action_postpone(x_enc, graph):
     concat_nodes = torch.cat(parts, dim=0)
     pool_index = torch.cat(idx_parts, dim=0)
     return global_max_pool(concat_nodes, pool_index)
+
+
+def _pool_mask(graph, ntype):
+    """nfgae's per-node pooling mask for ntype, or None when absent."""
+    if is_flat(graph):
+        return getattr(graph, 'a_pool_mask' if ntype == 'a_transition' else 'p_pool_mask', None)
+    try:
+        if ntype in graph.node_types:
+            return getattr(graph[ntype], 'pool_mask', None)
+    except Exception:
+        pass
+    return None
+
+
+def _encode_graph(encoder, graph, input_size, params):
+    """Node embeddings for the action-side types, from a HeteroData or a
+    FlatGraph (the latter needs a flat encoder: TypeEmbedStack / AEPNStack)."""
+    if is_flat(graph):
+        if not hasattr(encoder, 'encode_flat'):
+            raise TypeError("flat observations need encoder='type_embed', 'type_embed_film' or 'aepn'")
+        dev = encoder.in_weight.device
+        h = encoder.encode_flat(graph.x.to(dev), graph.ntype.to(dev),
+                                graph.edge_index.to(dev), graph.etype.to(dev))
+        x_enc = {'a_transition': h[graph.a_idx.to(dev)], 'postpone': h[graph.p_idx.to(dev)]}
+    else:
+        x_enc = encoder(x_dict=graph.x_dict, edge_index_dict=graph.edge_index_dict,
+                        input_size=input_size, graph=graph, params_iter=params)
+    for k, v in x_enc.items():
+        if v is not None:
+            x_enc[k] = torch.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0)
+    return x_enc
 
 
 # ---------------------------------------------------------------------
@@ -225,6 +264,287 @@ class HGTStack(nn.Module):
 
 
 # ---------------------------------------------------------------------
+# Shared by the flat encoders (TypeEmbedStack, AEPNStack): they run on the
+# flattened graph (gympn/flat_graph.py). A HeteroData input is flattened on
+# every forward; a FlatGraph input (GymProblem.flat_obs) arrives flat already.
+# ---------------------------------------------------------------------
+def _project_in(x, t, in_weight, in_bias):
+    """Per-type input projection, gathered per node. Only the first x.size(1)
+    rows of each type's matrix are used (features are zero-padded to the
+    widest type, never to max_in_features)."""
+    w = x.size(1)
+    if w > in_weight.size(1):
+        raise ValueError(f"{w} input features > max_in_features={in_weight.size(1)}")
+    x = x.to(dtype=in_weight.dtype)
+    return torch.einsum('nf,nfh->nh', x, in_weight[:, :w][t]) + in_bias[t]
+
+
+def _encode_hetero(enc, x_dict, edge_index_dict):
+    """HeteroData dicts -> dict of node embeddings by type, via enc.encode_flat."""
+    x_dict, edge_index_dict = x_dict or {}, edge_index_dict or {}
+    device, H = enc.in_weight.device, enc.hidden_channels
+    w = feature_width(x_dict)
+    xs, tidx, eis, eidx, spans = flatten_hetero(x_dict, edge_index_dict, enc._ntype_idx, enc._etype_idx, w)
+    if not xs:
+        return {nt: torch.empty((0, H), device=device) for nt in spans}
+    x, t, edge_index, e_t = cat_flat(xs, tidx, eis, eidx, w, device=device, dtype=enc.in_weight.dtype)
+    h = enc.encode_flat(x, t, edge_index.to(device), e_t.to(device))
+    return {nt: h[o:o + n] if n > 0 else h.new_empty((0, H)) for nt, (o, n) in spans.items()}
+
+
+# ---------------------------------------------------------------------
+# Type-embedding stack: a drop-in alternative to HGTStack.
+#
+# HGT keeps separate weights per node type and per edge type, and loops over
+# them in Python inside every layer. Here every place is its own node type, so
+# those counts grow with the number of net copies (N=8 next_activity: 35 node
+# types, 99 edge types), and the loops, not the arithmetic, dominate wall time.
+#
+# This stack flattens the heterogeneous graph into one homogeneous graph once
+# per forward, then runs L shared TransformerConv layers over it:
+#   * per-type input projection: each node type keeps its OWN input matrix,
+#     gathered per node (no Python loop), so differently-sized and
+#     differently-meaning features are read exactly as HGT's first layer would;
+#   * a learned per-layer node-type embedding is added before every layer, so
+#     every place stays individually identifiable (nothing is merged);
+#   * a learned per-layer edge-type embedding enters the attention keys and
+#     values (TransformerConv edge_dim), playing the role of HGT's
+#     relation-specific matrices.
+# Message flow is unchanged: the same directed edges, so action logits stay as
+# local as under HGT. Output is a dict by node type, like HGTStack's.
+#
+# film=True adds per-layer, per-type FiLM on each layer's output,
+# y * (1 + gamma[type]) + beta[type]: a multiplicative type-specific
+# transform in the role of HGT's per-type output projection, instead of
+# conditioning on type only additively.
+# ---------------------------------------------------------------------
+class TypeEmbedStack(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_channels: int,
+        num_layers: int,
+        metadata,
+        heads: int = 2,
+        dropout: float = 0.1,
+        residual: bool = True,
+        activation: str = "relu",
+        max_in_features: int = 32,
+        film: bool = False,
+    ):
+        super().__init__()
+        if metadata is None:
+            raise ValueError("TypeEmbedStack needs the graph metadata (node and edge types)")
+        self.num_layers = int(num_layers)
+        self.hidden_channels = int(hidden_channels)
+        self.residual = bool(residual)
+        self.max_in_features = int(max_in_features)
+        self.node_types = list(metadata[0])
+        self.edge_types = [tuple(e) for e in metadata[1]]
+        self._ntype_idx = {nt: i for i, nt in enumerate(self.node_types)}
+        self._etype_idx = {et: i for i, et in enumerate(self.edge_types)}
+        n_nt, n_et, H = len(self.node_types), len(self.edge_types), self.hidden_channels
+
+        # Per-type input projection, stored as one tensor and gathered per node.
+        # Features narrower than max_in_features are zero-padded; the padded rows
+        # of the weight never receive gradient.
+        self.in_weight = nn.Parameter(torch.empty(n_nt, self.max_in_features, H))
+        self.in_bias = nn.Parameter(torch.zeros(n_nt, H))
+        bound = 1.0 / (self.max_in_features ** 0.5)
+        nn.init.uniform_(self.in_weight, -bound, bound)
+
+        self.node_emb = nn.ModuleList([nn.Embedding(n_nt, H) for _ in range(self.num_layers)])
+        self.edge_emb = nn.ModuleList([nn.Embedding(max(n_et, 1), H) for _ in range(self.num_layers)])
+        for emb in list(self.node_emb) + list(self.edge_emb):
+            nn.init.normal_(emb.weight, std=0.1)
+
+        self.film = bool(film)
+        if self.film:
+            self.film_gamma = nn.ModuleList([nn.Embedding(n_nt, H) for _ in range(self.num_layers)])
+            self.film_beta = nn.ModuleList([nn.Embedding(n_nt, H) for _ in range(self.num_layers)])
+            for emb in self.film_gamma:
+                nn.init.normal_(emb.weight, std=0.5)
+            for emb in self.film_beta:
+                nn.init.normal_(emb.weight, std=0.1)
+
+        if H % heads != 0:
+            raise ValueError(f"hidden_channels={H} not divisible by heads={heads}")
+        self.convs = nn.ModuleList([
+            TransformerConv(H, H // heads, heads=heads, concat=True, edge_dim=H, root_weight=True)
+            for _ in range(self.num_layers)
+        ])
+
+        if activation == "relu":
+            self.act = nn.ReLU()
+        elif activation == "elu":
+            self.act = nn.ELU()
+        else:
+            self.act = nn.GELU()
+        self.drop = nn.Dropout(float(dropout))
+
+    def encode_flat(self, x, t, edge_index, e_t):
+        """Flat graph -> node embeddings [N, H]."""
+        h = _project_in(x, t, self.in_weight, self.in_bias)
+        for li, conv in enumerate(self.convs):
+            z = h + self.node_emb[li](t)
+            y = conv(z, edge_index, self.edge_emb[li](e_t))
+            if self.film:
+                y = y * (1.0 + self.film_gamma[li](t)) + self.film_beta[li](t)
+            if self.residual:
+                y = y + h
+            h = self.drop(self.act(y))
+        return h
+
+    def forward(self, x_dict, edge_index_dict, input_size=None, graph=None, params_iter=None):
+        return _encode_hetero(self, x_dict, edge_index_dict)
+
+
+# ---------------------------------------------------------------------
+# AEPN stack: HGT's per-type / per-relation expressiveness, without the
+# per-type Python loops.
+#
+# TypeEmbedStack shares one attention layer and tells relations apart only by
+# an additive edge embedding, and it learned worse than HGT. This stack keeps
+# HGT's structure but vectorizes it with basis decomposition (as in R-GCN):
+#   * relation-specific keys and messages: W_r = sum_b a[r, b] V_b. Each node is
+#     projected through the B shared bases once ([N, B, H]); each edge mixes
+#     its source's B projections with its relation's coefficients. In an AEPN
+#     each input arc of a binding is its own relation, so every arc role
+#     (e.g. the waiting token vs the employee token of approve_0) gets its own
+#     message transform;
+#   * per-node-type queries and output projection, also via bases;
+#   * per-relation, per-head attention scale p_rel (multiplies q.k, init 1),
+#     softmax over each node's incoming edges (as HGTConv);
+#   * per-type gated skip, sigmoid(skip[type]) (init 1 -> 0.73 on the new
+#     state), from the second layer on (HGTConv gates only when input and
+#     output widths match, i.e. not on the raw-feature layer);
+#   * with residual=True, a per-type projection of the layer input added on top,
+#     as HGTStack's skip_proj (also via bases).
+# The edges are the same directed edges, so action logits stay as local as
+# under HGT.
+# ---------------------------------------------------------------------
+class AEPNStack(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_channels: int,
+        num_layers: int,
+        metadata,
+        heads: int = 2,
+        dropout: float = 0.1,
+        residual: bool = True,
+        activation: str = "relu",
+        max_in_features: int = 32,
+        num_bases: int = 8,
+    ):
+        super().__init__()
+        if metadata is None:
+            raise ValueError("AEPNStack needs the graph metadata (node and edge types)")
+        self.num_layers = int(num_layers)
+        self.hidden_channels = H = int(hidden_channels)
+        self.heads = int(heads)
+        if H % self.heads != 0:
+            raise ValueError(f"hidden_channels={H} not divisible by heads={heads}")
+        self.residual = bool(residual)
+        self.max_in_features = int(max_in_features)
+        self.node_types = list(metadata[0])
+        self.edge_types = [tuple(e) for e in metadata[1]]
+        self._ntype_idx = {nt: i for i, nt in enumerate(self.node_types)}
+        self._etype_idx = {et: i for i, et in enumerate(self.edge_types)}
+        n_nt, n_et = len(self.node_types), max(len(self.edge_types), 1)
+        B = self.num_bases = int(num_bases)
+
+        self.in_weight = nn.Parameter(torch.empty(n_nt, self.max_in_features, H))
+        self.in_bias = nn.Parameter(torch.zeros(n_nt, H))
+        nn.init.uniform_(self.in_weight, -1.0 / self.max_in_features ** 0.5, 1.0 / self.max_in_features ** 0.5)
+
+        def bases():
+            w = torch.empty(H, B * H)
+            for b in range(B):
+                nn.init.xavier_uniform_(w[:, b * H:(b + 1) * H])
+            return nn.Parameter(w)
+
+        def coeffs(n):
+            return nn.Parameter(torch.randn(n, B) / B ** 0.5)
+
+        L = self.num_layers
+        self.k_bases = nn.ParameterList([bases() for _ in range(L)])
+        self.v_bases = nn.ParameterList([bases() for _ in range(L)])
+        self.q_bases = nn.ParameterList([bases() for _ in range(L)])
+        self.o_bases = nn.ParameterList([bases() for _ in range(L)])
+        self.k_coef = nn.ParameterList([coeffs(n_et) for _ in range(L)])
+        self.v_coef = nn.ParameterList([coeffs(n_et) for _ in range(L)])
+        self.q_coef = nn.ParameterList([coeffs(n_nt) for _ in range(L)])
+        self.o_coef = nn.ParameterList([coeffs(n_nt) for _ in range(L)])
+        self.p_rel = nn.ParameterList([nn.Parameter(torch.ones(n_et, self.heads)) for _ in range(L)])
+        self.skip = nn.ParameterList([nn.Parameter(torch.ones(n_nt)) for _ in range(L)])
+        if self.residual:
+            self.r_bases = nn.ParameterList([bases() for _ in range(L)])
+            self.r_coef = nn.ParameterList([coeffs(n_nt) for _ in range(L)])
+
+        if activation == "relu":
+            self.act = nn.ReLU()
+        elif activation == "elu":
+            self.act = nn.ELU()
+        else:
+            self.act = nn.GELU()
+        self.drop = nn.Dropout(float(dropout))
+
+    def _mix(self, h, bases, coef, idx):
+        """Per-item transform sum_b coef[idx, b] * (h @ V_b), for h [M, H]."""
+        P = (h @ bases).view(h.size(0), self.num_bases, self.hidden_channels)
+        return torch.einsum('mb,mbh->mh', coef[idx], P)
+
+    def _layer(self, li, h, t, src, dst, e_t):
+        N, H, nh = h.size(0), self.hidden_channels, self.heads
+        d = H // nh
+        if src.numel() > 0:
+            # Project nodes through the bases once, then mix per edge.
+            Pk = (h @ self.k_bases[li]).view(N, self.num_bases, H)
+            Pv = (h @ self.v_bases[li]).view(N, self.num_bases, H)
+            k = torch.einsum('eb,ebh->eh', self.k_coef[li][e_t], Pk[src])
+            v = torch.einsum('eb,ebh->eh', self.v_coef[li][e_t], Pv[src])
+            q = self._mix(h, self.q_bases[li], self.q_coef[li], t)[dst]
+            score = (q.view(-1, nh, d) * k.view(-1, nh, d)).sum(-1) * self.p_rel[li][e_t] / d ** 0.5
+            alpha = pyg_softmax(score, dst, num_nodes=N)                    # [E, heads]
+            msg = (v.view(-1, nh, d) * alpha.unsqueeze(-1)).view(-1, H)
+            agg = h.new_zeros(N, H).index_add_(0, dst, msg)
+        else:
+            agg = h.new_zeros(N, H)
+        out = self._mix(F.gelu(agg), self.o_bases[li], self.o_coef[li], t)
+        if li > 0:
+            g = torch.sigmoid(self.skip[li][t]).unsqueeze(-1)
+            out = g * out + (1 - g) * h
+        if self.residual:
+            out = out + self._mix(h, self.r_bases[li], self.r_coef[li], t)
+        return self.drop(self.act(out))
+
+    def encode_flat(self, x, t, edge_index, e_t):
+        """Flat graph -> node embeddings [N, H]."""
+        h = _project_in(x, t, self.in_weight, self.in_bias)
+        src, dst = edge_index[0], edge_index[1]
+        for li in range(self.num_layers):
+            h = self._layer(li, h, t, src, dst, e_t)
+        return h
+
+    def forward(self, x_dict, edge_index_dict, input_size=None, graph=None, params_iter=None):
+        return _encode_hetero(self, x_dict, edge_index_dict)
+
+
+
+def _make_encoder(encoder, **kw):
+    if encoder in (None, "hgt"):
+        return HGTStack(**kw)
+    if encoder in ("type_embed", "temb"):
+        return TypeEmbedStack(**kw)
+    if encoder in ("type_embed_film", "tembf"):
+        return TypeEmbedStack(film=True, **kw)
+    if encoder == "aepn":
+        return AEPNStack(**kw)
+    raise ValueError(f"unknown encoder {encoder!r} (choose 'hgt', 'type_embed', 'type_embed_film' or 'aepn')")
+
+
+# ---------------------------------------------------------------------
 # Base
 # ---------------------------------------------------------------------
 class ActorCritic(nn.Module):
@@ -270,6 +590,11 @@ class HeteroActor(ActorCritic):
         # each action/postpone node before decoding, giving the actor
         # access to state outside its own directed-reachable neighborhood.
         global_context: bool = False,
+        # 'aepn' (default; AEPNStack), 'hgt' (HGTStack, the default until
+        # 2026-10-05), 'type_embed' or 'type_embed_film' (TypeEmbedStack).
+        # encoder_kwargs go to the encoder, e.g. {'num_bases': 4} for AEPNStack.
+        encoder: str = "aepn",
+        encoder_kwargs: Optional[dict] = None,
         # Backwards compatibility: accept legacy kwargs (e.g. output_size)
         output_size: Optional[int] = None,
         **kwargs,
@@ -282,7 +607,9 @@ class HeteroActor(ActorCritic):
         self.dropout = dropout
         self.global_context = bool(global_context)
 
-        self.encoder = HGTStack(
+        self.encoder = _make_encoder(
+            encoder,
+            **(encoder_kwargs or {}),
             in_channels=self.input_size,
             hidden_channels=self.hidden_size,
             num_layers=num_layers,
@@ -307,6 +634,9 @@ class HeteroActor(ActorCritic):
         self._warned_index_mismatches = set()
 
     def _build_batch_index(self, graph, x_dict, logits):
+        if is_flat(graph):
+            return torch.cat([_batch_index_for(graph, nt, 0, logits.device)
+                              for nt in ('a_transition', 'postpone')], dim=0)
         idx_parts = []
         try:
             # a_transition
@@ -330,19 +660,9 @@ class HeteroActor(ActorCritic):
 
     def forward(self, data: Dict[str, torch.Tensor]) -> torch.Tensor:
         graph = data['graph'] if isinstance(data, dict) and 'graph' in data else data
-        x_dict, edge_index_dict = graph.x_dict, graph.edge_index_dict
 
         # Encode (handles empty node types)
-        x_enc = self.encoder(
-            x_dict=x_dict,
-            edge_index_dict=edge_index_dict,
-            input_size=self.input_size,
-            graph=graph,
-            params_iter=iter(self.parameters()),
-        )
-        for k, v in x_enc.items():
-            if v is not None:
-                x_enc[k] = torch.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0)
+        x_enc = _encode_graph(self.encoder, graph, self.input_size, iter(self.parameters()))
 
         # Decode in the SAME order as actions_dict: [a_transition, postpone]
         device = next(self.parameters()).device
@@ -411,12 +731,16 @@ class HeteroQOff(ActorCritic):
         num_heads: int = 1,
         dropout: float = 0.0,
         residual: bool = True,
+        encoder: str = "aepn",
+        encoder_kwargs: Optional[dict] = None,
     ):
         super().__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
 
-        self.encoder = HGTStack(
+        self.encoder = _make_encoder(
+            encoder,
+            **(encoder_kwargs or {}),
             in_channels=-1,
             hidden_channels=self.hidden_size,
             num_layers=num_layers,
@@ -482,6 +806,8 @@ class HeteroCritic(ActorCritic):
         # gradients shape the shared encoder but never the value output's
         # target. False (default) = single-head critic, unchanged.
         aux_head: bool = False,
+        encoder: str = "aepn",
+        encoder_kwargs: Optional[dict] = None,
         # Backwards compatibility: accept legacy kwargs (e.g. output_size)
         output_size: Optional[int] = None,
         **kwargs,
@@ -493,7 +819,9 @@ class HeteroCritic(ActorCritic):
         self.num_heads = num_heads
         self.dropout = dropout
 
-        self.encoder = HGTStack(
+        self.encoder = _make_encoder(
+            encoder,
+            **(encoder_kwargs or {}),
             in_channels=self.input_size,
             hidden_channels=self.hidden_size,
             num_layers=num_layers,
@@ -523,19 +851,30 @@ class HeteroCritic(ActorCritic):
     def _encode_pool(self, data):
         """Shared encode+pool: one vector per graph in the batch."""
         graph = data['graph'] if isinstance(data, dict) and 'graph' in data else data
-        x_dict, edge_index_dict = graph.x_dict, graph.edge_index_dict
 
         # Encode
-        x_enc = self.encoder(
-            x_dict=x_dict,
-            edge_index_dict=edge_index_dict,
-            input_size=self.input_size,
-            graph=graph,
-            params_iter=iter(self.parameters()),
-        )
-        for k, v in x_enc.items():
-            if v is not None:
-                x_enc[k] = torch.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0)
+        x_enc = _encode_graph(self.encoder, graph, self.input_size, iter(self.parameters()))
+
+        # nfgae: V_c(s) pools only over the deciding component's action nodes
+        # (graph['a_transition'].pool_mask, set at rollout). With a single
+        # component the mask is all-true and this is the pooling below.
+        mask = _pool_mask(graph, 'a_transition')
+        if mask is not None and x_enc.get('a_transition') is not None:
+            parts, idx_parts = [], []
+            for ntype in ('a_transition', 'postpone'):
+                x = x_enc.get(ntype)
+                if x is None or x.numel() == 0:
+                    continue
+                m = _pool_mask(graph, ntype)
+                if m is None:          # postpone without a mask: not this component's
+                    continue
+                m = m.to(device=x.device, dtype=torch.bool)
+                i_ = _batch_index_for(graph, ntype, x.size(0), x.device)
+                parts.append(x[m]); idx_parts.append(i_[m])
+            idx_all = _batch_index_for(graph, 'a_transition', x_enc['a_transition'].size(0),
+                                       x_enc['a_transition'].device)
+            n_graphs = int(idx_all.max().item()) + 1 if idx_all.numel() else 1
+            return global_max_pool(torch.cat(parts, 0), torch.cat(idx_parts, 0), size=n_graphs)
 
         # Pool across targets (shared with HeteroActor's optional
         # global_context -- see _pool_action_postpone).

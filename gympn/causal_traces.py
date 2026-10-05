@@ -282,14 +282,17 @@ class CausalTraces:
                 redistribution, beta, get_parents, values, lam,
                 conditioned=(scheme == "cgae_cdag"))
 
-        if scheme in ("cgae", "cgae_flow", "cgae_cflow", "cgae_cflow2", "cgae_cap"):
+        if scheme in ("cgae", "cgae_flow", "cgae_cflow", "cgae_cflow2", "cgae_cap",
+                      "cgae_cflow_ct"):
             return self._redistribute_cgae(
                 action_transitions, token_to_action, record_to_action,
                 redistribution, beta, get_parents, values, lam,
-                flow=(scheme in ("cgae_flow", "cgae_cflow", "cgae_cflow2", "cgae_cap")),
-                convex=(scheme in ("cgae_cflow", "cgae_cflow2")),
+                flow=(scheme in ("cgae_flow", "cgae_cflow", "cgae_cflow2", "cgae_cap",
+                                 "cgae_cflow_ct")),
+                convex=(scheme in ("cgae_cflow", "cgae_cflow2", "cgae_cflow_ct")),
                 skip_postpone=(scheme == "cgae_cflow2"),
-                cap=(scheme == "cgae_cap"))
+                cap=(scheme == "cgae_cap"),
+                contention=(scheme == "cgae_cflow_ct"))
 
         # ALIN: anti-lineage. mc_q MINUS the rewards a decision provably could
         # not have influenced. Subtraction, not restriction -- see
@@ -674,7 +677,7 @@ class CausalTraces:
     def _redistribute_cgae(self, action_transitions, token_to_action,
                            record_to_action, redistribution, beta, get_parents,
                            values=None, lam=1.0, flow=False, convex=False,
-                           skip_postpone=False, cap=False):
+                           skip_postpone=False, cap=False, contention=False):
         """CGAE — GAE propagated along the CAUSAL successor, not the time one.
 
         Standard GAE accumulates TD errors along the trajectory index:
@@ -799,6 +802,21 @@ class CausalTraces:
         stays action-dependent, so this NARROWS the violation rather than
         removing it.
 
+        ``contention`` (scheme ``cgae_cflow_ct``) adds PREEMPTION edges. Token
+        provenance records what a decision consumed, never what it took away:
+        when two resources draw cases from one shared queue, the expert taking
+        a risk-0 case leaves the normal employee a worse one, and no token
+        links the two decisions. So on a BPM copy with two employees the
+        provenance DAG is two resource chains (factoring ~0.46 at N=1) that are
+        in fact coupled through the queue. With ``contention`` every input
+        place of an action is a pool, and each decision is linked to the NEXT
+        decision (by (time, index)) consuming from the same place -- the
+        decision it could have pre-empted. In the flow weights each such place
+        contributes one unit of inflow mass to its previous acquirer, alongside
+        the per-token provenance mass, so (*) still holds. On a single copy
+        everything then merges into one causal component; independent copies
+        (no shared place) stay separate.
+
         Postpone is therefore dropped from all three roles in which it is an
         artifact -- as a producer (``out_tok``), as a consumer/successor, and as
         a candidate reward OWNER -- while the provenance walk still passes
@@ -859,10 +877,32 @@ class CausalTraces:
                         stack.append(p)
             return found
 
+        # ---- contention: previous acquirer of each shared input place ------ #
+        prev_acq = [[] for _ in range(n)]      # idx -> previous acquirer per place
+        if contention:
+            by_place = {}
+            for idx, act in enumerate(action_transitions):
+                tobj = act.get('transition')
+                tid_ = getattr(tobj, '_id', None)
+                if idx in pp_idx or tobj is None or (
+                        isinstance(tid_, str) and tid_.startswith('postpone')):
+                    continue
+                u = act.get('time')
+                for p in getattr(tobj, 'incoming', ()) or ():
+                    by_place.setdefault(p._id, []).append(
+                        (float(u) if u is not None else 0.0, idx))
+            for entries in by_place.values():
+                entries.sort()
+                for k in range(1, len(entries)):
+                    prev_acq[entries[k][1]].append(entries[k - 1][1])
+
         for idx, act in enumerate(action_transitions):
             if idx in pp_idx:                  # transparent as a CONSUMER too
                 continue
             inputs = list(act.get('input_tokens', ()) or ())
+            if contention and not flow:
+                for d_ in prev_acq[idx]:
+                    succ[d_].add(idx)
             if not flow:
                 seen, stack = set(), list(inputs)
                 while stack:                   # walk back to the producing decision
@@ -892,6 +932,9 @@ class CausalTraces:
                 share = 1.0 / len(prods)
                 for d_ in prods:
                     contrib[d_] = contrib.get(d_, 0.0) + share
+            for d_ in prev_acq[idx]:           # one unit of mass per pool place
+                n_attributed += 1
+                contrib[d_] = contrib.get(d_, 0.0) + 1.0
             if n_attributed == 0:
                 continue
             for d_, c in contrib.items():
@@ -938,8 +981,14 @@ class CausalTraces:
             owned[owner] += rv
 
         # ---- backward recursion over the DAG, latest decision first -------- #
+        # Contention edges routinely join SAME-TIME decisions (two employees
+        # starting at t), so the index must break ties or a successor is read
+        # before it is computed (the bug fixed in alin). Kept off for the
+        # other variants so their published cells stay bit-identical.
         order = sorted(range(n), key=lambda i: (times[i] is not None,
-                                                times[i] or 0.0), reverse=True)
+                                                times[i] or 0.0,
+                                                i if contention else 0),
+                       reverse=True)
         A = [0.0] * n
         for d in order:
             nxt = [s for s in succ[d] if s != d]

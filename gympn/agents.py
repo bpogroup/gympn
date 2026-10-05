@@ -15,6 +15,7 @@ import multiprocessing as mp
 from typing import Dict
 
 from gympn.data import TrajectoryBuffer, print_status_bar
+from gympn.flat_graph import is_flat
 from gympn.logging_utils import Logger, TrainingMetrics, TestMetrics, get_logger
 from gympn.potential import topology_potential
 
@@ -988,6 +989,19 @@ class Agent:
         ls_hca_pi_type_vecs = []
         ep_values = []          # per-decision V(s), for scheme 'cgae'
 
+        # nfgae: deciding component per step and per-component step rewards
+        # (suite/paper/NFGAE_THEORY.md). The critic reads V_c by pooling only
+        # over the deciding component's action nodes (graph pool_mask).
+        nf_on = getattr(self, 'causal_scheme', None) == 'nfgae'
+        nf_comp_ep, nf_rew_ep = [], []
+        if nf_on:
+            _pn0 = getattr(env, 'pn', None)
+            if (_pn0 is not None and getattr(_pn0, 'allow_postpone', False)
+                    and getattr(_pn0, 'postpone_scope', 'global') != 'component'):
+                raise ValueError("nfgae needs allow_postpone=False or postpone_scope="
+                                 "'component': a global postpone couples components "
+                                 "(Theorem 1, C3).")
+
         # lrq2c: PPO + lrq2 lineage advantage + sparse EXACT indirect correction
         # (CRN forks at foreclosure-gated decisions only). See
         # LINEAGE_SPARSE_CORRECTION.md. Uses its own fork path (router-gated,
@@ -1141,6 +1155,24 @@ class Agent:
                     self._rudder_features(state, node_types=self._ls_hca_state_node_types)
                     + [share])
 
+            if nf_on:
+                part = pn.net_partition()
+                is_pp = [isinstance(b[0], list) and b[0] == ['postpone'] for b in pn.pn_actions]
+                node_comp = [b[2].comp if pp else part[b[2]._id]
+                             for b, pp in zip(pn.pn_actions, is_pp)]
+                c_dec = node_comp[action]
+                g_ = state['graph']
+                mask_a = torch.tensor([c == c_dec for c, pp in zip(node_comp, is_pp) if not pp], dtype=torch.bool)
+                mask_p = torch.tensor([c == c_dec for c, pp in zip(node_comp, is_pp) if pp], dtype=torch.bool)
+                if is_flat(g_):
+                    # always set both, so every sample in a batch has the same keys
+                    g_.a_pool_mask, g_.p_pool_mask = mask_a, mask_p
+                else:
+                    g_['a_transition'].pool_mask = mask_a
+                    if any(is_pp):                     # postpone nodes, in the same order
+                        g_['postpone'].pool_mask = mask_p
+                nf_comp_ep.append(c_dec)
+
             # Collect for batch processing
             states_batch.append(state)
             actions_batch.append(action)
@@ -1169,6 +1201,8 @@ class Agent:
                     if self.phi_coef and pn is not None else 0.0)
 
             next_state, reward, done, truncated, info = env.step(action)
+            if nf_on:
+                nf_rew_ep.append(dict(info.get('comp_reward', {})))
             total_reward += reward   # RAW reward -- eval/logging read info['pn_reward']
                                      # (independent accumulator), so this is unaffected by
                                      # shaping either way; kept raw here for clarity.
@@ -1218,6 +1252,9 @@ class Agent:
                 break
             state = next_state
 
+        if buffer is not None and nf_on:
+            buffer._nf_comp = nf_comp_ep
+            buffer._nf_rew = nf_rew_ep
         if buffer is not None:
             if (self.causal_rl and 'eligibility_credits' in info
                   and info['eligibility_credits'] is not None):
@@ -1376,7 +1413,8 @@ class Agent:
                                   mode="replace")
                 elif getattr(self, 'causal_scheme', None) in ('cgae', 'cgae_flow',
                                                               'cgae_cflow', 'cgae_cflow2',
-                                                              'cgae_cap', 'cgae_dag'):
+                                                              'cgae_cap', 'cgae_dag',
+                                                              'cgae_cflow_ct'):
                     # CGAE needs the critic's V(s) as well as the trace: the
                     # recursion bootstraps through it at causal depth, so the
                     # values collected during this episode are handed in here
@@ -1450,7 +1488,7 @@ class Agent:
                     # Extract graph objects and batch them
                     graphs = [s['graph'] for s in states_list]
 
-                    if isinstance(graphs[0], HeteroData):
+                    if isinstance(graphs[0], HeteroData) or is_flat(graphs[0]):
                         # Batch heterogeneous graphs
                         batched_graph = Batch.from_data_list(graphs)
 
@@ -2990,29 +3028,38 @@ class Agent:
         advantages = batch.advantage.clone()
         old_logprob = batch.logprobs.clone()
 
-        has_a = ('a_transition' in batch.x_dict)
-        has_p = ('postpone' in batch.x_dict)
+        if is_flat(batch):
+            # FlatGraph batch (flat_obs): the same quantities from the flat fields.
+            nA, nP = int(batch.a_idx.numel()), int(batch.p_idx.numel())
+            has_a, has_p = nA > 0, nP > 0
+            old_logpis_a = batch.logpis_a.reshape(-1) if has_a else None
+            old_logpis_p = batch.logpis_p.reshape(-1) if has_p else None
+            idx_a = batch.batch[batch.a_idx] if has_a else None
+            idx_p = batch.batch[batch.p_idx] if has_p else None
+        else:
+            has_a = ('a_transition' in batch.x_dict)
+            has_p = ('postpone' in batch.x_dict)
 
-        nA = batch['a_transition'].x.size(0) if has_a else 0
-        nP = batch['postpone'].x.size(0) if has_p else 0
+            nA = batch['a_transition'].x.size(0) if has_a else 0
+            nP = batch['postpone'].x.size(0) if has_p else 0
+
+            # Old logits (standardize them to 1-D up front)
+            old_logpis_a = batch['a_transition'].logpis if has_a else None
+            if old_logpis_a is not None and old_logpis_a.dim() == 2 and old_logpis_a.size(-1) == 1:
+                old_logpis_a = old_logpis_a.squeeze(-1)
+
+            old_logpis_p = None
+            if has_p and hasattr(batch['postpone'], 'logpis'):
+                old_logpis_p = batch['postpone'].logpis
+                if old_logpis_p is not None and old_logpis_p.dim() == 2 and old_logpis_p.size(-1) == 1:
+                    old_logpis_p = old_logpis_p.squeeze(-1)
+
+            idx_a = batch['a_transition'].batch.data if has_a else None
+            idx_p = batch['postpone'].batch.data if has_p else None
 
         # Split new logits by node type in the same order as actions_dict
         new_logpis_a = new_logpis[:nA] if nA else None
         new_logpis_p = new_logpis[nA:nA + nP] if nP else None
-
-        # Old logits (standardize them to 1-D up front)
-        old_logpis_a = batch['a_transition'].logpis if has_a else None
-        if old_logpis_a is not None and old_logpis_a.dim() == 2 and old_logpis_a.size(-1) == 1:
-            old_logpis_a = old_logpis_a.squeeze(-1)
-
-        old_logpis_p = None
-        if has_p and hasattr(batch['postpone'], 'logpis'):
-            old_logpis_p = batch['postpone'].logpis
-            if old_logpis_p is not None and old_logpis_p.dim() == 2 and old_logpis_p.size(-1) == 1:
-                old_logpis_p = old_logpis_p.squeeze(-1)
-
-        idx_a = batch['a_transition'].batch.data if has_a else None
-        idx_p = batch['postpone'].batch.data if has_p else None
 
         unique_samples = (idx_a.unique() if has_a else idx_p.unique())
 
