@@ -687,8 +687,12 @@ class GymProblem(SimProblem):
         to those the graph path produces (the network prior/eval alignment).
         """
         self.expanded_pn, _ = self.expand_no_future_tokens(actions_only=True)
+        keep_comp = self._turn_component(self.expanded_pn) if getattr(self, 'component_turns', False) else None
+        part = self.net_partition() if keep_comp is not None else None
         transition_binding_map = []
         for t in self.expanded_pn.actions:
+            if keep_comp is not None and part.get(GymProblem._get_string_before_last_dot(t._id)) != keep_comp:
+                continue
             b_list = [el.marking[0] for el in t.incoming]
             binds = [([place for place in self.places
                        if place._id == GymProblem._get_string_before_last_dot(el._id)][0],
@@ -734,6 +738,15 @@ class GymProblem(SimProblem):
         node_types.append('e_transition')
 
         self.expanded_pn, transition_binding_map_wrong = self.expand_no_future_tokens()  # expand the petri net into a new petri net with 1-bounded places
+
+        # Component turns (nfgae local encoding): the observation holds only the
+        # component whose turn it is, and pn_actions only its bindings. None =
+        # whole net (default, unchanged).
+        keep_comp = self._turn_component(self.expanded_pn) if getattr(self, 'component_turns', False) else None
+        if keep_comp is not None:
+            part, ppart = self.net_partition(), self.net_place_partition()
+            node_types = [n for n in node_types
+                          if n in ('a_transition', 'e_transition') or ppart.get(n) == keep_comp]
 
         # Update the HeteroData object with the places attributes and the transition nodes
         for n_t in node_types:
@@ -786,6 +799,10 @@ class GymProblem(SimProblem):
                 a_transition_dict = {} #helper to keep track of the transitions indexes in the graph
                 for i, t in enumerate(self.expanded_pn.actions):
                     t_name = GymProblem._get_string_before_last_dot(t._id)
+                    if keep_comp is not None:
+                        if part.get(t_name) != keep_comp:
+                            continue
+                        i = len(t_nodes)        # node position within the kept component
                     if add_self_loops:
                         t_values = [1 if action._id == t_name else 0 for action in self.actions] #a_transitions know which transition type they are (useful with self loops and multiple actions)
                     else:
@@ -832,6 +849,10 @@ class GymProblem(SimProblem):
 
                 for i, t in enumerate(self.expanded_pn.events):
                     t_name = GymProblem._get_string_before_last_dot(t._id)
+                    if keep_comp is not None:
+                        if part.get(t_name) != keep_comp:
+                            continue
+                        i = len(t_nodes)
                     t_values = [1 if e._id == t_name else 0 for e in self.events]
                     t_nodes.append(torch.tensor(t_values).type(torch.float32))
                     e_transition_dict[t._id] = i
@@ -870,6 +891,13 @@ class GymProblem(SimProblem):
             source_name = GymProblem._get_string_before_last_dot(a[0]._id)
             dest_name = GymProblem._get_string_before_last_dot(a[1]._id)
             key = None
+            if keep_comp is not None:
+                # only arcs between the kept component's places and transitions
+                place_name = source_name if type(a[0]) is SimVar else dest_name
+                tr_id = a[1]._id if type(a[0]) is SimVar else a[0]._id
+                if ppart.get(place_name) != keep_comp or (
+                        tr_id not in a_transition_dict and tr_id not in e_transition_dict):
+                    continue
 
             if type(a[0]) is SimVar and source_name not in self.unobservable_simvars:# and source_name in ret_graph: #if the place has tokens inside of it
                 if type(a[1]) is SimAction:
@@ -982,7 +1010,8 @@ class GymProblem(SimProblem):
 
 
         if self.metadata is None: #TODO: handle case where postpone is initially not available
-            self.metadata = ret_graph.metadata()
+            # a component-turn observation holds one component only
+            self.metadata = self.make_metadata() if keep_comp is not None else ret_graph.metadata()
 
         if self.plot_observations:
             self.plotter.plot_side_by_side(self.expanded_pn, ret_graph)
@@ -1690,6 +1719,25 @@ class GymProblem(SimProblem):
         self.net_partition()
         return self._net_place_partition
 
+    def _turn_component(self, expanded_pn):
+        """Component turns (nfgae local encoding): the lowest component id with
+        an enabled action binding now, or None if nothing is enabled.
+
+        With component_turns the decision process offers one component at a
+        time, and the policy chooses among that component's bindings only. No
+        simulated time passes between turns, components share no place, and
+        the setting is work-conserving, so the order of turns cannot change any
+        component's outcomes; each decision then needs only its own
+        component's subgraph (actor, critic and observation building)."""
+        part = self.net_partition()
+        comps = set()
+        for t in expanded_pn.actions:
+            if max(el.marking[0].time for el in t.incoming) <= self.clock:
+                c = part.get(GymProblem._get_string_before_last_dot(t._id))
+                if c is not None:
+                    comps.add(c)
+        return min(comps) if comps else None
+
     def _component_postpone(self):
         return self.allow_postpone and getattr(self, 'postpone_scope', 'global') == 'component'
 
@@ -2026,8 +2074,14 @@ class GymProblem(SimProblem):
                 raise ValueError(f"flat_obs needs a flat encoder for actor and critic, got {encs}")
             if args.causal_rl or getattr(args, 'causal_pg', False) or getattr(args, 'cf_config', None):
                 raise ValueError("flat_obs supports the plain PPO update path only (ppo, nfgae)")
+        if getattr(args, 'local_obs', False):
+            if args.causal_rl or getattr(args, 'causal_scheme', None) != 'nfgae':
+                raise ValueError("local_obs is for nfgae: its advantage and critic are per component")
+            if self.allow_postpone:
+                raise ValueError("local_obs needs allow_postpone=False (component turns are work-conserving)")
         # Set before AEPN_Env deep-copies the problem, so the frozen copy (reset)
         # and the test env carry it too.
+        self.component_turns = bool(getattr(args, 'local_obs', False))
         self.flat_obs = bool(getattr(args, 'flat_obs', False))
         self._flat_meta = None
 

@@ -56,6 +56,7 @@ METHODS = ["ppo", "cgae_cflow", "mc_q"]
 POSTPONE = True
 _POSTPONE_SET = False
 POSTPONE_SCOPE = "global"
+LOCAL = False                  # local=1: nfgae component turns, local observations (routes to *_local)
 PLR = None                     # plr=x: policy learning rate override (routes to *_plr<x>)
 FLAT = False                   # flat=1: flat graph observations (needs net=temb|tembf|aepn; routes to *_flat)
 NET = "aepn"                   # net=hgt|temb|tembf|aepn: actor+critic encoder (default aepn; *_aepn dirs, hgt = the old unsuffixed dirs)
@@ -78,6 +79,8 @@ for _a in sys.argv[1:]:
         BETA = float(_a.split("=", 1)[1])
     elif _a.startswith("episodes="):
         EPISODES = int(_a.split("=", 1)[1])
+    elif _a.startswith("local="):
+        LOCAL = _a.split("=", 1)[1] not in ("0", "false", "False")
     elif _a.startswith("plr="):
         PLR = float(_a.split("=", 1)[1])
     elif _a.startswith("flat="):
@@ -108,7 +111,8 @@ OUTDIR = Path(f"suite_results_bpm_{ENV}_n{N}_ep{EPOCHS}" + ("" if EPOCHS == 40 e
               + ("" if BASES is None else f"_b{BASES}")
               + ("" if EPISODES == 8 else f"_eps{EPISODES}")
               + ("" if PLR is None else f"_plr{PLR:g}")
-              + ("_flat" if FLAT else ""))
+              + ("_flat" if FLAT else "")
+              + ("_local" if LOCAL else ""))
 # nfgae needs no causal trace: it runs on the plain SMDP-GAE path.
 CAUSAL = {m: (m not in ("ppo", "nfgae")) for m in METHODS}
 TAG = f"bpm-{ENV}-n{N}"
@@ -154,6 +158,8 @@ def _args(method, seed, cfg, logdir):
     a["value_kwargs"] = dict(net_kw)
     if FLAT:
         a["flat_obs"] = True
+    if LOCAL and method == "nfgae":
+        a["local_obs"] = True
     if CAUSAL[method]:
         a.update({"causal_rl": True, "causal_scheme": method})
     elif method == "nfgae":

@@ -288,3 +288,110 @@ def test_actor_logits_local_with_component_postpone(encoder):
     sel_b = [i for i, c in enumerate(c_b) if c == 0]
     assert len(sel_a) == len(sel_b) > 1          # actions + its postpone
     assert torch.equal(la[sel_a], lb[sel_b])
+
+
+# --------------------------------------------------------------------------- #
+# Component turns (local encoding)
+# --------------------------------------------------------------------------- #
+def _insurer_env(builder, regions, turns, seed=0):
+    from insurer_env import INSURER_BUILDERS
+    random.seed(seed); np.random.seed(seed)
+    pn = INSURER_BUILDERS[builder](regions)
+    pn.length = 20
+    pn.component_turns = turns
+    env = AEPN_Env(pn)
+    obs = env.reset()
+    return env, (obs[0] if isinstance(obs, tuple) else obs)
+
+
+def test_component_turns_identity_at_k1():
+    """One component: turns change nothing (same graph, same bindings)."""
+    ea, oa = _insurer_env("insurer_claims", 1, False)
+    eb, ob = _insurer_env("insurer_claims", 1, True)
+    rng = random.Random(3)
+    for _ in range(40):
+        ga, gb = oa['graph'], ob['graph']
+        assert ga.node_types == gb.node_types and ga.edge_types == gb.edge_types
+        for nt in ga.node_types:
+            assert torch.equal(ga[nt].x, gb[nt].x)
+        for et in ga.edge_types:
+            assert torch.equal(ga[et].edge_index, gb[et].edge_index)
+        assert len(ea.pn.pn_actions) == len(eb.pn.pn_actions)
+        k = len(ea.pn.pn_actions)
+        if k == 0:
+            break
+        a = rng.randrange(k)
+        state = random.getstate()
+        oa, _, da, _, _ = ea.step(a)
+        random.setstate(state)
+        ob, _, db, _, _ = eb.step(a)
+        if da:
+            assert db
+            break
+
+
+def test_component_turns_local_content_and_coverage():
+    """Each observation and binding list holds one component; time never
+    advances while another component still has enabled work."""
+    env, obs = _insurer_env("insurer", 2, True)
+    part, ppart = env.pn.net_partition(), env.pn.net_place_partition()
+    rng = random.Random(5)
+    for _ in range(150):
+        binds = env.pn.pn_actions
+        if not binds:
+            break
+        comps = {part[b[2]._id] for b in binds}
+        assert len(comps) == 1
+        c = comps.pop()
+        g = obs['graph']
+        for nt in g.node_types:
+            if nt not in ('a_transition', 'e_transition'):
+                assert ppart[nt] == c, (nt, c)
+        # all components enabled now (turns off), to check coverage below
+        env.pn.component_turns = False
+        enabled_all = {part[b[2]._id] for b in env.pn.compute_pn_actions()}
+        env.pn.component_turns = True
+        env.pn.compute_pn_actions()
+        assert c == min(enabled_all)
+        clock = env.pn.clock
+        obs, _, done, _, _ = env.step(rng.randrange(len(binds)))
+        if env.pn.clock > clock:
+            assert enabled_all == {c}, "time advanced while another component had work"
+        if done:
+            break
+
+
+@pytest.mark.parametrize("encoder", ["aepn", "type_embed"])
+def test_component_turns_same_logits(encoder):
+    """Locality: the active component's raw logits are the same whether the
+    observation holds the whole net or only that component."""
+    torch.manual_seed(0)
+    env, _ = _insurer_env("insurer", 2, False, seed=2)
+    rng = random.Random(2)
+    for _ in range(12):
+        env.step(rng.randrange(len(env.pn.pn_actions)))
+    actor = HeteroActor(hidden_size=32, num_layers=3, metadata=env.pn.make_metadata(),
+                        num_heads=2, dropout=0.0, encoder=encoder).eval()
+
+    def raw(graph):
+        from gympn.networks import _encode_graph
+        with torch.no_grad():
+            x = _encode_graph(actor.encoder, graph, -1, iter(actor.parameters()))
+            return actor.decoder(x['a_transition']).flatten()
+
+    env.pn.component_turns = False
+    g_full = env.pn.get_graph_observation()['graph']
+    full_binds = list(env.pn.pn_actions)
+    env.pn.component_turns = True
+    g_loc = env.pn.get_graph_observation()['graph']
+    loc_binds = list(env.pn.pn_actions)
+    l_full, l_loc = raw(g_full), raw(g_loc)
+    # bindings are rebuilt per observation (tokens copied by the expansion), so
+    # match by content, in order, using each full-graph binding once
+    key = lambda b: (b[2]._id, tuple((p._id, repr(t.value), t.time) for p, t in b[0]))
+    full_keys, used, sel = [key(b) for b in full_binds], set(), []
+    for b in loc_binds:
+        i = next(j for j, k in enumerate(full_keys) if k == key(b) and j not in used)
+        used.add(i); sel.append(i)
+    assert len(loc_binds) >= 1 and len(loc_binds) < len(full_binds)
+    assert torch.allclose(l_full[sel], l_loc, atol=1e-5)

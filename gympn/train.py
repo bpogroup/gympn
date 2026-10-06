@@ -417,6 +417,11 @@ def make_parser():
                        default=False,
                        help='convert observations to flat graphs (gympn/flat_graph.py) when they are '
                             'built; needs a flat encoder (type_embed / aepn) and the PPO or nfgae path')
+    train.add_argument('--local_obs',
+                       type=lambda x: str(x).lower() == 'true',
+                       default=False,
+                       help='nfgae only: component turns, so each decision observes and encodes only '
+                            'its own component (GymProblem.component_turns); needs no global postpone')
     train.add_argument('--test_in_train',
                        type=lambda x: str(x).lower() == 'true',
                        default=True,
