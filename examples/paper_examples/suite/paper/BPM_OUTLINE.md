@@ -87,7 +87,7 @@ Insurer evaluates every 3 epochs, multi-site every 2.
 | E5 | Coupling: does the gain shrink when processes share a team? | insurer_shared r=1 (K=2) | PPO vs NF-GAE | 10 | DONE | — |
 | E6 | Which process gains? | per-process evaluation returns of E3 policies | PPO vs NF-GAE | E3's | PLANNED (needs per-component eval logging) | small code + rerun or post-hoc |
 | E7 | Is PPO just under-budgeted or mis-tuned? | insurer r=2 (where PPO fails): PPO with 2× episodes per epoch; PPO with policy lr ×0.5 / ×2 | PPO variants vs NF-GAE | 5 each | DONE | — |
-| E7b | Fairness: NF-GAE with PPO's best lr (6e-4) | insurer r=2 | NF-GAE | 5 | PLANNED | ~1.5 h |
+| E7b | Fairness: NF-GAE with PPO's best lr (6e-4) | insurer r=2 | NF-GAE | 5 | DONE | — |
 | E8 | Where does the gain come from? | insurer r=1: factored advantage + global critic, vs full NF-GAE | NF-GAE ablation | 10 | PLANNED (needs a flag) | ~1.5 h |
 | E9 | Cost | wall-clock per cell, PPO vs NF-GAE under equal load | — | from E2/E3 | FREE (from logs) | — |
 | E10 | Mechanism plot (only if E3 is ambiguous) | insurer claims + K background lines with exogenous revenue | PPO vs NF-GAE | 6 | OPTIONAL | ~3 h |
@@ -127,6 +127,8 @@ related-work sentence); next_activity / rework as standalone N-copy environments
   0.782, 2× data 0.856; NF-GAE (default settings, half PPO-2×'s data) 1.087, ahead of
   every variant on 5/5 seeds (vs 2× data: +0.232, p<.001; whole-run +0.314). Epochs to
   0.8: NF-GAE 3–9, PPO 2× data 12–36 or never.
+- **E7b (insurer r=2, lr 6e-4, seeds 0-4):** NF-GAE 1.093 (1.087 at the default lr)
+  vs PPO 0.782 at the same lr (+0.311, 5/5, p=.003).
 - **Gain vs K (final):** K=2 +0.034, K=3 +0.176, K=6 +0.368. Whole-run mean: +0.069,
   +0.222, +0.409.
 

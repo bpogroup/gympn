@@ -42,3 +42,6 @@ examples/paper_examples/suite/**/train/
 *.blg
 *.spl
 *.tex.bak
+
+# Raw event logs: large, public (4TU.ResearchData), not versioned here.
+*.xes
