@@ -37,6 +37,17 @@ def test_partition_split_queue_has_two_per_copy():
     assert _n_comps(make_next_activity_split(1, allow_postpone=False)) == 2
 
 
+@pytest.mark.parametrize("regions", [1, 2, 4])
+def test_partition_insurer(regions):
+    """One component per process per region; shared clerks join claims and
+    complaints; a process alone is one component per region."""
+    from insurer_env import INSURER_BUILDERS
+    assert _n_comps(INSURER_BUILDERS["insurer"](regions)) == 3 * regions
+    assert _n_comps(INSURER_BUILDERS["insurer_shared"](regions)) == 2 * regions
+    for p in ("claims", "underwriting", "complaints"):
+        assert _n_comps(INSURER_BUILDERS[f"insurer_{p}"](regions)) == regions
+
+
 def test_partition_multisite():
     assert _n_comps(make_multisite(4, 1, 0)) == 4      # dedicated sites
     assert _n_comps(make_multisite(4, 1, 2)) == 1      # shared flex pool couples all

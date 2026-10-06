@@ -36,6 +36,10 @@ import numpy as np  # noqa: E402
 from config import stoch_config  # noqa: E402
 from run_suite import _set_seed, _extract_metrics, _threads_per_worker  # noqa: E402
 from bpm_envs import BPM_BUILDERS, BPM_HEURISTICS  # noqa: E402
+from insurer_env import INSURER_BUILDERS, INSURER_HEURISTICS  # noqa: E402
+
+BPM_BUILDERS = {**BPM_BUILDERS, **INSURER_BUILDERS}
+BPM_HEURISTICS = {**BPM_HEURISTICS, **INSURER_HEURISTICS}
 
 ENV = "next_activity"
 N = 8
@@ -50,6 +54,7 @@ THREADS = None
 BETA = None                    # causal wall-clock discount override (cfg.causal_beta if None)
 METHODS = ["ppo", "cgae_cflow", "mc_q"]
 POSTPONE = True
+_POSTPONE_SET = False
 POSTPONE_SCOPE = "global"
 FLAT = False                   # flat=1: flat graph observations (needs net=temb|tembf|aepn; routes to *_flat)
 NET = "aepn"                   # net=hgt|temb|tembf|aepn: actor+critic encoder (default aepn; *_aepn dirs, hgt = the old unsuffixed dirs)
@@ -77,11 +82,15 @@ for _a in sys.argv[1:]:
     elif _a.startswith("net="):
         NET = {"temb": "type_embed", "tembf": "type_embed_film"}.get(_a.split("=", 1)[1], _a.split("=", 1)[1])
     elif _a.startswith("postpone="):
+        _POSTPONE_SET = True
         _v = _a.split("=", 1)[1]
         POSTPONE = _v not in ("0", "false", "False")
         if _v == "component":
             POSTPONE_SCOPE = "component"
 
+# The insurer is work-conserving by design (insurer_env.py): no postpone unless asked.
+if ENV.startswith("insurer") and not _POSTPONE_SET:
+    POSTPONE = False
 if ENV not in BPM_BUILDERS:
     raise SystemExit(f"unknown env {ENV!r}; choose from {sorted(BPM_BUILDERS)}")
 BUILD = BPM_BUILDERS[ENV]
