@@ -67,12 +67,15 @@ METHODS = TIER1 + TIER2
 NET = "aepn"
 FLAT = False
 THREADS = None
+TAG = None      # tag=X: separate results directory *_X (e.g. a rerun next to existing cells)
 
 for _a in sys.argv[1:]:
     if _a.startswith("net="):
         NET = _a.split("=", 1)[1]
     elif _a.startswith("flat="):
         FLAT = _a.split("=", 1)[1] not in ("0", "false", "False")
+    elif _a.startswith("tag="):
+        TAG = _a.split("=", 1)[1]
     elif _a.startswith("threads="):
         THREADS = int(_a.split("=", 1)[1])
     elif _a.startswith("seeds="):
@@ -84,6 +87,8 @@ for _a in sys.argv[1:]:
         OUTDIR = Path(f"suite_results_multisite_protocol_smoke{EPOCHS}")
 if NET != "hgt" or FLAT:
     OUTDIR = Path(f"{OUTDIR}_{NET}" + ("_flat" if FLAT else ""))
+if TAG:
+    OUTDIR = Path(f"{OUTDIR}_{TAG}")
 CAUSAL = {m: (m not in ("ppo", "nfgae")) for m in METHODS}   # after argv: methods= may add arms
 # nfgae (paper/NFGAE_THEORY.md) needs no causal trace: plain SMDP-GAE path.
 

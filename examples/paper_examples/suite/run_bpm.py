@@ -56,6 +56,7 @@ METHODS = ["ppo", "cgae_cflow", "mc_q"]
 POSTPONE = True
 _POSTPONE_SET = False
 POSTPONE_SCOPE = "global"
+PLR = None                     # plr=x: policy learning rate override (routes to *_plr<x>)
 FLAT = False                   # flat=1: flat graph observations (needs net=temb|tembf|aepn; routes to *_flat)
 NET = "aepn"                   # net=hgt|temb|tembf|aepn: actor+critic encoder (default aepn; *_aepn dirs, hgt = the old unsuffixed dirs)
 BASES = None                   # bases=K: AEPNStack basis count (default 8; routes to *_b<K>)
@@ -75,6 +76,10 @@ for _a in sys.argv[1:]:
         THREADS = int(_a.split("=", 1)[1])
     elif _a.startswith("beta="):
         BETA = float(_a.split("=", 1)[1])
+    elif _a.startswith("episodes="):
+        EPISODES = int(_a.split("=", 1)[1])
+    elif _a.startswith("plr="):
+        PLR = float(_a.split("=", 1)[1])
     elif _a.startswith("flat="):
         FLAT = _a.split("=", 1)[1] not in ("0", "false", "False")
     elif _a.startswith("bases="):
@@ -101,6 +106,8 @@ OUTDIR = Path(f"suite_results_bpm_{ENV}_n{N}_ep{EPOCHS}" + ("" if EPOCHS == 40 e
               + ("_ppc" if POSTPONE and POSTPONE_SCOPE == "component" else "")
               + {"hgt": "", "type_embed": "_temb", "type_embed_film": "_tembf", "aepn": "_aepn"}[NET]
               + ("" if BASES is None else f"_b{BASES}")
+              + ("" if EPISODES == 8 else f"_eps{EPISODES}")
+              + ("" if PLR is None else f"_plr{PLR:g}")
               + ("_flat" if FLAT else ""))
 # nfgae needs no causal trace: it runs on the plain SMDP-GAE path.
 CAUSAL = {m: (m not in ("ppo", "nfgae")) for m in METHODS}
@@ -127,7 +134,7 @@ def _args(method, seed, cfg, logdir):
     a = {
         "algorithm": "ppo-clip",
         "episodes": EPISODES, "epochs": EPOCHS, "batch_size": cfg.batch_size,
-        "policy_lr": cfg.policy_lr, "policy_updates": cfg.policy_updates,
+        "policy_lr": cfg.policy_lr if PLR is None else PLR, "policy_updates": cfg.policy_updates,
         "value_lr": cfg.value_lr, "value_updates": cfg.value_updates,
         "eps": cfg.ppo_eps, "gam": cfg.gam, "lam": cfg.lam, "ent_bonus": cfg.ent_bonus,
         "policy_kld_limit": getattr(cfg, "policy_kld_limit", None),

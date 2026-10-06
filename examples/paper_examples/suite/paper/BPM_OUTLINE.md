@@ -78,7 +78,7 @@ Insurer evaluates every 3 epochs, multi-site every 2.
 | ID | Question | Setup | Arms | Seeds | Status | Compute |
 |---|---|---|---|---|---|---|
 | E1 | Is the network the first-order factor? | multi-site, N=4 | PPO-HGT vs PPO-AEPN | 20 | DONE (HGT 2026-09-20, AEPN 2026-10-05) | — |
-| E1b | Is E1 code drift? | multi-site, current code | PPO-HGT | 4 | PLANNED | ~1 h |
+| E1b | Is E1 code drift? | multi-site, current code | PPO-HGT | 4 | DONE: bit-identical to Sept (all curves) | — |
 | E1c | Does the network effect hold beyond multi-site? | insurer r=1 | PPO-HGT (vs E3's PPO-AEPN) | 10 | PLANNED | ~2 h |
 | E2 | NF-GAE on a symmetric structure | multi-site, K=4 | PPO vs NF-GAE | 20 | DONE | — |
 | E3 | Main result: the insurer | insurer r=1 (K=3), r=2 (K=6) | PPO vs NF-GAE | 10 → 20 | DONE at 10 seeds (2026-10-06); top-up to 20 PLANNED | ~5 h top-up |
@@ -86,7 +86,8 @@ Insurer evaluates every 3 epochs, multi-site every 2.
 | E4 | K=1 controls: how fast is each process learned alone? | claims / underwriting / complaints alone, r=1 | PPO (NF-GAE ≡ PPO here) | 10 | DONE | — |
 | E5 | Coupling: does the gain shrink when processes share a team? | insurer_shared r=1 (K=2) | PPO vs NF-GAE | 10 | DONE | — |
 | E6 | Which process gains? | per-process evaluation returns of E3 policies | PPO vs NF-GAE | E3's | PLANNED (needs per-component eval logging) | small code + rerun or post-hoc |
-| E7 | Is PPO just under-budgeted or mis-tuned? | insurer r=1: PPO with 2× episodes per epoch; PPO with policy lr ×0.5 / ×2 | PPO variants vs NF-GAE | 5 each | PLANNED | ~2 h |
+| E7 | Is PPO just under-budgeted or mis-tuned? | insurer r=2 (where PPO fails): PPO with 2× episodes per epoch; PPO with policy lr ×0.5 / ×2 | PPO variants vs NF-GAE | 5 each | DONE | — |
+| E7b | Fairness: NF-GAE with PPO's best lr (6e-4) | insurer r=2 | NF-GAE | 5 | PLANNED | ~1.5 h |
 | E8 | Where does the gain come from? | insurer r=1: factored advantage + global critic, vs full NF-GAE | NF-GAE ablation | 10 | PLANNED (needs a flag) | ~1.5 h |
 | E9 | Cost | wall-clock per cell, PPO vs NF-GAE under equal load | — | from E2/E3 | FREE (from logs) | — |
 | E10 | Mechanism plot (only if E3 is ambiguous) | insurer claims + K background lines with exogenous revenue | PPO vs NF-GAE | 6 | OPTIONAL | ~3 h |
@@ -120,6 +121,12 @@ related-work sentence); next_activity / rework as standalone N-copy environments
   (claims / underwriting / complaints), epochs to 0.9 median 9 / 8 / 3. Inside the
   insurer PPO is slower and lower than on every process alone; NF-GAE restores the
   alone-level speed.
+- **E1b:** HGT PPO on the current code reproduces the September cells bit for bit
+  (greedy, sampled and entropy curves, 4/4 seeds): the HGT failure is the network.
+- **E7 (insurer r=2, seeds 0-4, final):** PPO default 0.719, lr 1.5e-4 0.671, lr 6e-4
+  0.782, 2× data 0.856; NF-GAE (default settings, half PPO-2×'s data) 1.087, ahead of
+  every variant on 5/5 seeds (vs 2× data: +0.232, p<.001; whole-run +0.314). Epochs to
+  0.8: NF-GAE 3–9, PPO 2× data 12–36 or never.
 - **Gain vs K (final):** K=2 +0.034, K=3 +0.176, K=6 +0.368. Whole-run mean: +0.069,
   +0.222, +0.409.
 
