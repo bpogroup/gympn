@@ -29,6 +29,10 @@ decision is credited only with its own component's rewards.
   so it is decomposed exactly where that is valid.
 - Empirically: faster learning, and a better final policy where the environment is
   not saturated; the gain grows with the number of independent components K.
+- Against separate per-process learners (the obvious alternative when processes are
+  independent): most of the gain over joint PPO is per-unit credit, which per-unit
+  learners also get; NF-GAE adds a shared network on top (better early learning,
+  +0.07 whole-run) at the same compute, thanks to component turns (E11, E12).
 
 Second, methodological claim: **RL comparisons on Petri nets need a strong policy
 network.** With a per-type HGT, PPO fails on multi-site; with a relational network
@@ -58,6 +62,9 @@ design choices; not novel, cited as such), the same PPO reaches the heuristic.
    full proofs in an appendix or online supplement. Conditions C1–C3' in plain words.
    One paragraph on the policy network (relational attention with basis-decomposed
    relation weights; flat graph observations) as the experimental setup, cited.
+   One paragraph on component turns: simultaneous decisions are offered one component
+   at a time, so each decision observes and encodes only its own component (valid by
+   locality and work conservation; keeps compute linear in K).
 4. **Experiments** (6 p). Section by question, not by environment (list below).
 5. **Related work** (1 p). RL for BPM (resource allocation, prescriptive monitoring,
    next-best-action, A-E PN/GymPN work). Credit assignment: factored policy gradients
@@ -89,8 +96,10 @@ Insurer evaluates every 3 epochs, multi-site every 2.
 | E7 | Is PPO just under-budgeted or mis-tuned? | insurer r=2 (where PPO fails): PPO with 2× episodes per epoch; PPO with policy lr ×0.5 / ×2 | PPO variants vs NF-GAE | 5 each | DONE | — |
 | E7b | Fairness: NF-GAE with PPO's best lr (6e-4) | insurer r=2 | NF-GAE | 5 | DONE | — |
 | E8 | Where does the gain come from? | insurer r=1: factored advantage + global critic, vs full NF-GAE | NF-GAE ablation | 10 | PLANNED (needs a flag) | ~1.5 h |
-| E9 | Cost | wall-clock per cell, PPO vs NF-GAE under equal load | — | from E2/E3 | FREE (from logs) | — |
+| E9 | Cost | CPU time per 40-epoch run: NF-GAE (full graph) vs per-unit learners, 1 thread, comparable load | — | from E3/E4 | DONE | — |
 | E10 | Mechanism plot (only if E3 is ambiguous) | insurer claims + K background lines with exogenous revenue | PPO vs NF-GAE | 6 | OPTIONAL | ~3 h |
+| E11 | Is NF-GAE more than separate per-process learners? | insurer r=1 / r=2: organisation built from E4's per-process agents (independent units: expected total = sum of unit returns; anchors verified additive) | per-unit learners vs NF-GAE | 10 / 5 orgs | DONE (post hoc from E4) | — |
+| E12 | Local encoding (component turns): same learning, less compute? | insurer r=2, `local=1` | NF-GAE local vs full graph | 5 | DONE | — |
 
 Already verified and only cited (no new runs): partition tests
 (`test_partition_*`), K=1 identity (bit-for-bit advantages and end-to-end finals,
@@ -131,6 +140,21 @@ related-work sentence); next_activity / rework as standalone N-copy environments
   vs PPO 0.782 at the same lr (+0.311, 5/5, p=.003).
 - **Gain vs K (final):** K=2 +0.034, K=3 +0.176, K=6 +0.368. Whole-run mean: +0.069,
   +0.222, +0.409.
+- **E11 per-unit learners (organisation of separately trained per-process PPO agents):**
+  r=1: final 1.058, whole-run 0.960, epochs 3–12 0.783 vs NF-GAE 1.137 / 1.029 / 0.877
+  (final +0.079, Welch p=.045; whole-run +0.069, p=.009). r=2 (5 orgs): 1.048 / 0.950 /
+  0.774 vs NF-GAE 1.081 / 1.020 / 0.921 (final +0.033, n.s.; whole-run +0.069, p=.02).
+  Epochs to 0.9 the same (~9). Per-unit learners capture most of NF-GAE's gain over
+  joint PPO; NF-GAE's extra is early learning, consistent with the shared network.
+- **E9 cost (full-graph NF-GAE):** per-unit learners 13.9 CPU-min (r=1, 3 runs) and
+  27.9 (r=2, 6 runs) vs NF-GAE 23.8 and 61.2 min: 1.7× and 2.2× more, growing ~K²
+  because every decision encoded the whole organisation.
+- **E12 local encoding (component turns):** 2-epoch cells r=1 25.5 → 15.3 s (1.67×),
+  r=2 69.8 → 29.2 s (2.39×), which cancels the E9 overhead (compute now on par with
+  per-unit learners, linear in K). Learning unchanged, r=2 seeds 0–4: whole-run 1.023
+  vs 1.017 full graph (p=.73), epochs 3–12 0.949 vs 0.914, final 1.053 vs 1.087
+  (p=.14, single evaluation point). Tests: identical at K=1, active component's
+  logits equal the full-graph logits.
 
 ## Figures and tables
 
@@ -144,6 +168,8 @@ related-work sentence); next_activity / rework as standalone N-copy environments
 - **Table 1** All conditions: final, best, whole-run mean, epochs to 0.9, collapsed
   seeds, paired tests.
 - **Table 2** Network baseline: PPO-HGT vs PPO-AEPN (E1, E1b, E1c).
+- **Table 3** NF-GAE vs per-unit learners vs joint PPO: learning (early, whole-run,
+  final) and CPU time, full graph vs local encoding (E9, E11, E12).
 - Optional: per-process gains (E6), cost (E9) in the text.
 
 ## Statistics
@@ -157,9 +183,9 @@ training, both preregistered here before the full E3 results.
 ## Compute plan and order
 
 1. ~~E3 r=1, E5, E3 r=2, E4~~ done 2026-10-06 05:01.
-2. E1b (1 h): settles whether the network claim stands.
+2. ~~E1b~~ done (bit-identical reproduction).
 3. E6 logging code, then E3 top-up to 20 seeds with per-process logging (~3 h).
-4. E7 and E8 (~3.5 h), E1c (~2 h).
+4. ~~E7, E7b~~ done; E8 (~1.5 h), E1c (~2 h). ~~E9, E11, E12~~ done.
 5. E3b r=4 (~4–6 h) if E3 r=2 shows the gain growing.
 6. E10 only if needed.
 
@@ -175,4 +201,8 @@ Total remaining: about 15–20 h of machine time.
   data for the same policy), which is still the claim.
 - **E4 shows each process alone is learned no faster than inside the insurer** → the
   "noise from other processes" story weakens; the gain would then need E8 to explain it.
-- **Boundary to state up front:** one process with a shared resource pool is K=1.
+- **E11 shows per-unit learners nearly match NF-GAE** → NF-GAE's distinct value is the
+  shared network (early learning) plus automatic, provably sound decomposition and
+  one deployed policy; state that, and don't claim a large gain over per-unit learners.
+- **Boundary to state up front:** one process with a shared resource pool is K=1
+  (verified on BPI2012: one well-mixed resource pool, median 4 resources per case).
