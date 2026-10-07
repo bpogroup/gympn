@@ -119,6 +119,9 @@ TAG = f"bpm-{ENV}-n{N}"
 
 
 def _baselines():
+    if getattr(BUILD, "wait_anchor", False):        # insurer slow-mismatch variant
+        from insurer_env import wait_anchors
+        return wait_anchors(BUILD, N, LENGTH)
     from gympn.solvers import RandomSolver, HeuristicSolver
     import random
     rnd, heu = [], []

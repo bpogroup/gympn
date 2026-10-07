@@ -32,6 +32,15 @@ exactly the same sub-net as in the full insurer.
 
 No postpone (work-conserving): NF-GAE's soundness conditions need either no
 postpone or component-scoped postpone, and multi-site ran without it.
+
+SLOW-MISMATCH VARIANT (`uw_mismatch`, builder "insurer_slow"): a mismatched
+underwriter takes `uw_mismatch` time units (base, + U{0,1}) instead of 3. This
+is the slow-server regime (Lin & Kumar 1984): leaving an underwriter idle rather
+than give them the wrong application type pays (+16% in underwriting at 7, by
+the quick heuristic check), so postponement matters. Its anchor is the WAITING
+heuristic (`wait_anchors`): never a mismatched underwriting assignment (the
+process waits instead, component postpone); claims and complaints stay
+work-conserving.
 """
 import random
 
@@ -84,16 +93,18 @@ def _uw_arrive(a):
             SimToken({'task_type': random.randint(0, 1)})]
 
 
-def _uw_start(c, r):
-    base = 1 if c['task_type'] == r['code'] else 3      # matched fast, mismatched slow
-    return [SimToken((c, r), delay=base + random.randint(0, 1))]
+def _uw_starter(mismatch):
+    def start(c, r):
+        base = 1 if c['task_type'] == r['code'] else mismatch      # matched fast, mismatched slow
+        return [SimToken((c, r), delay=base + random.randint(0, 1))]
+    return start
 
 
 def _uw_done(b):
     return [SimToken(b[-1])]
 
 
-def _add_underwriting(ag, tag):
+def _add_underwriting(ag, tag, mismatch=3):
     arrival = ag.add_var(f"uw_arrival_{tag}", var_attributes=['task_type'])
     wait = ag.add_var(f"uw_wait_{tag}", var_attributes=['task_type'])
     busy = ag.add_var(f"uw_busy_{tag}", var_attributes=['task_type', 'code'])
@@ -104,7 +115,7 @@ def _add_underwriting(ag, tag):
     wait.put({'task_type': 0})
     wait.put({'task_type': 1})
     ag.add_event([arrival], [arrival, wait], _uw_arrive, name=f'uw_arrive_{tag}')
-    ag.add_action([wait, team], [busy], behavior=_uw_start, name=f"uw_start_{tag}")
+    ag.add_action([wait, team], [busy], behavior=_uw_starter(mismatch), name=f"uw_start_{tag}")
     ag.add_event([busy], [team], _uw_done, name=f'uw_done_{tag}', reward_function=lambda x: 1)
 
 
@@ -148,7 +159,7 @@ def _add_complaints(ag, tag, hidden, clerks):
 
 # ------------------------------------------------------------- insurer
 def make_insurer(regions=1, processes=PROCESSES, shared_clerks=False, causal_rl=False,
-                 allow_postpone=False, causal_postpone_tokenflow=False):
+                 allow_postpone=False, causal_postpone_tokenflow=False, uw_mismatch=3):
     """The insurer: `processes` (any subset of PROCESSES) in each of `regions`
     regions. With shared_clerks the claims and complaints clerks of a region
     form one pool (2 normal + 2 expert, the same headcount as two teams)."""
@@ -175,7 +186,7 @@ def make_insurer(regions=1, processes=PROCESSES, shared_clerks=False, causal_rl=
                 clerks.put({'skill': 0}); clerks.put({'skill': 1})
             _add_claims(ag, tag, hidden, clerks)
         if "underwriting" in processes:
-            _add_underwriting(ag, tag)
+            _add_underwriting(ag, tag, uw_mismatch)
         if "complaints" in processes:
             clerks = shared
             if clerks is None:
@@ -188,7 +199,7 @@ def make_insurer(regions=1, processes=PROCESSES, shared_clerks=False, causal_rl=
 
 
 # ----------------------------------------------------------- heuristic
-def _binding_rate(b):
+def _binding_rate(b, mismatch=3):
     """Myopic expected reward per expected resource time of one binding, by
     process: the same rate rules as the bpm_envs and multi-site anchors."""
     tr = str(getattr(b[2], '_id', None) or getattr(b[2], 'name', ''))
@@ -198,7 +209,7 @@ def _binding_rate(b):
         code = next((v['code'] for v in vals if isinstance(v, dict) and 'code' in v), None)
         if tt is None or code is None:
             return None
-        return 1.0 / ((1 if tt == code else 3) + 0.5)
+        return 1.0 / ((1 if tt == code else mismatch) + 0.5)
     risk = skill = None
     reworked = 0
     for v in vals:
@@ -232,11 +243,76 @@ def insurer_heuristic(observable_net, tokens_comb, bindings=None):
     return best if best is not None else real[0]
 
 
-def _builder(processes, shared_clerks=False):
+def _is_uw_mismatch(b):
+    tr = str(getattr(b[2], '_id', ''))
+    if not tr.startswith('uw_'):
+        return False
+    vals = [getattr(tok, 'value', tok) for (_place, tok) in b[0]]
+    tt = next(v['task_type'] for v in vals if 'task_type' in v)
+    code = next(v['code'] for v in vals if 'code' in v)
+    return tt != code
+
+
+def _is_postpone(b):
+    return isinstance(b[0], list) and b[0] == ['postpone']
+
+
+def insurer_wait_choice(pn_actions, part, mismatch):
+    """Index of the waiting heuristic's choice: the best-rate binding that is not
+    a mismatched underwriting assignment; if only mismatches are left, that
+    underwriting process waits (its component postpone pseudo-binding)."""
+    real = [(i, b) for i, b in enumerate(pn_actions) if not _is_postpone(b)]
+    ok = [(_binding_rate(b, mismatch) or 0.0, i) for i, b in real if not _is_uw_mismatch(b)]
+    if ok:
+        return max(ok)[1]
+    c = part[real[0][1][2]._id]
+    for i, b in enumerate(pn_actions):
+        if _is_postpone(b) and getattr(b[2], 'comp', None) == c:
+            return i
+    return real[0][0]
+
+
+def wait_anchors(build, n, length, episodes=40):
+    """Anchors for the slow-mismatch variant: random = uniform over production
+    bindings (no postpone), heuristic = the waiting heuristic (component
+    postpone). Runs through AEPN_Env, which handles component postpone
+    (GymProblem.testing_run does not pass the component id)."""
+    import numpy as np
+    from gympn.environment import AEPN_Env
+    mismatch = build.uw_mismatch
+
+    def episode(seed, waiting):
+        random.seed(seed); np.random.seed(seed)
+        pn = build(n, causal_rl=False, allow_postpone=waiting)
+        pn.length = length
+        if waiting:
+            pn.postpone_scope = 'component'
+        env = AEPN_Env(pn)
+        env.reset()
+        part, rng, total = env.pn.net_partition(), random.Random(seed + 1), 0.0
+        while env.pn.pn_actions:
+            B = env.pn.pn_actions
+            a = insurer_wait_choice(B, part, mismatch) if waiting else rng.randrange(len(B))
+            _, r, done, _, _ = env.step(a)
+            total += r
+            if done:
+                break
+        return total
+    rnd = [episode(1000 + s, False) for s in range(episodes)]
+    heu = [episode(1000 + s, True) for s in range(episodes)]
+    return {"random_mean": float(np.mean(rnd)), "heuristic_mean": float(np.mean(heu)),
+            "random_std": float(np.std(rnd)), "heuristic_std": float(np.std(heu)),
+            "episodes": episodes, "anchor": "waiting heuristic (component postpone)"}
+
+
+def _builder(processes, shared_clerks=False, uw_mismatch=3):
     def build(n=1, causal_rl=False, allow_postpone=False, causal_postpone_tokenflow=False):
         return make_insurer(n, processes, shared_clerks, causal_rl=causal_rl,
                             allow_postpone=allow_postpone,
-                            causal_postpone_tokenflow=causal_postpone_tokenflow)
+                            causal_postpone_tokenflow=causal_postpone_tokenflow,
+                            uw_mismatch=uw_mismatch)
+    build.uw_mismatch = uw_mismatch
+    build.wait_anchor = uw_mismatch != 3
     return build
 
 
@@ -248,5 +324,8 @@ INSURER_BUILDERS = {
     "insurer_claims": _builder(("claims",)),
     "insurer_underwriting": _builder(("underwriting",)),
     "insurer_complaints": _builder(("complaints",)),
+    # slow-mismatch variant: postponement pays in underwriting
+    "insurer_slow": _builder(PROCESSES, uw_mismatch=7),
+    "insurer_underwriting_slow": _builder(("underwriting",), uw_mismatch=7),
 }
 INSURER_HEURISTICS = {name: insurer_heuristic for name in INSURER_BUILDERS}
