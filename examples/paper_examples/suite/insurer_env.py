@@ -158,8 +158,8 @@ def _add_complaints(ag, tag, hidden, clerks):
 
 
 # ------------------------------------------------------------- insurer
-def make_insurer(regions=1, processes=PROCESSES, shared_clerks=False, causal_rl=False,
-                 allow_postpone=False, causal_postpone_tokenflow=False, uw_mismatch=3):
+def make_insurer(regions=1, processes=PROCESSES, shared_clerks=False,
+                 allow_postpone=False, uw_mismatch=3):
     """The insurer: `processes` (any subset of PROCESSES) in each of `regions`
     regions. With shared_clerks the claims and complaints clerks of a region
     form one pool (2 normal + 2 expert, the same headcount as two teams)."""
@@ -169,8 +169,7 @@ def make_insurer(regions=1, processes=PROCESSES, shared_clerks=False, causal_rl=
         raise ValueError(f"unknown processes {sorted(unknown)}; choose from {PROCESSES}")
     if shared_clerks and not {"claims", "complaints"} <= set(processes):
         raise ValueError("shared_clerks needs both claims and complaints")
-    ag = GymProblem(allow_postpone=allow_postpone, causal_rl=causal_rl,
-                    causal_postpone_tokenflow=causal_postpone_tokenflow)
+    ag = GymProblem(allow_postpone=allow_postpone)
     hidden = {}
     for i in range(regions):
         tag = str(i)
@@ -283,7 +282,7 @@ def wait_anchors(build, n, length, episodes=40):
 
     def episode(seed, waiting):
         random.seed(seed); np.random.seed(seed)
-        pn = build(n, causal_rl=False, allow_postpone=waiting)
+        pn = build(n, allow_postpone=waiting)
         pn.length = length
         if waiting:
             pn.postpone_scope = 'component'
@@ -306,10 +305,8 @@ def wait_anchors(build, n, length, episodes=40):
 
 
 def _builder(processes, shared_clerks=False, uw_mismatch=3):
-    def build(n=1, causal_rl=False, allow_postpone=False, causal_postpone_tokenflow=False):
-        return make_insurer(n, processes, shared_clerks, causal_rl=causal_rl,
-                            allow_postpone=allow_postpone,
-                            causal_postpone_tokenflow=causal_postpone_tokenflow,
+    def build(n=1, allow_postpone=False):
+        return make_insurer(n, processes, shared_clerks, allow_postpone=allow_postpone,
                             uw_mismatch=uw_mismatch)
     build.uw_mismatch = uw_mismatch
     build.wait_anchor = uw_mismatch != 3

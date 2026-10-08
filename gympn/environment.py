@@ -13,8 +13,7 @@ class AEPN_Env(Env):
     Gym environment for training a Deep Reinforcement Learning agent on the AEPN simulator.
     """
 
-    # Use the lightweight PN snapshot in get_state/set_state (markings + scalars
-    # + shared trace) instead of a full deepcopy of the net structure. Set False
+    # Use the lightweight PN snapshot in get_state/set_state (markings + scalars) instead of a full deepcopy of the net structure. Set False
     # to fall back to the deepcopy path (equivalence testing / safety).
     LIGHT_SNAPSHOT = True
 
@@ -23,12 +22,6 @@ class AEPN_Env(Env):
         super().__init__()
         self.pn = aepn
         self.frozen_pn = copy.deepcopy(self.pn)
-        # Ensure frozen copy does not carry over causal traces from previous runs
-        try:
-            if hasattr(self.frozen_pn, 'causal_trace') and self.frozen_pn.causal_trace is not None:
-                self.frozen_pn.causal_trace.flush()
-        except Exception:
-            pass
         self.metadata = None
 
         # gym specific
@@ -85,22 +78,7 @@ class AEPN_Env(Env):
         observation, terminated, self.i = self.pn.run_evolutions(
             self.run, self.i, self.active_model, build_obs=build_obs)
 
-        # Prepare info dict
-        if self.pn.causal_rl:
-            # Always include causal trace when causal_rl is enabled
-            # It accumulates throughout the episode and is needed at episode end
-            info = {'pn_reward': self.pn.reward, 'eligibility_credits': self.pn.causal_trace}
-        else:
-            info = {'pn_reward': self.pn.reward}
-
-        # Always return the true per-step reward. Historically this was zeroed
-        # in causal mode ("episode-level credit assignment via causal traces"),
-        # which silently starved every consumer of rewards_raw: the causal-mu
-        # hybrid never mixed raw-reward GAE (it actually mixed a value-TD
-        # term), and the LCV control-variate base was pure value noise. The
-        # causal credit paths ignore step rewards by construction
-        # (finish(mode='replace')), so restoring them changes nothing for
-        # lrq/lrq2/mc_q at mu=0.
+        info = {'pn_reward': self.pn.reward}
         reward = (self.pn.reward - old_rewards)
         # Per-component share of this step's reward (nfgae; see
         # GymProblem.net_partition). Sums to `reward`.
@@ -118,12 +96,6 @@ class AEPN_Env(Env):
         if self.debug:
             print(f"Entered reset with current reward for PN: {self.pn.reward} \n")
         self.pn = copy.deepcopy(self.frozen_pn)
-        # Ensure the active PN starts with a fresh causal trace
-        try:
-            if hasattr(self.pn, 'causal_trace') and self.pn.causal_trace is not None:
-                self.pn.causal_trace.flush()
-        except Exception:
-            pass
         if self.pn.network_tag.is_evolution():
             self.pn.get_to_first_action()
 
@@ -167,7 +139,7 @@ class AEPN_Env(Env):
             }
         """
         snapshot = {
-            # Lightweight PN snapshot (markings + scalars + shared trace) instead
+            # Lightweight PN snapshot (markings + scalars) instead
             # of a full deepcopy of the net structure — ~20% of a search, profiled.
             # LIGHT_SNAPSHOT=False falls back to the old deepcopy (used to verify
             # behavioural equivalence).

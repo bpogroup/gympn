@@ -86,7 +86,7 @@ def _finish(buf, rewards, values, times, comp=None, rw=None):
     buf._steps_dirty = True
     if comp is not None:
         buf._nf_comp, buf._nf_rew = comp, rw
-    buf.finish(credits=None)
+    buf.finish()
     return buf.advantages_.clone()
 
 
@@ -96,9 +96,9 @@ def test_k1_identity_with_ppo():
     rewards = rng.integers(0, 3, T).astype(float)
     values = rng.normal(size=T)
     times = np.cumsum(rng.integers(0, 3, T)).astype(float)
-    kw = dict(gam=0.99, lam=0.95, causal_beta=0.5, smdp_discount=True)
-    a_ppo = _finish(TrajectoryBuffer(causal_scheme='lrq', **kw), rewards, values, times)
-    a_nf = _finish(TrajectoryBuffer(causal_scheme='nfgae', **kw), rewards, values, times,
+    kw = dict(gam=0.99, lam=0.95, beta=0.5, smdp_discount=True)
+    a_ppo = _finish(TrajectoryBuffer(**kw), rewards, values, times)
+    a_nf = _finish(TrajectoryBuffer(nfgae=True, **kw), rewards, values, times,
                    comp=[0] * T, rw=[{0: r} for r in rewards])
     assert torch.allclose(a_ppo, a_nf, atol=1e-6)
 
@@ -109,8 +109,7 @@ def test_k2_hand_computed():
     rw = [{1: 1.0}, {0: 2.0}, {0: 4.0}]  # c1's reward at step 0, c0's at steps 1, 2
     values = [0.5, 0.25, 0.75]
     times = [0.0, 1.0, 3.0]
-    buf = TrajectoryBuffer(causal_scheme='nfgae', gam=1.0, lam=1.0,
-                           causal_beta=0.5, smdp_discount=True)
+    buf = TrajectoryBuffer(nfgae=True, gam=1.0, lam=1.0, beta=0.5, smdp_discount=True)
     a = _finish(buf, rewards, values, times, comp=[0, 1, 0], rw=rw)
     # c0: epoch t0 owns steps [0, 2) -> R = 0 + 2; next c0 epoch t2 after 3 units
     a_t2 = 4.0 - 0.75

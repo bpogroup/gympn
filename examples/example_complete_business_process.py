@@ -32,7 +32,7 @@ if __name__ == "__main__":
     ###########################################################################
 
     # Instantiate a simulation problem.
-    agency = GymProblem(causal_rl=train, allow_postpone=True)
+    agency = GymProblem(allow_postpone=True)
 
     # Define cases with two task types to create meaningful routing decisions
     arrival = agency.add_var("arrival", var_attributes=['task_type'])
@@ -273,7 +273,6 @@ if __name__ == "__main__":
     default_args = {
         # Algorithm Parameters
         "algorithm": "ppo-clip",
-        "causal_rl": True,  # Enable causal RL for better credit assignment
         "gam": 0.99,
         "lam": 0.95,
         "eps": 0.15,

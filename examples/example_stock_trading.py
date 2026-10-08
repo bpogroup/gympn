@@ -45,7 +45,7 @@ if __name__ == "__main__":
     ###########################################################################
 
     # Instantiate a simulation problem
-    agency = GymProblem(causal_rl=train, allow_postpone=True)
+    agency = GymProblem(allow_postpone=True)
 
     # Define variables for stock trading
     # Market state: contains all prices and portfolio info

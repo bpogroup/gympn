@@ -5,9 +5,9 @@ GymPN is a Python library designed for creating and training reinforcement learn
 ## Features
 
 - **Action-Evolution Petri Nets (AEPN):** Define and simulate A-E PN environments.
-- **Customizable RL Agents:** Train agents using Proximal Policy Optimization (PPO), with optional causal credit assignment.
+- **Customizable RL Agents:** Train agents using Proximal Policy Optimization (PPO), with optional net-factored credit (NF-GAE) for nets with independent parts.
 - **Graph Observations:** Generate graph-based observations for RL agents using PyTorch Geometric.
-- **Causal Reinforcement Learning:** Track reward origins and assign credit through causal chains.
+- **Postponement:** Let the agent wait, globally or per independent part of the net.
 - **Strategic Postponement:** Defer decisions in complex temporal scenarios.
 - **Integration with Gymnasium:** Seamless integration with Gym environments.
 - **Flexible Simulation Framework:** Define custom events, actions, and reward functions.
@@ -39,7 +39,7 @@ The complete documentation is available in the [docs directory](./docs/). Here's
 3. **Need quick answers?** → Use the [Documentation Overview](./docs/DOCUMENTATION_OVERVIEW.md) to find what you need
 4. **Prefer learning by doing?** → Check the [examples directory](./examples)
 5. **Want to understand algorithms?** → Read the [Algorithms Guide](./docs/algorithms.md)
-6. **Working with complex scenarios?** → See [Postponement and Causal RL](./docs/postpone_causal.md)
+6. **Working with complex scenarios?** → See [Postponement and Net-Factored Credit](./docs/postponement.md)
 
 ## Documentation
 
@@ -52,8 +52,8 @@ Complete documentation is available in the [docs directory](./docs/):
 - **[Agents Guide](./docs/agents_guide.md)** - Choose and configure the right agent
 
 ### Advanced Topics
-- **[Advanced Features](./docs/advanced_features.md)** - GNNs, causal tracking, and optimization
-- **[Postponement and Causal RL](./docs/postpone_causal.md)** - Strategic postponement and credit assignment
+- **[Advanced Features](./docs/advanced_features.md)** - GNNs, parallelization, and optimization
+- **[Postponement and Net-Factored Credit](./docs/postponement.md)** - Strategic postponement and credit assignment
 - **[Extending GymPN](./docs/extending_gympn.md)** - Create custom environments and solvers
 
 ### Reference

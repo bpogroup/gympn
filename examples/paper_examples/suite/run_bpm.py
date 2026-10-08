@@ -1,26 +1,20 @@
-r"""BPM decision-type benchmark runner (conference version of the paper).
+r"""BPM experiment runner: PPO vs NF-GAE on the insurer and the BPM nets.
 
-Trains the arms on one of the two new BPM environments in `bpm_envs.py`
-(next-activity selection, rework / quality gate) at a chosen number of
-independent copies N, under the SAME protocol as the paper's 40-epoch cells
-(run_ncopies_hard_n4.py / run_n2_epochs.py): 40 epochs x 8 episodes, greedy
-eval every 3 epochs on 20 episodes under common random numbers (eval_seed
-555000), allow_postpone=True with causal_postpone_tokenflow on the causal
-arms, seeds 0-19, shared hyperparameters, no per-arm tuning. Anchors on the
-canonical no-postpone env over 40 episodes.
+Protocol: 40 epochs x 8 episodes, greedy evaluation every 3 epochs on 20
+episodes under common random numbers (eval_seed 555000), seeds 0-19, shared
+hyperparameters (common.Hyper), no per-arm tuning. Anchors: random and
+heuristic policies over 40 episodes (insurer_slow: the waiting heuristic).
 
-Arms (the conference paper's set): ppo, cgae_cflow, mc_q. Any other suite
-arm name is accepted for ad-hoc checks.
+Arms: ppo (SMDP-GAE PPO) and nfgae (net-factored GAE, paper/NFGAE_THEORY.md).
 
-Run:  python run_bpm.py env=next_activity N=8 [workers] [seeds=20]
-                        [methods=ppo,cgae_cflow,mc_q] [epochs=40] [threads=k]
-                        [beta=0.5]   (causal wall-clock discount; routes to *_beta<val>)
-                        [postpone=0] (no postpone; routes to *_nopp)
-                        [postpone=component] (one postpone per net component, the
-                                     scope nfgae's Theorem 1 allows; routes to *_ppc)
-Arm `nfgae` (net-factored GAE, paper/NFGAE_THEORY.md) runs on the plain SMDP-GAE
-path with no causal trace; it needs postpone=0.
-Output: suite_results_bpm_<env>_n<N>_ep<epochs>/cells/N<N>__<method>__s<seed>.json
+Run:  python run_bpm.py env=insurer N=2 [workers] [seeds=20] [methods=ppo,nfgae]
+                        [epochs=40] [threads=k] [episodes=8] [plr=x]
+                        [net=aepn|hgt|temb|tembf] [bases=K] [flat=1] [local=1]
+                        [beta=0.5]   (SMDP discount; routes to *_beta<val>)
+                        [postpone=0|1|component]  (no / global / per-component
+                                     postpone; *_nopp, unsuffixed, *_ppc)
+The insurer envs default to postpone=0. nfgae needs postpone=0 or component.
+Output: suite_results_bpm_<env>_n<N>_ep<epochs>.../cells/N<N>__<method>__s<seed>.json
 (epochs != 40 routes to a *_smoke<epochs> dir). Resumable by cell file.
 """
 import json
@@ -33,15 +27,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np  # noqa: E402
 
-from config import stoch_config  # noqa: E402
-from run_suite import _set_seed, _extract_metrics, _threads_per_worker  # noqa: E402
+from common import Hyper, set_seed, extract_metrics, threads_per_worker  # noqa: E402
 from bpm_envs import BPM_BUILDERS, BPM_HEURISTICS  # noqa: E402
 from insurer_env import INSURER_BUILDERS, INSURER_HEURISTICS  # noqa: E402
 
 BPM_BUILDERS = {**BPM_BUILDERS, **INSURER_BUILDERS}
 BPM_HEURISTICS = {**BPM_HEURISTICS, **INSURER_HEURISTICS}
 
-ENV = "next_activity"
+ENV = "insurer"
 N = 8
 LENGTH = 20
 EPOCHS = 40
@@ -51,8 +44,8 @@ TEST_EPISODES = 20
 EVAL_SEED = 555_000
 SEEDS = 20
 THREADS = None
-BETA = None                    # causal wall-clock discount override (cfg.causal_beta if None)
-METHODS = ["ppo", "cgae_cflow", "mc_q"]
+BETA = None                    # SMDP discount override (Hyper.beta if None)
+METHODS = ["ppo", "nfgae"]
 POSTPONE = True
 _POSTPONE_SET = False
 POSTPONE_SCOPE = "global"
@@ -99,6 +92,8 @@ for _a in sys.argv[1:]:
 # The insurer is work-conserving by design (insurer_env.py): no postpone unless asked.
 if ENV.startswith("insurer") and not _POSTPONE_SET:
     POSTPONE = False
+if set(METHODS) - {"ppo", "nfgae"}:
+    raise SystemExit(f"unknown methods {sorted(set(METHODS) - {'ppo', 'nfgae'})}; choose from ppo, nfgae")
 if ENV not in BPM_BUILDERS:
     raise SystemExit(f"unknown env {ENV!r}; choose from {sorted(BPM_BUILDERS)}")
 BUILD = BPM_BUILDERS[ENV]
@@ -113,8 +108,6 @@ OUTDIR = Path(f"suite_results_bpm_{ENV}_n{N}_ep{EPOCHS}" + ("" if EPOCHS == 40 e
               + ("" if PLR is None else f"_plr{PLR:g}")
               + ("_flat" if FLAT else "")
               + ("_local" if LOCAL else ""))
-# nfgae needs no causal trace: it runs on the plain SMDP-GAE path.
-CAUSAL = {m: (m not in ("ppo", "nfgae")) for m in METHODS}
 TAG = f"bpm-{ENV}-n{N}"
 
 
@@ -127,10 +120,10 @@ def _baselines():
     rnd, heu = [], []
     for s in range(40):
         random.seed(1000 + s); np.random.seed(1000 + s)
-        env = BUILD(N, causal_rl=False, allow_postpone=False)
+        env = BUILD(N, allow_postpone=False)
         rnd.append(float(env.testing_run(solver=RandomSolver(), length=LENGTH)))
         random.seed(1000 + s); np.random.seed(1000 + s)
-        env = BUILD(N, causal_rl=False, allow_postpone=False)
+        env = BUILD(N, allow_postpone=False)
         heu.append(float(env.testing_run(solver=HeuristicSolver(HEUR), length=LENGTH)))
     return {"random_mean": float(np.mean(rnd)), "heuristic_mean": float(np.mean(heu)),
             "random_std": float(np.std(rnd)), "heuristic_std": float(np.std(heu)),
@@ -145,7 +138,7 @@ def _args(method, seed, cfg, logdir):
         "value_lr": cfg.value_lr, "value_updates": cfg.value_updates,
         "eps": cfg.ppo_eps, "gam": cfg.gam, "lam": cfg.lam, "ent_bonus": cfg.ent_bonus,
         "policy_kld_limit": getattr(cfg, "policy_kld_limit", None),
-        "causal_beta": cfg.causal_beta,
+        "beta": cfg.beta,
         "verbose": 0, "use_gpu": False, "agent_seed": int(seed),
         "use_wandb": False, "open_tensorboard": False,
         "test_in_train": True, "test_freq": TEST_FREQ, "test_episodes": TEST_EPISODES,
@@ -163,19 +156,13 @@ def _args(method, seed, cfg, logdir):
         a["flat_obs"] = True
     if LOCAL and method == "nfgae":
         a["local_obs"] = True
-    if CAUSAL[method]:
-        a.update({"causal_rl": True, "causal_scheme": method})
-    elif method == "nfgae":
-        a.update({"causal_rl": False, "causal_scheme": "nfgae", "smdp_discount": True})
-    else:
-        a.update({"causal_rl": False, "smdp_discount": True})
+    a.update({"smdp_discount": True, "nfgae": method == "nfgae"})
     return a
 
 
 def train_cell(method, seed, cfg, logdir, baselines):
-    _set_seed(seed)
-    env = BUILD(N, causal_rl=CAUSAL[method], allow_postpone=POSTPONE,
-                causal_postpone_tokenflow=CAUSAL[method] and POSTPONE)
+    set_seed(seed)
+    env = BUILD(N, allow_postpone=POSTPONE)
     env.postpone_scope = POSTPONE_SCOPE
     args = _args(method, seed, cfg, logdir)
     saved = sys.argv; sys.argv = sys.argv[:1]
@@ -184,8 +171,7 @@ def train_cell(method, seed, cfg, logdir, baselines):
         env.training_run(length=LENGTH, args_dict=args)
     finally:
         sys.argv = saved
-    cfx = stoch_config(); cfx.epochs = EPOCHS; cfx.test_freq = TEST_FREQ
-    m = _extract_metrics(getattr(env, "training_history", {}) or {}, cfx)
+    m = extract_metrics(getattr(env, "training_history", {}) or {}, EPOCHS, TEST_FREQ)
     m.update({"env": ENV, "N": N, "method": method, "seed": seed,
               "epochs": EPOCHS, "episodes": EPISODES, "eval_seed": EVAL_SEED,
               "baselines": baselines, "minutes": (time.time() - t0) / 60.0})
@@ -201,56 +187,6 @@ def _worker(payload):
     except Exception:
         import traceback
         return (method, seed, None, traceback.format_exc())
-
-
-def crn_precheck(episodes=20):
-    """Causal and non-causal envs must consume the global random stream
-    identically, or scenario alignment between arms breaks."""
-    from gympn.agents import Agent
-    from gympn.environment import AEPN_Env
-
-    class _NoOp:
-        def train(self):
-            pass
-
-    class Scripted(Agent):
-        def __init__(self):
-            self.policy_model = _NoOp(); self.value_model = _NoOp()
-            self.best_test_metric = float('inf')
-
-        def act(self, state, deterministic=True, return_logprob=False):
-            return 0
-
-    def build(causal):
-        pn = BUILD(N, causal_rl=causal, allow_postpone=POSTPONE,
-                   causal_postpone_tokenflow=causal and POSTPONE)
-        pn.postpone_scope = POSTPONE_SCOPE
-        pn.length = LENGTH
-        if causal:
-            import types, uuid
-            for place in pn.places:
-                for tok in place.marking:
-                    setattr(tok, '_id', str(uuid.uuid4()))
-            pn.causal_trace._pn = pn
-            pn.causal_trace._static_comp_cache = None
-            pn.causal_trace._ls_hca_classify_cache = None
-            try:
-                pn.causal_trace.flush()
-            except Exception:
-                pass
-            sent = types.SimpleNamespace(_id="__initial__")
-            for place in pn.places:
-                for tok in place.marking:
-                    pn.causal_trace.register_token(tok, sent, parent_tokens=[], time=0)
-            pn.causal_trace.register_transition(
-                transition=sent, input_tokens=[],
-                output_tokens=[t for p in pn.places for t in p.marking],
-                is_action=False, reward=0.0, time=0)
-        return AEPN_Env(pn)
-
-    a = Scripted().test_in_train(build(False), episodes=episodes, eval_seed=EVAL_SEED)['mean_returns']
-    b = Scripted().test_in_train(build(True), episodes=episodes, eval_seed=EVAL_SEED)['mean_returns']
-    return float(a), float(b)
 
 
 def summary(out, baselines):
@@ -294,20 +230,13 @@ def _keep_awake():
 
 def main(workers):
     _keep_awake()
-    cfg = stoch_config()
+    cfg = Hyper()
     if BETA is not None:
-        cfg.causal_beta = BETA
-        print(f"[{TAG}] causal_beta override: {BETA}", flush=True)
+        cfg.beta = BETA
+        print(f"[{TAG}] beta override: {BETA}", flush=True)
     OUTDIR.mkdir(parents=True, exist_ok=True)
     (OUTDIR / "cells").mkdir(exist_ok=True)
     logdir = str(OUTDIR / "train")
-
-    pc = OUTDIR / "crn_precheck.json"
-    if not pc.exists():
-        a, b = crn_precheck()
-        pc.write_text(json.dumps({"non_causal": a, "causal": b, "match": a == b}, indent=2))
-        print(f"[{TAG}] CRN pre-check: non-causal {a:.4f} | causal {b:.4f} -> "
-              f"{'MATCH' if a == b else 'MISMATCH (cross-arm CRN broken)'}", flush=True)
 
     bp = OUTDIR / f"baselines_N{N}.json"
     baselines = json.loads(bp.read_text()) if bp.exists() else _baselines()
@@ -325,7 +254,7 @@ def main(workers):
         import multiprocessing as mp
         from concurrent.futures import ProcessPoolExecutor, as_completed
         ctx = mp.get_context("spawn")
-        tpw = THREADS if THREADS else _threads_per_worker(workers)
+        tpw = THREADS if THREADS else threads_per_worker(workers)
         print(f"[{TAG}] torch threads per worker: {tpw}", flush=True)
         r, h = baselines["random_mean"], baselines["heuristic_mean"]
         t0 = time.time()

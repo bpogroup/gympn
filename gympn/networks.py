@@ -76,11 +76,8 @@ def _prepare_x_dict_for_conv(x_dict, input_size, graph=None, params_iter=None,
 
 
 # ---------------------------------------------------------------------
-# Shared global-context pooling (action/postpone nodes -> one vector per
-# graph). HeteroCritic has always used this to build its state value;
-# HeteroActor's optional `global_context` (see below) reuses the SAME
-# pooling so a node's context is exactly what the critic already sees,
-# not a second independently-tuned summary.
+# Pooling of the action/postpone nodes into one vector per graph (the
+# critic's state summary).
 # ---------------------------------------------------------------------
 def _batch_index_for(graph, ntype, n, device):
     """Per-node graph-membership index for ntype (which graph, in a batch,
@@ -573,23 +570,6 @@ class HeteroActor(ActorCritic):
         num_heads: int = 2,
         dropout: float = 0.1,
         residual: bool = True,
-        # Opt-in, default off (byte-identical logits when False -- same
-        # safe-floor convention as every other knob in this project).
-        # HeteroActor.forward decodes each action's logit from ONLY that
-        # node's own final HGTConv embedding -- unlike HeteroCritic, which
-        # has always max-pooled over all action/postpone nodes for its
-        # value estimate. Combined with get_graph_observation's edges being
-        # directed strictly along token flow (add_reverse_edges=False
-        # everywhere in real use), an action's logit can depend on state
-        # ONLY if a forward, token-flow-direction path reaches it within
-        # `num_layers` hops -- provably zero otherwise (verified directly:
-        # on a fully disjoint two-chain net, perturbing one chain's
-        # downstream marking left the other chain's raw logit EXACTLY
-        # bit-for-bit unchanged). When True, concatenates the SAME pooled
-        # context HeteroCritic already builds (_pool_action_postpone) onto
-        # each action/postpone node before decoding, giving the actor
-        # access to state outside its own directed-reachable neighborhood.
-        global_context: bool = False,
         # 'aepn' (default; AEPNStack), 'hgt' (HGTStack, the default until
         # 2026-10-05), 'type_embed' or 'type_embed_film' (TypeEmbedStack).
         # encoder_kwargs go to the encoder, e.g. {'num_bases': 4} for AEPNStack.
@@ -605,7 +585,6 @@ class HeteroActor(ActorCritic):
         self.metadata = metadata
         self.num_heads = num_heads
         self.dropout = dropout
-        self.global_context = bool(global_context)
 
         self.encoder = _make_encoder(
             encoder,
@@ -620,10 +599,7 @@ class HeteroActor(ActorCritic):
             activation="relu",
         )
 
-        # Shared decoder for both 'a_transition' and 'postpone'. LazyLinear
-        # absorbs the wider [own_embedding ; pooled_context] input when
-        # global_context=True with zero manual dimension bookkeeping (same
-        # pattern already relied on for use_structural_features).
+        # Shared decoder for both 'a_transition' and 'postpone'.
         self.decoder = nn.Sequential(
             nn.LazyLinear(self.hidden_size),
             nn.ReLU(),
@@ -669,15 +645,10 @@ class HeteroActor(ActorCritic):
         logits_a = torch.empty((0, 1), device=device, dtype=torch.float32)
         logits_p = None
 
-        context = _pool_action_postpone(x_enc, graph) if getattr(self, 'global_context', False) else None
-
         def _decode(ntype):
             x = x_enc.get(ntype)
             if x is None or x.numel() == 0:
                 return None
-            if context is not None:
-                idx = _batch_index_for(graph, ntype, x.size(0), x.device)
-                x = torch.cat((x, context[idx]), dim=-1)
             return self.decoder(x)
 
         la = _decode('a_transition')
@@ -708,79 +679,6 @@ class HeteroActor(ActorCritic):
 
 
 # ---------------------------------------------------------------------
-# Per-action-node off-lineage Q head (LRQ-v3)
-# ---------------------------------------------------------------------
-class HeteroQOff(ActorCritic):
-    """Per-action-node value head for the LRQ-v3 decomposition.
-
-    Emits one RAW scalar per action node (a_transition nodes then postpone),
-    in the same order as the actor's policy vector / actions_dict, with no
-    softmax: q_off(s, a) estimates the OFF-LINEAGE component of Q(s, a) —
-    E[discounted future rewards NOT caused by a | s, a] — and is regressed on
-    trace-computed samples (mc_q credit minus lrq2 credit of the taken
-    action). The diffuse part of Q is learned; the sharp lineage part stays
-    Monte-Carlo. See CAUSAL_LRQ_PROPOSAL (v3) / PAPER_PLAN_LRQ.md.
-    """
-
-    def __init__(
-        self,
-        input_size: int = -1,
-        hidden_size: int = 128,
-        num_layers: int = 3,
-        metadata=None,
-        num_heads: int = 1,
-        dropout: float = 0.0,
-        residual: bool = True,
-        encoder: str = "aepn",
-        encoder_kwargs: Optional[dict] = None,
-    ):
-        super().__init__()
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-
-        self.encoder = _make_encoder(
-            encoder,
-            **(encoder_kwargs or {}),
-            in_channels=-1,
-            hidden_channels=self.hidden_size,
-            num_layers=num_layers,
-            metadata=metadata,
-            heads=num_heads,
-            dropout=dropout,
-            residual=residual,
-        )
-        self.decoder = nn.Sequential(
-            nn.LazyLinear(self.hidden_size),
-            nn.ReLU(),
-            nn.Linear(self.hidden_size, 1),
-        )
-
-    def forward(self, data) -> torch.Tensor:
-        graph = data['graph'] if isinstance(data, dict) and 'graph' in data else data
-        x_dict, edge_index_dict = graph.x_dict, graph.edge_index_dict
-        x_enc = self.encoder(
-            x_dict=x_dict,
-            edge_index_dict=edge_index_dict,
-            input_size=self.input_size,
-            graph=graph,
-            params_iter=iter(self.parameters()),
-        )
-        for k, v in x_enc.items():
-            if v is not None:
-                x_enc[k] = torch.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0)
-
-        device = next(self.parameters()).device
-        vals_a = torch.empty((0, 1), device=device, dtype=torch.float32)
-        vals_p = None
-        if 'a_transition' in x_enc and x_enc['a_transition'] is not None and x_enc['a_transition'].numel() > 0:
-            vals_a = self.decoder(x_enc['a_transition'])
-        if 'postpone' in x_enc and x_enc['postpone'] is not None and x_enc['postpone'].numel() > 0:
-            vals_p = self.decoder(x_enc['postpone'])
-        out = torch.cat((vals_a, vals_p), dim=0) if vals_p is not None else vals_a
-        return out.squeeze(-1)
-
-
-# ---------------------------------------------------------------------
 # Deeper Critic
 # ---------------------------------------------------------------------
 class HeteroCritic(ActorCritic):
@@ -799,13 +697,6 @@ class HeteroCritic(ActorCritic):
         num_heads: int = 2,
         dropout: float = 0.1,
         residual: bool = True,
-        # LVA (lineage value auxiliary): add a second scalar head on the SAME
-        # pooled encoding, regressed on the per-decision lineage credit
-        # (an auxiliary representation task; see PAPER_PLAN_LCV.md). The main
-        # value_head keeps its own unbiased GAE-return target, so the aux
-        # gradients shape the shared encoder but never the value output's
-        # target. False (default) = single-head critic, unchanged.
-        aux_head: bool = False,
         encoder: str = "aepn",
         encoder_kwargs: Optional[dict] = None,
         # Backwards compatibility: accept legacy kwargs (e.g. output_size)
@@ -839,15 +730,6 @@ class HeteroCritic(ActorCritic):
             nn.Linear(self.hidden_size, 1),
         )
 
-        self.lineage_aux_head = None
-        if aux_head:
-            self.lineage_aux_head = nn.Sequential(
-                nn.LazyLinear(self.hidden_size),
-                nn.ReLU(),
-                nn.Dropout(self.dropout),
-                nn.Linear(self.hidden_size, 1),
-            )
-
     def _encode_pool(self, data):
         """Shared encode+pool: one vector per graph in the batch."""
         graph = data['graph'] if isinstance(data, dict) and 'graph' in data else data
@@ -876,17 +758,8 @@ class HeteroCritic(ActorCritic):
             n_graphs = int(idx_all.max().item()) + 1 if idx_all.numel() else 1
             return global_max_pool(torch.cat(parts, 0), torch.cat(idx_parts, 0), size=n_graphs)
 
-        # Pool across targets (shared with HeteroActor's optional
-        # global_context -- see _pool_action_postpone).
+        # Pool across targets.
         return _pool_action_postpone(x_enc, graph)
 
     def forward(self, data):
         return self.value_head(self._encode_pool(data))
-
-    def forward_with_aux(self, data):
-        """LVA: (value, lineage-aux) predictions off the shared encoding.
-        Requires aux_head=True at construction."""
-        if self.lineage_aux_head is None:
-            raise RuntimeError("forward_with_aux requires HeteroCritic(aux_head=True)")
-        pooled = self._encode_pool(data)
-        return self.value_head(pooled), self.lineage_aux_head(pooled)

@@ -92,12 +92,6 @@ class Logger:
             print(f"  Epochs: {epochs}, Episodes/epoch: {episodes_per_epoch}")
             print()
 
-    def causal_rl_enabled(self):
-        """Log causal RL mode is enabled."""
-        if self.verbose >= 1:
-            print(self._colorize("🔗 Causal RL Mode: Credits redistributed via causal traces", 'GREEN'))
-            print()
-
     def epoch_start(self, epoch: int, total_epochs: int):
         """Log epoch start."""
         if self.verbose >= 2:

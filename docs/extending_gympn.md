@@ -212,7 +212,7 @@ class ManufacturingProblem(GymProblem):
     """Custom problem: Job shop scheduling."""
     
     def __init__(self, num_machines=3, num_job_types=2):
-        super().__init__(allow_postpone=True, causal_rl=True)
+        super().__init__(allow_postpone=True)
         
         self.num_machines = num_machines
         self.num_job_types = num_job_types

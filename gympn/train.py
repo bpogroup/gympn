@@ -47,7 +47,7 @@ import time
 import os
 import torch
 from gympn.environment import AEPN_Env
-from gympn.networks import HeteroActor, HeteroCritic, HeteroQOff
+from gympn.networks import HeteroActor, HeteroCritic
 from gympn.agents import PGAgent, PPOAgent
 
 
@@ -104,186 +104,25 @@ def make_parser():
                      type=lambda x: int(x) if x.lower() != 'none' else None,
                      default=None,
                      help='seed for the agent')
-    alg.add_argument('--causal_rl',
+    alg.add_argument('--nfgae',
                      type=lambda x: str(x).lower() == 'true',
                      default=False,
-                     help='whether to use causal RL (credit redistribution via causal traces)')
-    alg.add_argument('--causal_scheme',
-                     type=str,
-                     default='lrq',
-                     choices=['lrq', 'lrq2', 'lrq2c', 'ccf', 's_ccf', 'lrq3', 'lqi', 'lcv', 'lva', 'mc_q', 'cf', 'ls_hca', 'alin', 'cgae', 'cgae_flow', 'cgae_cflow', 'cgae_cflow2', 'cgae_cap', 'cgae_dag', 'cfgae', 'cgae_cflow_ct', 'nfgae'],
-                     help='causal credit scheme. "ls_hca" (Lineage-Structured Hindsight Credit '
-                          'Assignment, FORKFREE_LINEAGE_RETHINK.md Idea 1) is the fork-free dual of '
-                          '"cf": PURE/EXOGENOUS reward-types are read off the static provenance DAG '
-                          '(exact, no fit); CONTESTED reward-types get a hindsight correction '
-                          'r*(1-pi(a|s)/hhat(a|s,r)), hhat fit each epoch from that epoch\'s batch '
-                          '(no forks) and applied lagged one epoch later. Safe cold start: hhat '
-                          'starts empty, so credit is pure-only (conservative, unbiased) until it '
-                          'has data. "lrq2" is lrq with the consistent-support postpone '
-                          'fix: production actions keep the lineage Q-sample, postpone gets the '
-                          'SMDP-TD advantage e^(-beta*tau)V(s\')-V(s) instead of a lineage credit '
-                          '(fixes the postpone-aggregation collapse in loaded, reward-dense envs). '
-                          '"mc_q" is the no-lineage ablation of lrq: the '
-                          'Q-sample is the full discounted SMDP return-to-go from each decision '
-                          '(= PPO at lambda=1 with wall-clock discounting), isolating what the '
-                          'lineage restriction contributes. '
-                          '"lrq" (Lineage-Restricted Q) is the method: '
-                          'per-decision hindsight Q-samples (full discounted lineage reward, no '
-                          'split) consumed as A = Q - V with NO GAE over credits. Requires '
-                          'causal_postpone_tokenflow=True on the simulator whenever postpone '
-                          'actions are present (enforced at runtime). All other schemes '
-                          '(flow_dag/shapley_dag/rec/flow/...) were removed; see '
-                          'CAUSAL_LRQ_PROPOSAL.md.')
-    alg.add_argument('--causal_beta',
+                     help='net-factored GAE (suite/paper/NFGAE_THEORY.md): credit each decision '
+                          'only with the rewards of its own net component, on that component\'s '
+                          'own decision clock, with a per-component critic. Needs '
+                          'allow_postpone=False or postpone_scope=\'component\'. With a single '
+                          'component it is exactly SMDP-GAE PPO.')
+    alg.add_argument('--beta',
                      type=float,
                      default=0.0,
-                     help='SMDP time-discount rate for the causal-RL advantage. The continuation '
-                          'after a decision is discounted by exp(-causal_beta * tau), tau = elapsed '
-                          'time to the next decision. 0.0 (default) = no time discounting (legacy); '
-                          '>0 gives time an opportunity cost so postpone is correctly penalised.')
-    alg.add_argument('--causal_aux_coef',
-                     type=float,
-                     default=0.5,
-                     help='lva only: weight of the critic\'s auxiliary lineage-credit regression '
-                          'in the value loss, MSE(V, gae_returns) + coef * MSE(V_aux, lrq2 credit). '
-                          'The aux head shares the critic encoder (representation shaping); the '
-                          'value head keeps its unbiased GAE target and the policy gradient is '
-                          'exactly standard SMDP-GAE PPO (floor by construction).')
+                     help='SMDP time-discount rate: the continuation after a decision is '
+                          'discounted by exp(-beta * tau), tau = elapsed time to the next '
+                          'decision. Used with --smdp_discount and --nfgae.')
     alg.add_argument('--smdp_discount',
                      type=lambda x: str(x).lower() == 'true',
                      default=False,
-                     help='STANDARD (non-causal_rl) path only: replace the constant-gamma GAE '
-                          'with the per-sojourn SMDP discount exp(-causal_beta * tau), the same '
-                          'clock/formula used by the causal schemes, with no CV/lineage term. '
-                          'This is LCV\'s exact c_hat=0 limiting case ("lcv0"): plain SMDP-GAE '
-                          'PPO, used to factor the time-discount choice out of the LCV-vs-PPO '
-                          'comparison. False (default) = legacy constant `gam` GAE.')
-    alg.add_argument('--causal_mu',
-                     type=float,
-                     default=0.0,
-                     help='lrq only: hybrid coefficient in [0,1] mixing the LRQ advantage with '
-                          'the standard SMDP-GAE advantage on raw temporal rewards, '
-                          'A = (1-mu)*A_LRQ + mu*A_GAE. 0.0 (default) = pure LRQ (no cross-case '
-                          'smearing, foreclosure-blind); raise it if the foreclosure diagnostic '
-                          'shows resource-contention effects LRQ cannot see (CAUSAL_LRQ_PROPOSAL.md §3).')
-    alg.add_argument('--phi_coef',
-                     type=float,
-                     default=0.0,
-                     help='Coefficient on potential-based reward shaping '
-                          'F=e^(-causal_beta*tau)*Phi(s\')-Phi(s), Phi built purely from Petri-net '
-                          'topology (place/transition/reward structure) + live token counts (see '
-                          'gympn/potential.py). 0.0 (default) = disabled, byte-identical no-op. '
-                          'Provably cannot change the optimal policy for ANY value (Ng, Harada & '
-                          'Russell 1999) -- only affects raw-reward-consuming SMDP-GAE paths '
-                          '(plain PPO, lcv, lva, the causal_mu hedge); a documented no-op for pure '
-                          'lineage-Q credit schemes (lrq/lrq2/lrq2c/ccf/s_ccf/ls_hca/lrq3/lqi), '
-                          'which read reward from the causal trace, not the shaped step reward.')
-    alg.add_argument('--phi_decay',
-                     type=float,
-                     default=0.9,
-                     help='Per-transition-hop decay for the structural backlog potential '
-                          '(weight = phi_decay**hop to the nearest reward transition). Only used '
-                          'when --phi_coef > 0; any value in (0,1] is theorem-safe.')
-    alg.add_argument('--phi_cap',
-                     type=float,
-                     default=None,
-                     help='Caps each PLACE\'s own token-count contribution to Phi before summing '
-                          '(min(count, phi_cap) instead of the raw count). None (default) = '
-                          'uncapped. Motivation: a queue-like place fed by exogenous arrivals '
-                          '(e.g. s1\'s waiting1) can hold an unboundedly large, highly variable '
-                          'token count, injecting more per-step reward-shaping noise than the '
-                          'agent\'s own actions ever contribute -- still theorem-safe either way, '
-                          'but a smaller integer cap (e.g. 1.0) turns Phi from "total weighted '
-                          'backlog volume" into "which stages currently have any work", a less '
-                          'noisy value-regression target at a finite training budget. See '
-                          'gympn/potential.py\'s topology_potential docstring.')
-    cf = parser.add_argument_group('counterfactual', 'G1 forked counterfactual '
-                                   'preferences (CAUSAL_LINEAGE_RETHINK.md §7.2)')
-    cf.add_argument('--cf_fork_prob',
-                    type=float,
-                    default=0.0,
-                    help='Per-decision probability of forking the simulator into (taken, '
-                         'alternative) CRN sibling suffixes during training rollouts. '
-                         '0.0 (default) = G1 disabled entirely (exact PPO floor).')
-    cf.add_argument('--cf_reps',
-                    type=int,
-                    default=3,
-                    help='CRN replications per branch action; the paired std over reps '
-                         'prices the noise for the SNR gate.')
-    cf.add_argument('--cf_gate',
-                    type=float,
-                    default=2.0,
-                    help='Emit a preference only when |mean paired gap| > gate * paired SE.')
-    cf.add_argument('--cf_lookahead',
-                    type=float,
-                    default=6.0,
-                    help='Truncate branch suffixes once the clock advances this far past '
-                         'the fork (value-tail bootstrapped; with causal_beta=0.5 a '
-                         'lookahead of 6 keeps ~95%% of the discounted mass).')
-    cf.add_argument('--cf_max_forks',
-                    type=int,
-                    default=2,
-                    help='Maximum forks executed per episode (cost cap).')
-    cf.add_argument('--cf_coupling_truncate',
-                    type=lambda x: str(x).lower() == 'true',
-                    default=False,
-                    help='Lockstep the two forked branches (taken vs alternative) and stop '
-                         'BOTH the instant they reconverge to the same PN state (canonical '
-                         'marking + clock, gympn.counterfactual.state_fingerprint), simulating '
-                         'the shared remaining tail ONCE instead of twice -- exact for the '
-                         'paired gap the preference is built from (identical additions cancel '
-                         'exactly in a difference), no RNG-alignment assumption needed. '
-                         'Addresses cfpk\'s documented but previously-unbuilt ~3.6x cost gap '
-                         '(CFPK_EXPLAINED.md). False (default) = the original sequential '
-                         'action-then-alternative rollout, byte-identical to before. NOT '
-                         'supported with --cf_lineage (silently ignored there — lineage\'s '
-                         'per-branch trace accounting has no defined meaning for a shared tail).')
-    cf.add_argument('--cf_coef',
-                    type=float,
-                    default=1.0,
-                    help='Initial coefficient of the pairwise logistic preference loss; '
-                         'linearly annealed to 0 over training (floor by construction).')
-    cf.add_argument('--cf_updates',
-                    type=int,
-                    default=2,
-                    help='Gradient passes over the epoch\'s preferences per epoch.')
-    cf.add_argument('--cf_lineage',
-                    type=lambda x: str(x).lower() == 'true',
-                    default=False,
-                    help='Restrict each forked branch return to rewards causally DESCENDED '
-                         'from the forked decision (the lineage test applied inside the '
-                         'counterfactual), instead of summing the raw return-to-go. Removes '
-                         'concurrent-activity reward that CRN pairing cannot cancel; needs '
-                         'the ENV built with causal_rl=True for trace recording (the agent '
-                         'stays non-causal). Drops the value tail at truncation by design.')
-    cf.add_argument('--cf_decompose',
-                    type=lambda x: str(x).lower() == 'true',
-                    default=False,
-                    help='Lineage-DECOMPOSED counterfactual: split each forked gap into the '
-                         'direct effect (rewards descended from the decision, low variance, '
-                         'used as sampled) and the indirect/opportunity-cost effect (high '
-                         'variance, replaced by a ridge regression on lineage-derived '
-                         'occupancy features pooled over the epoch). Falls back to the raw '
-                         'total gap when the regression fails to generalize (see --cf_min_r2).')
-    cf.add_argument('--cf_min_r2',
-                    type=float,
-                    default=0.05,
-                    help='Held-out R^2 the indirect-channel regression must reach before it '
-                         'is trusted; below this the raw total gap is used instead (the '
-                         'safety floor against a misspecified correction).')
-    cf.add_argument('--cf_value_tail',
-                    type=lambda x: str(x).lower() == 'true',
-                    default=True,
-                    help='Bootstrap the truncated branch suffix with V(s) (True, default). '
-                         'False = plain truncation. Independent of --cf_lineage so the '
-                         'lineage ablation can be isolated (lineage mode ignores this and '
-                         'never adds the tail: V predicts the full, unrestricted return).')
-    cf.add_argument('--cf_anneal',
-                    type=lambda x: str(x).lower() == 'true',
-                    default=True,
-                    help='Linearly anneal the preference-loss coefficient to 0 over training '
-                         '(True, default = exact PPO floor at the end). False = constant '
-                         'coefficient: the X10 mechanism probe, floor knowingly sacrificed.')
+                     help='replace the constant-gamma GAE with the per-sojourn SMDP discount '
+                          'exp(-beta * tau). False (default) = constant `gam` GAE.')
     alg.add_argument('--test_episodes',
                      type=int,
                      default=10,
@@ -301,12 +140,6 @@ def make_parser():
                           'unaffected. Default None = historical behaviour (fresh scenarios drawn '
                           'from the live stream; measured +-0.231 SD per 20-episode point on s1, '
                           'and an inflated greedy_drift).')
-    alg.add_argument('--causal_pg',
-                     type=lambda x: str(x).lower() == 'true',
-                     default=False,
-                     help='use causal policy gradient (credits as advantages, no value baseline, '
-                          'no KLD early stopping). Auto-enabled when causal_rl=True.')
-
 
     policy = parser.add_argument_group('policy model')
     policy.add_argument('--policy_model',
@@ -551,16 +384,6 @@ def make_policy_network(args, metadata=None):
                 residual=args.policy_kwargs.get("residual", True),
                 encoder=args.policy_kwargs.get("encoder", "aepn"),
                 encoder_kwargs=args.policy_kwargs.get("encoder_kwargs"),
-                # Opt-in (default False = byte-identical to before): lets the
-                # actor condition each action's logit on pooled context from
-                # ALL action/postpone nodes (the same pooling HeteroCritic has
-                # always used for its value estimate), closing the blind spot
-                # where get_graph_observation's directed, token-flow-only
-                # edges (no reverse edges) leave an action's own embedding
-                # unable to see state outside its forward-reachable
-                # neighborhood within num_layers hops. See
-                # suite/_test_actor_global_context.py for the proof.
-                global_context=args.policy_kwargs.get("global_context", False),
             )
         else:
             raise Exception("No policy network to load!")
@@ -604,9 +427,6 @@ def make_value_network(args, metadata=None):
             residual=args.value_kwargs.get("residual", True),
             encoder=args.value_kwargs.get("encoder", "aepn"),
             encoder_kwargs=args.value_kwargs.get("encoder_kwargs"),
-            # LVA: second scalar head on the shared encoder, regressed on the
-            # per-decision lineage credit (set by make_agent for scheme 'lva').
-            aux_head=args.value_kwargs.get("aux_head", False),
             metadata=metadata
         )
     else:
@@ -631,156 +451,25 @@ def make_agent(args, metadata=None):
     agent : PGAgent (experimental) or PPOAgent
         The agent.
     """
-    # Extract causal RL config (with safe defaults for backward compatibility)
-    causal_scheme = getattr(args, 'causal_scheme', 'lrq')
-    causal_beta = getattr(args, 'causal_beta', 0.0)
-
-    # LVA: the critic needs its lineage aux head built in at construction.
-    if causal_scheme == 'lva' and getattr(args, 'causal_rl', False):
-        if not isinstance(getattr(args, 'value_kwargs', None), dict):
-            args.value_kwargs = {}
-        args.value_kwargs['aux_head'] = True
-
     policy_network = make_policy_network(args, metadata=metadata)
     value_network = make_value_network(args, metadata=metadata)
 
-    # LRQ-v3: learned off-lineage per-action-node Q head (sized like the
-    # policy net; same metadata).
-    qoff_network = None
-    qlin_network = None
-    if causal_scheme in ('lrq3', 'lqi') and getattr(args, 'causal_rl', False):
-        qoff_network = HeteroQOff(
-            input_size=args.policy_kwargs.get("input_size", -1),
-            hidden_size=args.policy_kwargs.get("hidden_size", 64),
-            num_layers=args.policy_kwargs.get("num_layers", 3),
-            metadata=metadata,
-            num_heads=args.policy_kwargs.get("num_heads", 1),
-            dropout=args.policy_kwargs.get("dropout", 0.0),
-            residual=args.policy_kwargs.get("residual", True),
-                encoder=args.policy_kwargs.get("encoder", "aepn"),
-                encoder_kwargs=args.policy_kwargs.get("encoder_kwargs"),
-        )
-        if causal_scheme == 'lqi':
-            qlin_network = HeteroQOff(
-                input_size=args.policy_kwargs.get("input_size", -1),
-                hidden_size=args.policy_kwargs.get("hidden_size", 64),
-                num_layers=args.policy_kwargs.get("num_layers", 3),
-                metadata=metadata,
-                num_heads=args.policy_kwargs.get("num_heads", 1),
-                dropout=args.policy_kwargs.get("dropout", 0.0),
-                residual=args.policy_kwargs.get("residual", True),
-                encoder=args.policy_kwargs.get("encoder", "aepn"),
-                encoder_kwargs=args.policy_kwargs.get("encoder_kwargs"),
-            )
-    causal_mu = getattr(args, 'causal_mu', 0.0)
-    phi_coef = getattr(args, 'phi_coef', 0.0)
-    phi_decay = getattr(args, 'phi_decay', 0.9)
-    phi_cap = getattr(args, 'phi_cap', None)
-    smdp_discount = getattr(args, 'smdp_discount', False)
-    causal_aux_coef = getattr(args, 'causal_aux_coef', 0.5)
-    # causal_pg (advantage replacement) is opt-in only.
-    # Standard PPO with GAE + value baseline on redistributed credits
-    # is more stable and converges better.
-    causal_pg = getattr(args, 'causal_pg', False)
-    causal_rl = getattr(args, 'causal_rl', False)
-
-    if causal_scheme == 'lcv' and getattr(args, 'causal_rl', False):
-        # LCV: state-only centering head v_off(s) ~ E[R_off | s] (a scalar
-        # HeteroCritic, sized like the value net). Passed through the generic
-        # qoff_network slot; agents branch on causal_scheme for its use.
-        qoff_network = HeteroCritic(
-            input_size=args.value_kwargs.get("input_size", -1),
-            hidden_size=args.value_kwargs.get("hidden_size", 64),
-            output_size=args.value_kwargs.get("output_size", 64),
-            num_layers=args.value_kwargs.get("num_layers", 3),
-            num_heads=args.value_kwargs.get("num_heads", 1),
-            dropout=args.value_kwargs.get("dropout", 0.0),
-            residual=args.value_kwargs.get("residual", True),
-            encoder=args.value_kwargs.get("encoder", "aepn"),
-            encoder_kwargs=args.value_kwargs.get("encoder_kwargs"),
-            metadata=metadata
-        )
-
-    # G1 forked counterfactual preferences: config dict for the agent
-    # (gympn/counterfactual.py); None = disabled, exact PPO floor.
-    cf_config = None
-    if getattr(args, 'cf_fork_prob', 0.0) > 0.0:
-        cf_config = {
-            'fork_prob': float(args.cf_fork_prob),
-            'reps': int(getattr(args, 'cf_reps', 3)),
-            'gate': float(getattr(args, 'cf_gate', 2.0)),
-            'lookahead': float(getattr(args, 'cf_lookahead', 6.0)),
-            'max_forks': int(getattr(args, 'cf_max_forks', 2)),
-            'coef': float(getattr(args, 'cf_coef', 1.0)),
-            'updates': int(getattr(args, 'cf_updates', 2)),
-            'anneal': bool(getattr(args, 'cf_anneal', True)),
-            'lineage': bool(getattr(args, 'cf_lineage', False)),
-            'value_tail': bool(getattr(args, 'cf_value_tail', True)),
-            'decompose': bool(getattr(args, 'cf_decompose', False)),
-            'min_r2': float(getattr(args, 'cf_min_r2', 0.05)),
-            'coupling_truncate': bool(getattr(args, 'cf_coupling_truncate', False)),
-            'beta': float(causal_beta),
-        }
-
+    common = dict(policy_lr=args.policy_lr, policy_updates=args.policy_updates,
+                  value_network=value_network, value_lr=args.value_lr, value_updates=args.value_updates,
+                  gam=args.gam, lam=args.lam, kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus,
+                  beta=getattr(args, 'beta', 0.0),
+                  smdp_discount=getattr(args, 'smdp_discount', False),
+                  nfgae=getattr(args, 'nfgae', False),
+                  normalize_advantages=getattr(args, 'normalize_advantages', False),
+                  lr_schedule=getattr(args, 'lr_schedule', True))
     if args.algorithm == 'pg':
-        agent = PGAgent(policy_network=policy_network,policy_lr=args.policy_lr, policy_updates=args.policy_updates,
-                        value_network=value_network, value_lr=args.value_lr, value_updates=args.value_updates,
-                        gam=args.gam, lam=args.lam, kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus,
-                        causal_scheme=causal_scheme, causal_pg=causal_pg,
-                        causal_rl=causal_rl,
-                        causal_beta=causal_beta, causal_mu=causal_mu,
-                        phi_coef=phi_coef, phi_decay=phi_decay, phi_cap=phi_cap,
-                        smdp_discount=smdp_discount,
-                         causal_aux_coef=causal_aux_coef,
-                        cf_config=cf_config,
-                        normalize_advantages=getattr(args, 'normalize_advantages', False),
-                        lr_schedule=getattr(args, 'lr_schedule', True))
+        agent = PGAgent(policy_network=policy_network, **common)
     elif args.algorithm == 'ppo-clip':
-        agent = PPOAgent(policy_network=policy_network, method='clip', eps=args.eps,
-                         qoff_network=qoff_network,
-                         qlin_network=qlin_network,
-                         policy_lr=args.policy_lr, policy_updates=args.policy_updates,
-                         value_network=value_network, value_lr=args.value_lr, value_updates=args.value_updates,
-                         gam=args.gam, lam=args.lam, kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus,
-                         causal_scheme=causal_scheme, causal_pg=causal_pg,
-                         causal_rl=causal_rl,
-                         causal_beta=causal_beta, causal_mu=causal_mu,
-                         phi_coef=phi_coef, phi_decay=phi_decay, phi_cap=phi_cap,
-                         smdp_discount=smdp_discount,
-                         causal_aux_coef=causal_aux_coef,
-                         cf_config=cf_config,
-                         normalize_advantages=getattr(args, 'normalize_advantages', False),
-                         lr_schedule=getattr(args, 'lr_schedule', True))
+        agent = PPOAgent(policy_network=policy_network, method='clip', eps=args.eps, **common)
     elif args.algorithm == 'ppo-penalty':
-        agent = PPOAgent(policy_network=policy_network, method='penalty', c=args.c,
-                         qoff_network=qoff_network,
-                         qlin_network=qlin_network,
-                         policy_lr=args.policy_lr, policy_updates=args.policy_updates,
-                         value_network=value_network, value_lr=args.value_lr, value_updates=args.value_updates,
-                         gam=args.gam, lam=args.lam, kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus,
-                         causal_scheme=causal_scheme, causal_pg=causal_pg,
-                         causal_rl=causal_rl,
-                         causal_beta=causal_beta, causal_mu=causal_mu,
-                         phi_coef=phi_coef, phi_decay=phi_decay, phi_cap=phi_cap,
-                         smdp_discount=smdp_discount,
-                         causal_aux_coef=causal_aux_coef,
-                         cf_config=cf_config,
-                         normalize_advantages=getattr(args, 'normalize_advantages', False),
-                         lr_schedule=getattr(args, 'lr_schedule', True))
-
-
-
+        agent = PPOAgent(policy_network=policy_network, method='penalty', c=args.c, **common)
     else:
         raise Exception("Unknown algorithm! Are you sure it is spelled correctly?")
-
-    # LS-HCA's state-conditional hindsight model (Agent._fit_ls_hca_hhat /
-    # _ls_hca_predict_h) needs the same marking-vector node-type order
-    # derived from the env metadata; set post-construction (uniform
-    # across every algorithm branch above, mirroring how
-    # run_suite.py sets env.use_structural_features post-construction)
-    # rather than threading a new constructor kwarg through every branch.
-    if causal_scheme == 'ls_hca' and metadata:
-        agent._ls_hca_state_node_types = list(metadata[0])
 
     # Carried so Agent.train can pin the initial policy to the seed alone
     # (gympn.seeding.seed_network_init); without it, how many RNG draws are

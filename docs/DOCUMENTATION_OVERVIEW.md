@@ -39,19 +39,17 @@ These documents explain key concepts and features:
 
 **[Advanced Features](./advanced_features.md)**
 - Graph Neural Networks (GNNs) for observations
-- Causal tracking and credit assignment
 - Parallelization and performance optimization
 - Custom reward functions
 - ~45 minutes read
 
 ### Specialized Topics
 
-**[Postponement and Causal RL](./postpone_causal.md)** ⭐ Most Advanced
+**[Postponement and Net-Factored Credit](./postponement.md)** ⭐ Most Advanced
 - Postponement feature: defer decisions strategically
-- Causal Reinforcement Learning: trace reward origins
+- Net-factored credit (NF-GAE) for nets with independent parts
 - Implementation details
 - Use cases and best practices
-- Debugging causal traces
 - ~60 minutes read
 
 **[Extending GymPN](./extending_gympn.md)**
@@ -114,7 +112,7 @@ These documents explain key concepts and features:
 2. [Algorithms Guide](./algorithms.md) - 40 min
 3. [Agents Guide](./agents_guide.md) - 40 min
 4. [Advanced Features](./advanced_features.md) - 45 min
-5. [Postponement and Causal RL](./postpone_causal.md) - 60 min
+5. [Postponement and Net-Factored Credit](./postponement.md) - 60 min
 6. [Extending GymPN](./extending_gympn.md) - 50 min
 
 **Total time: ~5 hours** for comprehensive understanding
@@ -132,7 +130,7 @@ These documents explain key concepts and features:
 - [Algorithms Guide](./algorithms.md) - for algorithm details
 - [Agents Guide](./agents_guide.md) - for agent setup
 - [Advanced Features](./advanced_features.md) - for GNNs and optimization
-- [Postponement and Causal RL](./postpone_causal.md) - for causal tracking
+- [Postponement and Net-Factored Credit](./postponement.md) - for postponement and per-component credit
 - [Extending GymPN](./extending_gympn.md) - for custom components
 
 ---
@@ -154,8 +152,8 @@ These documents explain key concepts and features:
 ### "My training is unstable"
 → [Troubleshooting](./troubleshooting.md) + [Algorithms Guide](./algorithms.md)
 
-### "I want to use causal learning"
-→ [Postponement and Causal RL](./postpone_causal.md) + [Agents Guide](./agents_guide.md)
+### "My net has several independent processes"
+→ [Postponement and Net-Factored Credit](./postponement.md) + [Agents Guide](./agents_guide.md)
 
 ### "I want to extend the framework"
 → [Extending GymPN](./extending_gympn.md) + [API Quick Reference](./api_reference.md)
@@ -173,8 +171,8 @@ These documents explain key concepts and features:
 | Complete Example | ~40 min | Beginner | Full example, best practices |
 | Algorithms | ~40 min | Intermediate | PPO variants, hyperparameters |
 | Agents Guide | ~40 min | Intermediate | Agent selection, custom solvers |
-| Advanced Features | ~45 min | Advanced | GNNs, causal tracking, optimization |
-| Postponement & Causal | ~60 min | Advanced | Postponement, credit assignment |
+| Advanced Features | ~45 min | Advanced | GNNs, parallelization, optimization |
+| Postponement & NF-GAE | ~60 min | Advanced | Postponement, credit assignment |
 | Extending GymPN | ~50 min | Advanced | Custom environments, networks |
 | API Reference | ~15 min | Any | Quick lookups, code snippets |
 | Benchmarks | ~20 min | Intermediate | Performance, recommendations |
@@ -197,8 +195,8 @@ These documents explain key concepts and features:
 - **PPO-Penalty**: Algorithms, Agents Guide, Benchmarks
 
 ### Features
-- **Postponement**: Postponement & Causal, Extending GymPN
-- **Causal Reinforcement Learning**: Postponement & Causal, Advanced Features
+- **Postponement**: Postponement & NF-GAE, Extending GymPN
+- **Net-factored credit**: Postponement & NF-GAE
 - **Graph Neural Networks**: Advanced Features, Extending GymPN
 - **Custom Solvers**: Agents Guide, Extending GymPN
 - **Parallel Training**: Advanced Features, Benchmarks

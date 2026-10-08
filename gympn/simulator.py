@@ -3,8 +3,6 @@ import os
 import itertools
 import random
 import inspect
-import uuid
-import copy
 import subprocess
 
 import numpy as np
@@ -18,7 +16,6 @@ try:
 except Exception:  # pragma: no cover
     SimVarTime = ()
 
-from gympn.causal_traces import CausalTraces, TokenHistory, TransitionHistory
 from gympn.environment import AEPN_Env
 from gympn.solvers import BaseSolver, GymSolver
 from gympn.train import make_agent, make_parser, make_logdir, launch_tensorboard
@@ -71,20 +68,13 @@ class GymProblem(SimProblem):
         :param debugging: if set to True, produces more information for debugging purposes (defaults to True).
     """
 
-    def __init__(self, debugging=True, binding_priority=lambda bindings: bindings[0], tag='e', has_var_attrs=True, solver=None, plot_observations=False, allow_postpone=False, causal_rl=False, causal_postpone_tokenflow=False, use_structural_features=False):
+    def __init__(self, debugging=True, binding_priority=lambda bindings: bindings[0], tag='e', has_var_attrs=True, solver=None, plot_observations=False, allow_postpone=False):
         super().__init__(debugging, binding_priority)
 
         self.network_tag = NetworkTag(tag)  # boolean to indicate if it is time to take action ('a') or evolutions (i.e. normal events, 'e')
         self.has_var_attrs = has_var_attrs  # boolean to indicate if the problem has variable attributes (necessary for DRL)
         self.allow_postpone = allow_postpone  # boolean to indicate if the problem allows postponing actions
         self.just_postponed = False  # boolean to indicate if the system just postponed
-        # When True, postpone is recorded in the causal trace as a real
-        # token-flow transition (consume-and-recreate the action-eligible tokens,
-        # with the postpone sentinel as their producer) so it becomes a node in
-        # the token DAG and can receive flow credit. When False (default) postpone
-        # is a sink-less sentinel that occupies its step slot but gets zero credit
-        # (credit flows *through* it). See CAUSAL_ADVANTAGE_TD0.md (Design C).
-        self.causal_postpone_tokenflow = causal_postpone_tokenflow
 
         self.reward_functions = {} # reward functions are associated to events/actions through a dictionary for backward compatibility with simpn events
         self.var_attributes = {} # similarly, places need to be associated with the attributes of their tokens
@@ -131,83 +121,7 @@ class GymProblem(SimProblem):
         #categorical token attributes
         self.categorical_token_attrs = {}
 
-        #helpers for causal traces
-        self.causal_rl = causal_rl  # whether to use causal traces for reward assignment
-        if self.causal_rl:
-            self.causal_trace = CausalTraces()  # tune gamma/lam if needed
-            # Single source of truth: redistribute_rewards() reads this to decide
-            # whether postpone sentinels are treated as credit sinks.
-            self.causal_trace.postpone_tokenflow = self.causal_postpone_tokenflow
-
         self._debugging = True
-
-        # Structural (conflict-graph-derived) INPUT features -- opt-in,
-        # default off (byte-identical observation shape when False, matching
-        # this codebase's other opt-in flags: cf_config=None, causal_mu=0.0,
-        # phi_coef=0.0). Unlike every other lineage/topology mechanism tried
-        # in this project (lrq/ccf/s_ccf/lcv/lva/ls_hca/potential-shaping),
-        # this one is neither a credit/advantage term (no bias-variance
-        # tradeoff to prove) nor a reward-shaping term (no GAE-bootstrap
-        # fragility) -- it's plain extra input to the GNN encoder, letting
-        # gradient descent decide whether/how to use it. See
-        # gympn.conflict_graph.analyze() for what's computed, and
-        # get_graph_observation's a_transition block for where it's consumed.
-        # Cached on this instance (static topology, recomputed at most once
-        # per pn, same lifecycle as causal_traces._static_comp_cache).
-        self.use_structural_features = bool(use_structural_features)
-        self._conflict_feat_cache = None
-
-    def _get_action_conflict_features(self):
-        """{action_type_id: (in_conflict, degree, reward_proximity)} --
-        static, purely topological features (place/transition/arc structure
-        only, no token-value semantics, no marking dependence).
-
-        in_conflict/degree come from the conflict graph
-        (gympn.conflict_graph.analyze): which decisions structurally compete
-        for a token with another decision, and with how many other action
-        types. NOTE these two are necessarily SYMMETRIC for any action pair
-        joined by exactly one conflict edge (graph degree on a single
-        pairwise edge is equal on both ends by construction) -- e.g. on
-        s1_stoch_sequence, start1/start2 share only the `employee` pool and
-        get identical (1.0, 1.0). That is a correct computation, not a bug;
-        it just means conflict-degree alone cannot discriminate WHICH of two
-        mutually-conflicting actions is structurally preferable.
-
-        reward_proximity fixes that: the MINIMUM gympn.potential place
-        weight (decay**hop-to-nearest-reward-transition, see
-        get_place_weights) among the action's own incoming places. Since
-        ALL incoming places must hold a token for the action to fire, its
-        farthest (lowest-weight) precondition is the structural bottleneck
-        on how close to a reward this action's stage of the pipeline sits --
-        e.g. on s1, start1 needs `waiting1` (hop 4, deep upstream) while
-        start2's farthest precondition is `employee`/`waiting2` (hop 2), so
-        reward_proximity correctly differs even though conflict-degree does
-        not. General across topologies: no resource-pool-specific reasoning,
-        just the same BFS already validated for potential-based shaping.
-
-        Computed once and cached; recomputed only if invalidated (e.g. after
-        the net is deep-copied and topology could differ -- callers that
-        mutate topology should reset ``self._conflict_feat_cache = None``,
-        mirroring ``causal_trace._static_comp_cache``'s invalidation
-        convention)."""
-        if self._conflict_feat_cache is not None:
-            return self._conflict_feat_cache
-        from gympn.conflict_graph import analyze
-        from gympn.potential import get_place_weights
-        a = analyze(self)
-        degree = {}
-        for x, y in a.action_conflict_edges:
-            degree[x] = degree.get(x, 0) + 1
-            degree[y] = degree.get(y, 0) + 1
-        weights = get_place_weights(self)
-        feats = {}
-        for t in self.actions:
-            d = degree.get(t._id, 0)
-            place_weights = [weights.get(p._id, 0.0) for p in t.incoming]
-            proximity = min(place_weights) if place_weights else 0.0
-            feats[t._id] = (1.0 if d > 0 else 0.0, float(d), float(proximity))
-        self._conflict_feat_cache = feats
-        return feats
 
     def add_gym_var(self, name, attributes: dict, priority=lambda token: token.time):
         """
@@ -594,9 +508,6 @@ class GymProblem(SimProblem):
                     if result[i].time > 0 and result[i].delay == 0:
                         raise TypeError("Deprecated functionality: Event " + str(event) + ": generates a token with a delay of 0, but a time > 0, for variable " + str(event.outgoing[i]) + " for values " + str(variable_assignment) + ". It seems you are using the time of the token to represent the delay.")
                     token = SimToken(result[i].value, time=self.clock + result[i].delay)
-                    if self.causal_rl:
-                        #tokens need to be marked with unique ids
-                        setattr(token, '_id', str(uuid.uuid4()))
                     event.outgoing[i].add_token(token)
                     new_tokens.append(token)
 
@@ -629,9 +540,7 @@ class GymProblem(SimProblem):
                          has_var_attrs=self.has_var_attrs,
                          solver=None,
                          plot_observations=False,
-                         allow_postpone=self.allow_postpone,  # propagate flags
-                         causal_rl=self.causal_rl,
-                         causal_postpone_tokenflow=self.causal_postpone_tokenflow)
+                         allow_postpone=self.allow_postpone)  # propagate flags
 
         # carry flags explicitly (in case constructor defaults differ)
         ret.allow_postpone = self.allow_postpone
@@ -807,17 +716,6 @@ class GymProblem(SimProblem):
                         t_values = [1 if action._id == t_name else 0 for action in self.actions] #a_transitions know which transition type they are (useful with self loops and multiple actions)
                     else:
                         t_values = [] #otherwise they do not need to carry information
-
-                    if self.use_structural_features:
-                        # Static conflict-graph features (see
-                        # _get_action_conflict_features): does this action
-                        # TYPE structurally compete with another action for a
-                        # token, and with how many. Input to the network only
-                        # -- never touches credit/reward, so none of the
-                        # bias-variance or GAE-bootstrap issues every other
-                        # lineage/topology mechanism in this project hit apply.
-                        t_values = t_values + list(
-                            self._get_action_conflict_features().get(t_name, (0.0, 0.0, 0.0)))
 
                     b_list = [el.marking[0] for el in t.incoming]
                     binds = [([place for place in self.places if place._id == GymProblem._get_string_before_last_dot(el._id)][0], el.marking[0]) for el in t.incoming]
@@ -1034,8 +932,7 @@ class GymProblem(SimProblem):
         from gympn.flat_graph import feature_width, hetero_to_flat
         if getattr(self, '_flat_meta', None) is None:
             self._flat_meta = self.make_metadata()
-            a_w = len(self.actions) + (3 if self.use_structural_features else 0)
-            self._flat_width = max(feature_width(ret_graph.x_dict), a_w, len(self.events), 1)
+            self._flat_width = max(feature_width(ret_graph.x_dict), len(self.actions), len(self.events), 1)
         if feature_width(ret_graph.x_dict) > self._flat_width:
             raise ValueError(f"observation feature width {feature_width(ret_graph.x_dict)} > "
                              f"fixed flat width {self._flat_width}")
@@ -1103,9 +1000,6 @@ class GymProblem(SimProblem):
                     new_place_id = f"{p._id}.{i}"
                     new_place = expanded_pn.add_var(name=new_place_id, var_attributes=self.var_attributes[p._id])
                     new_place.put(t.value, time=t.time)
-                    if hasattr(t, '_id'):
-                        #keep the same token id for causal rl
-                        setattr(new_place.marking[0], '_id', t._id)
             else:
                 new_place_id = f"{p._id}.0"
                 expanded_pn.add_var(name=new_place_id, var_attributes=self.var_attributes[p._id])
@@ -1204,9 +1098,7 @@ class GymProblem(SimProblem):
         deep-copy of the (immutable-during-a-search) net STRUCTURE — SimVars,
         transitions, arcs, id2node, metadata. Profiled: the full-pn deepcopy in
         env.set_state was ~20% of a search; this copies only markings + a few
-        scalars and shares the causal-trace histories (safe: the search FLUSHES
-        the trace, replacing the history objects, so the saved references are
-        never mutated in place).
+        scalars.
 
         Restores identically via ``restore_state``. Token values are dicts that
         behaviors may mutate in place, so marking tokens are deep-copied.
@@ -1227,24 +1119,7 @@ class GymProblem(SimProblem):
             "tag": self.network_tag.tag,
             "just_postponed": self.just_postponed,
         }
-        ct = getattr(self, "causal_trace", None)
-        if ct is not None:
-            state["trace"] = self._snapshot_trace(ct)
         return state
-
-    @staticmethod
-    def _snapshot_trace(ct):
-        """Cheap, SAFE trace snapshot: shallow-copy the containers. Trace record
-        dicts are immutable after ``add_transition``/``add_token`` create them,
-        so sharing their references is safe; only the mutable lists/dicts are
-        copied, so later appends (or a flush replacing the whole object) cannot
-        reach the snapshot. Much cheaper than deepcopy (no token duplication)
-        and — unlike sharing the whole history object — has no
-        append-after-restore footgun."""
-        th, tr = ct.token_history, ct.transition_history
-        return (dict(th.tokens),
-                {k: list(v) for k, v in th.transition_to_tokens.items()},
-                list(tr.transitions))
 
     def restore_state(self, state):
         """Restore a snapshot from ``save_state`` in place (self.pn stays the
@@ -1266,16 +1141,6 @@ class GymProblem(SimProblem):
         self.postponed_comps = set(state.get("postponed_comps", set()))
         self.network_tag.tag = state["tag"]
         self.just_postponed = state["just_postponed"]
-        ct = getattr(self, "causal_trace", None)
-        if ct is not None and "trace" in state:
-            tokens, t2t, transitions = state["trace"]
-            th = TokenHistory()
-            th.tokens = dict(tokens)
-            th.transition_to_tokens = {k: list(v) for k, v in t2t.items()}
-            tr = TransitionHistory()
-            tr.transitions = list(transitions)
-            ct.token_history = th
-            ct.transition_history = tr
         # pn_actions references tokens; the restored tokens are fresh copies, so
         # rebuild the binding list to point at them (cheap path, no tensor graph).
         self.compute_pn_actions()
@@ -1612,32 +1477,14 @@ class GymProblem(SimProblem):
             elif len(bindings) > 0 and self.network_tag.is_action():  # hand control to the gym env
                 if not self.allow_postpone:
                     # A single binding is not a decision -- there is nothing to
-                    # choose. Auto-fire it for causal_rl runs too.
-                    #
-                    # This used to read `True if self.causal_rl else
-                    # len(bindings) > 1`, i.e. causal runs consulted the agent
-                    # even on forced moves. That kept the trace's action
-                    # transitions 1:1 with buffer decisions, but at two costs:
-                    # forced no-op decisions entered the training batch as real
-                    # samples, and (because the branch keys on causal_rl) the
-                    # causal arms faced a DIFFERENT decision sequence from the
-                    # ppo baseline they were being compared against -- a
-                    # structural confound in every postpone-off comparison.
-                    #
-                    # The lineage does not need the agent for this: fire() +
-                    # update_reward() register the produced tokens and the
-                    # transition in the causal trace either way, so provenance
-                    # still flows through the forced firing. It is registered
-                    # with agent_decision=False so it becomes a lineage node
-                    # rather than a decision node, which is what preserves the
-                    # trace/buffer alignment the old shortcut was protecting.
+                    # choose -- so it is fired without consulting the agent.
                     if len(bindings) > 1:  # only consult the agent on a real choice
                         return _obs(), self.clock > self.length or not active_model, i
                     else:
                         binding = bindings[0]
                         run.append(binding)
                         result_tokens = self.fire(binding)
-                        self.update_reward(binding, result_tokens, agent_decision=False)
+                        self.update_reward(binding, result_tokens)
                         i += 1
                 else:
                     # allow_postpone: the agent may also choose to postpone.
@@ -1795,16 +1642,8 @@ class GymProblem(SimProblem):
                     (ret_graph[edge_type].edge_index, edge_indices), dim=1)
         transition_binding_map.extend(entries)
 
-    def update_reward(self, timed_binding, result_tokens=None, agent_decision=True):
-        """Accrue the firing's reward and, in causal mode, record it in the trace.
-
-        agent_decision : bool, default True
-            Whether the agent actually chose this firing. False for a forced
-            single-binding action auto-fired by run_evolutions: its tokens and
-            reward still enter the causal trace (provenance is unaffected), but
-            it is NOT registered as a decision, so the trace's action
-            transitions stay aligned 1:1 with the decisions in the buffer.
-        """
+    def update_reward(self, timed_binding, result_tokens=None):
+        """Accrue the firing's reward, in total and for its net component."""
         binding, time, transition = timed_binding
         variable_values = []
 
@@ -1827,13 +1666,6 @@ class GymProblem(SimProblem):
 
         else:
             r_f = 0
-
-        #print(f"produced reward {r_f} with binding {binding}")
-        #update causal reward buffer if enabled
-        if self.causal_rl:
-            self.update_causal_trace(binding, result_tokens, r_f, transition,
-                                     agent_decision=agent_decision)
-
 
         return r_f, variable_values
 
@@ -2026,56 +1858,13 @@ class GymProblem(SimProblem):
             from .seeding import seed_everything
             seed_everything(args.agent_seed)
 
-        #EXPERIMENTAL: if causal_rl, every token in the network is complemented with a unique identifier
-        if self.causal_rl:
-                new_unobservable_dict = {'places': [], }
-                #TODO: update the unobservable elements (probably not necessary cause it is not registered in the place's variables) AND check that no token had _id in its attributes
-                #self.set_unobservable(simvars=[], token_attrs={'EVERY_PLACE': ['_id']})
-                for place in self.places:
-                    #include _id in the set of unobservable features
-                    for token in place.marking:
-                        setattr(token, '_id', str(uuid.uuid4()))
-                print("Causal RL enabled: each token has been assigned a unique identifier.")
-                # Give the causal trace a back-reference to this (fully-built) net,
-                # so the s_ccf scheme can read the static topology for its
-                # action-invariant components. Reset the cached component map.
-                self.causal_trace._pn = self
-                self.causal_trace._static_comp_cache = None
-                self.causal_trace._ls_hca_classify_cache = None
-                # Ensure causal trace starts empty at the beginning of training
-                try:
-                    self.causal_trace.flush()
-                except Exception:
-                    pass
-
-                # Register initial tokens as roots in the causal trace.
-                # This ensures the BFS in redistribute_rewards() can find them
-                # as proper root nodes instead of encountering unknown token IDs.
-                import types
-                initial_sentinel = types.SimpleNamespace(_id="__initial__")
-                for place in self.places:
-                    for token in place.marking:
-                        self.causal_trace.register_token(
-                            token, initial_sentinel, parent_tokens=[], time=0
-                        )
-                self.causal_trace.register_transition(
-                    transition=initial_sentinel,
-                    input_tokens=[],
-                    output_tokens=[t for p in self.places for t in p.marking],
-                    is_action=False,
-                    reward=0.0,
-                    time=0
-                )
-
         if getattr(args, 'flat_obs', False):
             flat_encoders = ('type_embed', 'temb', 'type_embed_film', 'tembf', 'aepn')
             encs = [(getattr(args, k, None) or {}).get('encoder', 'aepn') for k in ('policy_kwargs', 'value_kwargs')]
             if any(e not in flat_encoders for e in encs):
                 raise ValueError(f"flat_obs needs a flat encoder for actor and critic, got {encs}")
-            if args.causal_rl or getattr(args, 'causal_pg', False) or getattr(args, 'cf_config', None):
-                raise ValueError("flat_obs supports the plain PPO update path only (ppo, nfgae)")
         if getattr(args, 'local_obs', False):
-            if args.causal_rl or getattr(args, 'causal_scheme', None) != 'nfgae':
+            if not args.nfgae:
                 raise ValueError("local_obs is for nfgae: its advantage and critic are per component")
             if self.allow_postpone:
                 raise ValueError("local_obs needs allow_postpone=False (component turns are work-conserving)")
@@ -2133,7 +1922,7 @@ class GymProblem(SimProblem):
                     'lam': args.lam,
                     'eps': args.eps,
                     'vf_coeff': args.vf_coeff,
-                    'causal_rl': args.causal_rl,
+                    'nfgae': args.nfgae,
                 }
 
                 wandb_logger = init_wandb(
@@ -2152,10 +1941,6 @@ class GymProblem(SimProblem):
                 logger.warning(f"Could not initialize W&B: {e}")
 
         logger.training_start(agent.__class__.__name__, args.epochs, args.episodes)
-
-        # Log if causal RL is enabled
-        if hasattr(env, 'causal_rl') and env.causal_rl:
-            logger.causal_rl_enabled()
 
         history = agent.train(env, episodes=args.episodes, epochs=args.epochs,
                     save_freq=args.save_freq, logdir=logdir, verbose=args.verbose,
@@ -2380,7 +2165,7 @@ class GymProblem(SimProblem):
             result_tokens = self.fire(
                 chosen)  # applies behavior and places tokens  [1](https://tuenl-my.sharepoint.com/personal/r_lo_bianco_tue_nl/Documents/Microsoft%20Copilot%20Chat%20Files/environment%20-%20Copy.txt)
             self.update_reward(chosen,
-                               result_tokens)  # accumulate reward (non-causal mode uses deltas)  [1](https://tuenl-my.sharepoint.com/personal/r_lo_bianco_tue_nl/Documents/Microsoft%20Copilot%20Chat%20Files/environment%20-%20Copy.txt)
+                               result_tokens)  # accumulate reward
             if reporter is not None:
                 try:
                     reporter.callback(chosen)
@@ -2523,8 +2308,6 @@ class GymProblem(SimProblem):
         Component scope (postpone_scope='component'): only component ``comp``
         waits -- its actions are blocked until one of ITS events fires -- and the
         decision round continues for the other components.
-        Also registers all tokens that were available for action bindings but were not used
-        because of the postpone into the eligibility trace with zero immediate reward.
         """
         if not self.allow_postpone:
             raise Exception("Postpone is not allowed in this A-E PN.")
@@ -2532,192 +2315,11 @@ class GymProblem(SimProblem):
         if self._component_postpone():
             if comp is None:
                 raise ValueError("component postpone needs the component id")
-            if self.causal_rl:
-                bindings, _ = self.bindings()
-                part = self.net_partition()
-                self.update_causal_trace_postpone(
-                    [b for b in bindings if part.get(b[2]._id) == comp])
             self.postponed_comps.add(comp)
             return
 
-        if self.causal_rl:
-            # collect current enabled bindings (timed bindings: (binding, time, transition))
-            bindings, _ = self.bindings()
-            self.update_causal_trace_postpone(bindings)
-
-        # perform original postpone behavior
         self.network_tag.tag = 'e'
         self.just_postponed = True
-
-    def update_causal_trace_postpone(self, bindings):
-        if not self.causal_rl:
-            return
-
-        if self.causal_postpone_tokenflow:
-            self._update_causal_trace_postpone_tokenflow(bindings)
-        else:
-            self._update_causal_trace_postpone_sinkless(bindings)
-
-    def _update_causal_trace_postpone_sinkless(self, bindings):
-        # B.4 fix (see CAUSAL_RL_REDISTRIBUTION_PROBLEMS.md #3): postpone must NOT
-        # re-ID the eligible tokens nor insert itself into the token lineage.
-        # The old behavior gave every eligible token a fresh id with a
-        # `postpone_` sentinel as its creating transition, which made postpone a
-        # graph-ancestor of those tokens — so any downstream reward consuming them
-        # leaked credit back to the no-op postpone. We now leave tokens untouched,
-        # so credit flows *through* postpone to the real upstream producers.
-        #
-        # We still register a postpone sentinel *transition* (is_action=True,
-        # reward 0, no output tokens) so it occupies exactly one action slot,
-        # preserving the 1:1 credit/step alignment that TrajectoryBuffer.finish()
-        # asserts. With no output tokens it can never be a credit sink under any
-        # scheme, so it always receives zero redistributed reward.
-        input_tokens = []
-        for timed_binding in bindings:
-            try:
-                binding, _, transition = timed_binding
-            except Exception:
-                continue
-
-            if isinstance(transition, SimAction):
-                for place, token in binding:
-                    if token not in input_tokens:
-                        input_tokens.append(token)
-
-        # Create a sentinel transition object with a unique _id
-        # (TransitionHistory.add_transition accesses transition._id).
-        import types
-        sentinel_transition = types.SimpleNamespace(_id=f"postpone_{uuid.uuid4()}")
-
-        # Record the eligible tokens (by their current, unchanged _id) as inputs
-        # for diagnostics; no output tokens are produced and no token lineage is
-        # mutated.
-        self.causal_trace.register_transition(
-            transition=sentinel_transition,
-            input_tokens=input_tokens,
-            output_tokens=[],
-            is_action=True,
-            reward=0.0,
-            time=self.clock
-        )
-
-    def _update_causal_trace_postpone_tokenflow(self, bindings):
-        # Token-flow postpone (Design C, see CAUSAL_ADVANTAGE_TD0.md): model
-        # postpone as a real transition that CONSUMES the action-eligible tokens
-        # and RECREATES them in place (same token object, fresh _id), with the
-        # postpone sentinel as their producer. This inserts postpone into the
-        # token DAG (old token -> postpone -> new token), so credit can flow back
-        # to it like any action.
-        #
-        # No deferred re-emission is needed: in an A-E PN the clock is already
-        # advanced by postpone() (tag A->E + clock to next event), and action
-        # transitions fire at the clock, not at their input tokens' timestamps.
-        # Recreating the tokens in place therefore preserves the dynamics exactly
-        # and only changes lineage.
-        #
-        # NOTE: requires redistribute_rewards(include_postpone=True) for the
-        # recreated (output) tokens to be treated as credit sinks owned by the
-        # postpone action. That is wired via causal_trace.postpone_tokenflow.
-        import types
-
-        input_tokens = []        # eligible token objects (post-mutation)
-        output_tokens = []       # same objects, now carrying the new _id (sinks)
-        old_id_map = {}          # id(token_object) -> old _id (pre-mutation)
-
-        for timed_binding in bindings:
-            try:
-                binding, _, transition = timed_binding
-            except Exception:
-                continue
-
-            if isinstance(transition, SimAction):
-                for place, token in binding:
-                    if token in input_tokens:
-                        continue
-                    input_tokens.append(token)
-                    # Save the pre-postpone id, then assign a fresh id to the
-                    # exact object in the marking (identity lookup, NOT value
-                    # equality, so duplicate-valued tokens are disambiguated).
-                    old_id_map[id(token)] = getattr(token, '_id', None)
-                    new_id = str(uuid.uuid4())
-                    obj_idx = next(
-                        (i for i, t in enumerate(place.marking) if t is token),
-                        None
-                    )
-                    if obj_idx is not None:
-                        place.marking[obj_idx]._id = new_id
-                    else:
-                        token._id = new_id
-                    output_tokens.append(token)
-
-        if not input_tokens:
-            return
-
-        sentinel_transition = types.SimpleNamespace(_id=f"postpone_{uuid.uuid4()}")
-
-        # Lightweight wrappers carrying the OLD ids, so the transition/token
-        # history records old-id inputs -> new-id outputs (postpone as the hop).
-        class _OldIdToken:
-            def __init__(self, old_id):
-                self._id = old_id
-
-        old_input_tokens = [
-            _OldIdToken(old_id_map[id(t)]) for t in input_tokens
-            if old_id_map.get(id(t)) is not None
-        ]
-
-        self.causal_trace.register_transition(
-            transition=sentinel_transition,
-            input_tokens=old_input_tokens,
-            output_tokens=output_tokens,
-            is_action=True,
-            reward=0.0,
-            time=self.clock
-        )
-
-        # Register each recreated token (new id) as a child of its old self with
-        # the postpone sentinel as the creating transition, so the lineage DAG
-        # routes downstream credit through postpone.
-        for out_token in output_tokens:
-            self.causal_trace.register_token(
-                out_token, sentinel_transition, old_input_tokens, time=self.clock
-            )
-
-    def update_causal_trace(self, bindings, result_tokens, reward, transition,
-                            agent_decision=True):
-        """
-        Updates the causal trace with the provided bindings, result tokens, and reward.
-        Parameters
-        ----------
-        bindings
-        result_tokens
-        reward
-
-        Returns
-        -------
-
-        """
-
-        #add the transition to the transition history in causal trace
-
-        consumed_tokens = [t for (p, t) in bindings]
-
-        for p_token in result_tokens:
-            #add consumed tokens to the history of produced tokens
-            self.causal_trace.register_token(p_token, transition, consumed_tokens, time=self.clock)
-
-        #update transition history with the reward obtained
-        # agent_decision=False (a forced single-binding firing auto-fired by
-        # run_evolutions) registers as a LINEAGE node, not a decision node: the
-        # tokens above still carry provenance through it, so credit walks
-        # straight past it to the upstream decision that actually caused the
-        # flow, while get_action_transitions() continues to return exactly the
-        # decisions the agent made -- which is what the per-decision credit
-        # vectors are indexed against.
-        self.causal_trace.register_transition(transition, consumed_tokens, result_tokens,
-                                              is_action=(isinstance(transition, SimAction)
-                                                         and agent_decision),
-                                              reward=reward, time=self.clock)
 
 
 class SimAction(SimEvent):

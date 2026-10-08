@@ -83,7 +83,7 @@ config = {
 | **Sample Efficiency** | High | High | Low |
 | **Complexity** | Medium | Medium | Low |
 | **Best For** | General use | Strict KL control | Learning |
-| **Causal RL** | Compatible | Compatible | Compatible |
+| **NF-GAE** | Compatible | Compatible | Compatible |
 | **Postponement** | Compatible | Compatible | Compatible |
 
 ## Choosing an Algorithm
@@ -107,7 +107,7 @@ Is training speed critical?
 
 **Business Process Optimization**
 - Start with PPO-Clip
-- If causal rewards important: Add causal_rl=True
+- Several independent processes in one net: add nfgae=True (see Postponement and Net-Factored Credit)
 
 **Testing/Debugging**
 - Use PG (simplest)
@@ -189,7 +189,7 @@ config = {
 }
 ```
 
-### Template 3: Causal RL (PPO-Clip + Causal Rewards)
+### Template 3: Net-Factored Credit (PPO-Clip + NF-GAE)
 ```python
 config = {
     "algorithm": "ppo-clip",
@@ -202,7 +202,9 @@ config = {
     "value_updates": 10,
     "eps": 0.15,
     "ent_bonus": 0.005,
-    # Note: causal_rl=True is set in GymProblem(), not here
+    "smdp_discount": True,
+    "beta": 0.5,
+    "nfgae": True,
 }
 ```
 
@@ -210,8 +212,8 @@ config = {
 
 ### If you have:
 
-**Long horizons with delayed rewards**
-→ Use PPO-Clip with causal_rl=True
+**Several independent processes in one net**
+→ Use PPO-Clip with nfgae=True
 
 **Many small independent tasks**
 → Use PPO-Clip with high ent_bonus
@@ -274,6 +276,6 @@ Entropy
 1. **Increase entropy bonus** to 0.01-0.02
 2. **Increase policy_updates** to 8-10
 3. **Use larger batch_size** for gradient stability
-4. **Enable causal_rl if causal structure is present**
+4. **Enable nfgae if the net has independent parts**
 
 

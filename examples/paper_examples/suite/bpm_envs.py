@@ -1,11 +1,10 @@
-"""BPM decision-type environments for the conference version of the paper
-(HARD variants, 2026-09-28).
+"""BPM decision-type environments (HARD variants, 2026-09-28). The insurer
+(insurer_env.py) builds its claims and complaints processes from these.
 
 Three decision types a process manager faces, each as an A-E PN with N
-causally independent copies (own arrival stream, own queue, own resource
-pool per copy, nothing shared), so the causal fan-out K tracks N exactly as
-in `ncopies_env.py`. N=1 is the K=1 negative control; N=8 is the concurrent
-setting the paper's claim is about.
+independent copies (own arrival stream, own queue, own resource pool per
+copy, nothing shared), so the net has K = N components. N=1 is the K=1
+control.
 
   1. resource assignment      -> `multisite_env.make_multisite` (already run)
   2. next-activity selection  -> `make_next_activity(n)`   (this module)
@@ -14,8 +13,7 @@ setting the paper's claim is about.
 WHY "HARD". The first design (one resource, two risk levels, deterministic
 outcomes) was degenerate at N=1: every seed of every arm converged to the
 same greedy lookup table within nine epochs and the 20 seeds gave identical
-finals (PPO 0.944 x20, cgae-cf 0.944 x20, mc-q 0.813 x20), so the K=1
-control had zero variance. This version, modelled on `make_n_copies_hard`:
+finals, so the K=1 control had zero variance. In this version:
 
   * THREE risk levels, risk in {0, 1, 2}, with a HIDDEN per-case outcome
     `bad` drawn at arrival with P(bad | risk) = 0.1 / 0.5 / 0.9. The policy
@@ -48,15 +46,14 @@ safe one `check`; a shipped bad case pays 0 and RETURNS to the queue as
 (risk, reworked=1, fixed) after a fix delay of 2, so the cost of the wrong
 decision arrives later, through the loop, and consumes future resource time
 and a further decision. Same decision table, different way the penalty
-arrives -- which is exactly what separates temporal from provenance credit.
+arrives.
 
 Shared conventions: one case per time unit per copy, reward 1 per good
 completion (throughput of good outcomes over a fixed horizon), warm start
 with one case of each risk level in every queue. The warm start is
 DETERMINISTIC (bad = 1 only for the risk-2 case): build-time random draws
-would give the causal and non-causal builds different warm starts whenever
-they are constructed at different random-stream positions, which is exactly
-what the CRN pre-check caught on the first hard version.
+would give two builds different warm starts whenever they are constructed at
+different random-stream positions.
 """
 import random
 
@@ -115,10 +112,8 @@ def _na_done(b):
     return [SimToken(b[1])]
 
 
-def make_next_activity(n=4, causal_rl=False, allow_postpone=True,
-                       causal_postpone_tokenflow=False):
-    ag = GymProblem(allow_postpone=allow_postpone, causal_rl=causal_rl,
-                    causal_postpone_tokenflow=causal_postpone_tokenflow)
+def make_next_activity(n=4, allow_postpone=True):
+    ag = GymProblem(allow_postpone=allow_postpone)
     hidden = {}
     for i in range(n):
         arrival = ag.add_var(f"arrival_{i}", var_attributes=['risk', 'bad'])
@@ -145,18 +140,14 @@ def _arrive_na_half(a):
     return [SimToken(_draw_case(), delay=2), SimToken(_draw_case())]
 
 
-def make_next_activity_split(n=4, causal_rl=False, allow_postpone=True,
-                             causal_postpone_tokenflow=False):
+def make_next_activity_split(n=4, allow_postpone=True):
     """DIAGNOSTIC variant of `make_next_activity`: each employee has its OWN
     queue and arrival stream (one case every 2 time units, so a copy still
-    receives one case per time unit). Nothing is shared inside a copy, so the
-    two resource chains the provenance DAG finds at N=1 really are causally
-    independent (true K=2, no pre-emption). Paired with the shared-queue env
-    it separates the contention blind spot of cgae-cf from its critic /
-    bootstrap problem. Same rates, same decision table; the warm start puts
-    one case of each risk level in EACH employee's queue."""
-    ag = GymProblem(allow_postpone=allow_postpone, causal_rl=causal_rl,
-                    causal_postpone_tokenflow=causal_postpone_tokenflow)
+    receives one case per time unit). Nothing is shared inside a copy, so each
+    employee is its own net component (K = 2 per copy). Same rates, same
+    decision table; the warm start puts one case of each risk level in EACH
+    employee's queue."""
+    ag = GymProblem(allow_postpone=allow_postpone)
     hidden = {}
     for i in range(n):
         for skill in (0, 1):
@@ -206,10 +197,8 @@ def _rw_done(b):
     return [SimToken(res), SimToken(fixed, delay=FIX_DELAY)]   # resource back, case re-queued
 
 
-def make_rework(n=4, causal_rl=False, allow_postpone=True,
-                causal_postpone_tokenflow=False):
-    ag = GymProblem(allow_postpone=allow_postpone, causal_rl=causal_rl,
-                    causal_postpone_tokenflow=causal_postpone_tokenflow)
+def make_rework(n=4, allow_postpone=True):
+    ag = GymProblem(allow_postpone=allow_postpone)
     hidden = {}
     for i in range(n):
         arrival = ag.add_var(f"arrival_{i}", var_attributes=['risk', 'bad', 'reworked'])
@@ -281,9 +270,8 @@ BPM_HEURISTICS = {
 
 
 if __name__ == "__main__":
-    # smoke: anchors (random vs heuristic) and lineage independence per N
-    import os, sys, types, uuid
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    # smoke: anchors (random vs heuristic) per N, and the observed widths
+    import os, sys
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
     import numpy as np
     from gympn.environment import AEPN_Env
@@ -295,45 +283,17 @@ if __name__ == "__main__":
         rnd, heu = [], []
         for s in range(episodes):
             random.seed(1000 + s); np.random.seed(1000 + s)
-            env = BPM_BUILDERS[name](n, causal_rl=False, allow_postpone=False)
+            env = BPM_BUILDERS[name](n, allow_postpone=False)
             rnd.append(float(env.testing_run(solver=RandomSolver(), length=LENGTH)))
             random.seed(1000 + s); np.random.seed(1000 + s)
-            env = BPM_BUILDERS[name](n, causal_rl=False, allow_postpone=False)
+            env = BPM_BUILDERS[name](n, allow_postpone=False)
             heu.append(float(env.testing_run(solver=HeuristicSolver(BPM_HEURISTICS[name]),
                                              length=LENGTH)))
         return np.mean(rnd), np.std(rnd), np.mean(heu), np.std(heu)
 
-    def trace_check(name, n):
-        random.seed(0); np.random.seed(0)
-        pn = BPM_BUILDERS[name](n, causal_rl=True, allow_postpone=False)
-        pn.length = LENGTH
-        for p in pn.places:
-            for t in p.marking:
-                setattr(t, '_id', str(uuid.uuid4()))
-        pn.causal_trace.flush()
-        sen = types.SimpleNamespace(_id="__initial__")
-        toks = [t for p in pn.places for t in p.marking]
-        for t in toks:
-            pn.causal_trace.register_token(t, sen, [], time=0)
-        pn.causal_trace.register_transition(sen, [], toks, is_action=False, reward=0.0, time=0)
-        env = AEPN_Env(pn); env.reset()
-        obs_widths = None
-        for _ in range(60):
-            k = len(env.pn.pn_actions)
-            if k == 0:
-                break
-            _, _, d, _, _ = env.step(np.random.randint(k))
-            if d:
-                break
-        ct = env.pn.causal_trace
-        ccf = np.array(ct.redistribute_rewards(scheme='ccf', beta=0.5))
-        mcq = np.array(ct.redistribute_rewards(scheme='mc_q', beta=0.5))
-        sc = max(1e-9, float(np.mean(np.abs(mcq))))
-        return np.mean(np.abs(ccf - mcq)) / sc
-
     def hidden_check(name):
         """The hidden attribute must not reach the observation graph."""
-        pn = BPM_BUILDERS[name](1, causal_rl=False, allow_postpone=False)
+        pn = BPM_BUILDERS[name](1, allow_postpone=False)
         pn.length = LENGTH
         env = AEPN_Env(pn); obs = env.reset()
         g = obs['graph'] if isinstance(obs, dict) and 'graph' in obs else obs
@@ -346,5 +306,4 @@ if __name__ == "__main__":
             r, rs, h, hs = anchors(name, n)
             gap = h - r
             print(f"  N={n}: random={r:6.2f} +-{rs:4.2f}  heuristic={h:6.2f} +-{hs:4.2f}  "
-                  f"headroom={gap:5.2f} ({gap/max(rs,1e-9):.1f}x sigma_rnd)  "
-                  f"factoring |ccf-mcq|/scale={trace_check(name, n):.3f}")
+                  f"headroom={gap:5.2f} ({gap/max(rs,1e-9):.1f}x sigma_rnd)")

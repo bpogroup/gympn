@@ -12,7 +12,7 @@ python run_tests.py
 python run_tests.py network      # Network training tests
 python run_tests.py ppo          # PPO algorithm tests
 python run_tests.py batch        # Batch handling tests
-python run_tests.py causal       # Causal RL tests
+
 python run_tests.py pipeline     # Training pipeline tests
 ```
 

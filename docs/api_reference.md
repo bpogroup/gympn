@@ -10,7 +10,6 @@ from gympn.simulator import GymProblem
 # Basic environment
 env = GymProblem(
     allow_postpone=True,      # Enable postponement action
-    causal_rl=True,           # Track causal relationships
     max_episode_length=1000   # Episode termination
 )
 
@@ -414,7 +413,9 @@ args = parser.parse_args()
 | `--ent_bonus` | float | 0.005 | Entropy regularization bonus |
 | `--vf_coeff` | float | 0.5 | Value function loss weight |
 | `--agent_seed` | int | 0 | Random seed for agent initialization |
-| `--causal_rl` | bool | False | Enable causal credit redistribution |
+| `--nfgae` | bool | False | Net-factored GAE: per-component credit and critic |
+| `--smdp_discount` | bool | False | Discount by exp(-beta * tau) instead of a constant γ |
+| `--beta` | float | 0.0 | SMDP discount rate β |
 
 ### Policy Network Arguments
 
@@ -487,9 +488,9 @@ python examples/example_simple_postpone.py \
   --policy_lr 5e-4 \
   --num_workers 4
 
-# Causal RL enabled
+# Net-factored credit
 python examples/example_simple_postpone.py \
-  --causal_rl true \
+  --nfgae true --smdp_discount true --beta 0.5 \
   --num_workers 4 \
   --wandb_mode online
 
@@ -510,7 +511,6 @@ config = {
     "epochs": 100,
     "policy_lr": 5e-4,
     "value_lr": 5e-4,
-    "causal_rl": True,
     "num_workers": 4,  # Parallel episode collection
     "batch_size": 64,
     "use_wandb": True,

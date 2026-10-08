@@ -33,7 +33,7 @@ if __name__ == "__main__":
     ###########################################################################
 
     # Instantiate a simulation problem.
-    agency = GymProblem(allow_postpone=True, causal_rl=False)
+    agency = GymProblem(allow_postpone=True)
 
     # Define cases.
     arrival = agency.add_var("arrival", var_attributes=['task_type'])
@@ -243,7 +243,7 @@ if __name__ == "__main__":
 
     if train:
         #training functions
-        logger.debug("Starting training run with causal RL enabled")
+        logger.debug("Starting training run")
         agency.training_run(length=10, args_dict=default_args)
         logger.debug("Training run completed")
 

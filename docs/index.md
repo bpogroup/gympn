@@ -34,11 +34,11 @@ pip install -r requirements.txt
 ### Core Concepts
 - **[Algorithms](./algorithms.md)** - Overview of PPO-Clip, PPO-Penalty and PG algorithms with hyperparameter tuning
 - **[Agents Guide](./agents_guide.md)** - Detailed guide on PPOAgent and custom solvers
-- **[Advanced Features](./advanced_features.md)** - GNNs, causal tracking, Deep Causal Learning, parallelization
+- **[Advanced Features](./advanced_features.md)** - GNNs, parallelization
 
 ### Advanced Topics
 - **[Extending GymPN](./extending_gympn.md)** - Create custom networks, solvers, environments, and reward functions
-- **[Causal RL and Postponement](./postpone_causal.md)** - Using causal rewards with strategic postponement
+- **[Postponement and Net-Factored Credit](./postponement.md)** - Strategic postponement and per-component credit
 - **[Troubleshooting](./troubleshooting.md)** - Common issues and solutions
 
 ### Reference

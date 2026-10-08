@@ -105,7 +105,7 @@ from gympn.networks import GNNPolicyNetwork, GNNValueNetwork
 from gympn.simulator import GymProblem
 
 # Create environment
-env = GymProblem(allow_postpone=True, causal_rl=True)
+env = GymProblem(allow_postpone=True)
 # ... define places, transitions, events ...
 
 # Create networks
@@ -269,7 +269,7 @@ def evaluate_agent(problem, agent_or_solver, num_episodes=100):
     }
 
 # Compare multiple approaches
-env = GymProblem(allow_postpone=True, causal_rl=True)
+env = GymProblem(allow_postpone=True)
 # ... setup environment ...
 
 results = {}

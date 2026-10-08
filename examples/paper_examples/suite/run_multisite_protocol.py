@@ -1,37 +1,20 @@
-r"""Multi-site rerun under the protocol the paper states.
+r"""Multi-site routing benchmark: PPO vs NF-GAE.
 
-WHY. The paper's multi-site cells (suite_results_multisite_bf) were produced
-with 8 episodes per epoch, 12 greedy-evaluation episodes and NO evaluation seed,
-while Table 8 / Appendix E state 20 episodes per epoch, greedy evaluation every
-second epoch on 20 episodes, and common random numbers for every evaluation
-point. The PPO tuning grid showed the evaluation draw alone moves PPO's
-multi-site number from 0.161 to 0.279, so the headline environment must be
-re-run under the stated protocol rather than described around.
+PROTOCOL: 40 epochs x 20 episodes, greedy eval every 2 epochs on 20 episodes,
+eval_seed 555000 (scenario i = eval_seed + i for every arm/seed/epoch), seeds
+0-19, shared hyperparameters (common.Hyper), no per-arm tuning,
+allow_postpone=False. Anchors are the stored ones
+(suite_results_multisite_bf/baselines.json: random 62.90, heuristic 80.25),
+computed on the same no-postpone net.
 
-PROTOCOL (matches Table 8 and the other converged cells):
-  40 epochs x 20 episodes, greedy eval every 2 epochs on 20 episodes,
-  eval_seed 555000 (scenario i = eval_seed + i for every arm/seed/epoch),
-  seeds 0-19, shared hyperparameters, no per-arm tuning.
-  allow_postpone=False, as in every previous multi-site cell and as the paper's
-  optimum argument for multi-site requires (Section 6.6): the multi-site
-  ceiling 1.029 is the NON-idling optimum. Anchors are the stored ones
-  (suite_results_multisite_bf/baselines.json: random 62.90, heuristic 80.25),
-  computed on the same no-postpone net.
-
-ARMS, two tiers. Tier 1 are the distinct estimators; tier 2 (cgae, cgae_flow)
-are provably bit-identical to cgae_cflow on multi-site (fan-out exactly 1) and
-are run last, only so the identity can be re-verified on the new cells.
-  tier 1: ppo, cgae_cflow, ccf, cgae_cap, mc_q
-  tier 2: cgae, cgae_flow
-
-Run: python run_multisite_protocol.py [workers] [seeds=20] [methods=a,b,...] [epochs=40]
-                                      [net=aepn|hgt] [flat=1] [threads=T]
+Run: python run_multisite_protocol.py [workers] [seeds=20] [methods=ppo,nfgae] [epochs=40]
+                                      [net=aepn|hgt] [flat=1] [threads=T] [tag=X]
 (epochs != 40 routes to a scratch dir: smoke only). Resumable by cell file.
-net: actor+critic encoder, default aepn (gympn's default since 2026-10-05). Every
-cell in suite_results_multisite_protocol is HGT, so net=hgt keeps that directory
-and any other net routes to suite_results_multisite_protocol_<net>[_flat]: the
-two networks never share a results directory. flat=1: flat graph observations
-(gympn/flat_graph.py; non-HGT nets, ppo/nfgae only). threads=T overrides the
+net: actor+critic encoder, default aepn. The cells in
+suite_results_multisite_protocol are HGT (PPO only), so net=hgt keeps that
+directory and any other net routes to suite_results_multisite_protocol_<net>[_flat]:
+the two networks never share a results directory. flat=1: flat graph
+observations (gympn/flat_graph.py; non-HGT nets). threads=T overrides the
 per-worker torch threads (default: physical cores / workers).
 """
 import json
@@ -45,8 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np  # noqa: E402
 
-from config import stoch_config  # noqa: E402
-from run_suite import _set_seed, _extract_metrics, _threads_per_worker  # noqa: E402
+from common import Hyper, set_seed, extract_metrics, threads_per_worker  # noqa: E402
 from multisite_env import make_multisite  # noqa: E402
 
 N_SITES, N_LOCAL, N_FLEX = 4, 1, 0
@@ -60,9 +42,7 @@ SEEDS = 20
 OUTDIR = Path("suite_results_multisite_protocol")
 SRC_BASELINES = Path("suite_results_multisite_bf") / "baselines.json"
 
-TIER1 = ["ppo", "cgae_cflow", "ccf", "cgae_cap", "mc_q"]
-TIER2 = ["cgae", "cgae_flow"]
-METHODS = TIER1 + TIER2
+METHODS = ["ppo", "nfgae"]
 
 NET = "aepn"
 FLAT = False
@@ -89,8 +69,8 @@ if NET != "hgt" or FLAT:
     OUTDIR = Path(f"{OUTDIR}_{NET}" + ("_flat" if FLAT else ""))
 if TAG:
     OUTDIR = Path(f"{OUTDIR}_{TAG}")
-CAUSAL = {m: (m not in ("ppo", "nfgae")) for m in METHODS}   # after argv: methods= may add arms
-# nfgae (paper/NFGAE_THEORY.md) needs no causal trace: plain SMDP-GAE path.
+if set(METHODS) - {"ppo", "nfgae"}:
+    raise SystemExit(f"unknown methods {sorted(set(METHODS) - {'ppo', 'nfgae'})}; choose from ppo, nfgae")
 
 
 def _args(method, seed, cfg, logdir):
@@ -101,7 +81,7 @@ def _args(method, seed, cfg, logdir):
         "value_lr": cfg.value_lr, "value_updates": cfg.value_updates,
         "eps": cfg.ppo_eps, "gam": cfg.gam, "lam": cfg.lam, "ent_bonus": cfg.ent_bonus,
         "policy_kld_limit": getattr(cfg, "policy_kld_limit", None),
-        "causal_beta": cfg.causal_beta,
+        "beta": cfg.beta,
         "verbose": 0, "use_gpu": False, "agent_seed": int(seed),
         "use_wandb": False, "open_tensorboard": False,
         "test_in_train": True, "test_freq": TEST_FREQ, "test_episodes": TEST_EPISODES,
@@ -112,19 +92,13 @@ def _args(method, seed, cfg, logdir):
     }
     if FLAT:
         a["flat_obs"] = True
-    if CAUSAL[method]:
-        a.update({"causal_rl": True, "causal_scheme": method})
-    elif method == "nfgae":
-        a.update({"causal_rl": False, "causal_scheme": "nfgae", "smdp_discount": True})
-    else:
-        a.update({"causal_rl": False, "smdp_discount": True})
+    a.update({"smdp_discount": True, "nfgae": method == "nfgae"})
     return a
 
 
 def train_cell(method, seed, cfg, logdir, baselines):
-    _set_seed(seed)
-    env = make_multisite(N_SITES, N_LOCAL, N_FLEX, causal_rl=CAUSAL[method],
-                         allow_postpone=False)
+    set_seed(seed)
+    env = make_multisite(N_SITES, N_LOCAL, N_FLEX, allow_postpone=False)
     args = _args(method, seed, cfg, logdir)
     saved = sys.argv; sys.argv = sys.argv[:1]
     t0 = time.time()
@@ -132,8 +106,7 @@ def train_cell(method, seed, cfg, logdir, baselines):
         env.training_run(length=LENGTH, args_dict=args)
     finally:
         sys.argv = saved
-    cfx = stoch_config(); cfx.epochs = EPOCHS; cfx.test_freq = TEST_FREQ
-    m = _extract_metrics(getattr(env, "training_history", {}) or {}, cfx)
+    m = extract_metrics(getattr(env, "training_history", {}) or {}, EPOCHS, TEST_FREQ)
     m.update({"env": "multisite", "n_sites": N_SITES, "n_local": N_LOCAL, "n_flex": N_FLEX,
               "allow_postpone": False, "method": method, "seed": seed,
               "net": NET, "flat_obs": FLAT,
@@ -154,59 +127,10 @@ def _worker(payload):
         return (method, seed, None, traceback.format_exc())
 
 
-def crn_precheck(episodes=20):
-    """Causal and non-causal envs must consume the global random stream
-    identically, or scenario alignment between arms breaks."""
-    from gympn.agents import Agent
-    from gympn.environment import AEPN_Env
-
-    class _NoOp:
-        def train(self):
-            pass
-
-    class Scripted(Agent):
-        def __init__(self):
-            self.policy_model = _NoOp(); self.value_model = _NoOp()
-            self.best_test_metric = float('inf')
-
-        def act(self, state, deterministic=True, return_logprob=False):
-            return 0
-
-    def build(causal):
-        pn = make_multisite(N_SITES, N_LOCAL, N_FLEX, causal_rl=causal, allow_postpone=False)
-        pn.length = LENGTH
-        if causal:
-            import types, uuid
-            for place in pn.places:
-                for tok in place.marking:
-                    setattr(tok, '_id', str(uuid.uuid4()))
-            pn.causal_trace._pn = pn
-            pn.causal_trace._static_comp_cache = None
-            pn.causal_trace._ls_hca_classify_cache = None
-            try:
-                pn.causal_trace.flush()
-            except Exception:
-                pass
-            sent = types.SimpleNamespace(_id="__initial__")
-            for place in pn.places:
-                for tok in place.marking:
-                    pn.causal_trace.register_token(tok, sent, parent_tokens=[], time=0)
-            pn.causal_trace.register_transition(
-                transition=sent, input_tokens=[],
-                output_tokens=[t for p in pn.places for t in p.marking],
-                is_action=False, reward=0.0, time=0)
-        return AEPN_Env(pn)
-
-    a = Scripted().test_in_train(build(False), episodes=episodes, eval_seed=EVAL_SEED)['mean_returns']
-    b = Scripted().test_in_train(build(True), episodes=episodes, eval_seed=EVAL_SEED)['mean_returns']
-    return float(a), float(b)
-
-
 def summary(out, baselines):
     r, h = baselines["random_mean"], baselines["heuristic_mean"]
     norm = lambda v: (v - r) / (h - r)
-    print(f"\n[multisite-protocol] anchors random={r:.2f} heuristic={h:.2f} (gap {h-r:.2f}); "
-          f"paper (old protocol): cgae_cflow 0.673 [0], ccf 0.511 [3], mc_q 0.030 [17], PPO 0.161 [14]",
+    print(f"\n[multisite-protocol] anchors random={r:.2f} heuristic={h:.2f} (gap {h-r:.2f})",
           flush=True)
     print(f"  {'method':<11} {'n':>3} {'final':>7} {'(SD)':>7} {'best':>7} {'collapsed':>9} {'ent':>6}", flush=True)
     rows = {}
@@ -231,7 +155,7 @@ def summary(out, baselines):
 
 
 def main(workers):
-    cfg = stoch_config()
+    cfg = Hyper()
     OUTDIR.mkdir(parents=True, exist_ok=True)
     (OUTDIR / "cells").mkdir(exist_ok=True)
     logdir = str(OUTDIR / "train")
@@ -241,25 +165,13 @@ def main(workers):
         shutil.copy(SRC_BASELINES, bp)
     baselines = json.loads(bp.read_text())
 
-    pc = OUTDIR / "crn_precheck.json"
-    if not pc.exists():
-        a, b = crn_precheck()
-        verdict = "MATCH" if abs(a - b) < 1e-9 else "MISMATCH"
-        print(f"[multisite-protocol] CRN pre-check: non-causal {a:.4f} | causal {b:.4f} -> {verdict}", flush=True)
-        pc.write_text(json.dumps({"non_causal": a, "causal": b, "verdict": verdict}))
-        if verdict != "MATCH":
-            print("[multisite-protocol] !!! scenario alignment between arms is broken; aborting", flush=True)
-            return
     print(f"[multisite-protocol] anchors: random={baselines['random_mean']:.2f} "
           f"heuristic={baselines['heuristic_mean']:.2f}", flush=True)
 
-    order = [m for m in TIER1 if m in METHODS] + [m for m in TIER2 if m in METHODS] \
-        + [m for m in METHODS if m not in TIER1 + TIER2]
-    t1 = [m for m in order if m in TIER1]; t2 = [m for m in order if m not in TIER1]
-    # seeds outer, arms inner within a tier: partial results stay balanced across arms
-    pending = [(m, s) for tier in (t1, t2) for s in range(SEEDS) for m in tier
+    # seeds outer, arms inner: partial results stay balanced across arms
+    pending = [(m, s) for s in range(SEEDS) for m in METHODS
                if not (OUTDIR / "cells" / f"{m}__s{s}.json").exists()]
-    tpw = THREADS if THREADS is not None else _threads_per_worker(workers)
+    tpw = THREADS if THREADS is not None else threads_per_worker(workers)
     print(f"[multisite-protocol] {len(pending)} cells ({len(METHODS)} arms x {SEEDS} seeds, "
           f"{EPOCHS} epochs x {EPISODES} episodes, eval every {TEST_FREQ} on {TEST_EPISODES}), "
           f"{workers} workers x {tpw} threads, eval_seed={EVAL_SEED}, net={NET}"

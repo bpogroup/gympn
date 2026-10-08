@@ -18,7 +18,7 @@ nav:
       - Agents Guide: agents_guide.md
       - Advanced Features: advanced_features.md
   - Advanced Topics:
-      - Postponement and Causal RL: postpone_causal.md
+      - Postponement and Net-Factored Credit: postponement.md
       - Extending GymPN: extending_gympn.md
       - Troubleshooting: troubleshooting.md
   - Reference:

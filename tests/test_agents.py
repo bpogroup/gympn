@@ -47,18 +47,5 @@ class TestRLAgent(unittest.TestCase):
         action = self.agent.act(obs)
         self.assertEqual(action, 0)
 
-    def test_critic_lineage_aux_head(self):
-        # LVA: aux_head=True adds a second scalar head on the shared encoder;
-        # forward() stays single-output, forward_with_aux() returns both.
-        obs = self.problem.get_graph_observation()
-        critic = HeteroCritic(metadata=self.problem.make_metadata(), aux_head=True)
-        v, aux = critic.forward_with_aux(obs)
-        self.assertEqual(v.shape[-1], 1)
-        self.assertEqual(aux.shape[-1], 1)
-        self.assertEqual(critic(obs).shape[-1], 1)
-        # A default (single-head) critic must refuse forward_with_aux loudly.
-        with self.assertRaises(RuntimeError):
-            self.agent.value_model.forward_with_aux(obs)
-
 if __name__ == '__main__':
     unittest.main()
