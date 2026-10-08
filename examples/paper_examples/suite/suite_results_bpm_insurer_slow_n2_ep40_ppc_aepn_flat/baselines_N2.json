@@ -1,0 +1,8 @@
+{
+  "random_mean": 66.8,
+  "heuristic_mean": 109.225,
+  "random_std": 4.7864391775097275,
+  "heuristic_std": 3.6019959744563845,
+  "episodes": 40,
+  "anchor": "waiting heuristic (component postpone)"
+}

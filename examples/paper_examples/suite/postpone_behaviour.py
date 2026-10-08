@@ -1,5 +1,6 @@
 """Where do the trained policies wait? Behaviour check for the postponement
-experiment (insurer_slow, 1 region; run_postpone_queue.sh).
+experiment (insurer_slow; run_postpone_queue.sh at 1 region,
+run_postpone2_queue.sh at 2 regions).
 
 Each run's best checkpoint is played greedily on 20 scenarios (seeds 777000+i)
 in the environment it was trained in (no / global / component postpone). Per
@@ -8,7 +9,7 @@ matched and mismatched assignments, plus "wasted" waits (the process waited
 although a matched underwriting assignment or any claims/complaints assignment
 was available). The waiting heuristic (the anchor) is reported for reference.
 
-Run: python postpone_behaviour.py [workers=5]
+Run: python postpone_behaviour.py [regions=1] [workers=5]
 """
 import glob
 import json
@@ -23,6 +24,7 @@ import numpy as np  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LENGTH, EPISODES, SEED0 = 20, 20, 777_000
+REGIONS = int(next((a.split("=")[1] for a in sys.argv[1:] if a.startswith("regions=")), 1))
 ARMS = {  # (label, results dir suffix, method, postpone mode)
     "PPO / none": ("_nopp_aepn_flat", "ppo", None),
     "NF-GAE / none": ("_nopp_aepn_flat", "nfgae", None),
@@ -41,7 +43,7 @@ def episode(seed, mode, choose):
     from gympn.environment import AEPN_Env
     from insurer_env import INSURER_BUILDERS, _is_uw_mismatch, _is_postpone
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
-    pn = INSURER_BUILDERS["insurer_slow"](1, allow_postpone=mode is not None)
+    pn = INSURER_BUILDERS["insurer_slow"](REGIONS, allow_postpone=mode is not None)
     pn.length = LENGTH
     if mode == "component":
         pn.postpone_scope = 'component'
@@ -99,7 +101,7 @@ def run_arm(label):
         eps = [episode(SEED0 + i, "component", choose) for i in range(EPISODES)]
         return label, [eps]
     suffix, method, mode = ARMS[label]
-    d = os.path.join(HERE, f"suite_results_bpm_insurer_slow_n1_ep40{suffix}", "train")
+    d = os.path.join(HERE, f"suite_results_bpm_insurer_slow_n{REGIONS}_ep40{suffix}", "train")
     runs = []
     for path in sorted(glob.glob(os.path.join(d, f"{method}__s*", "best_policy.pth"))):
         ch = policy_chooser(path)
@@ -128,7 +130,8 @@ def main():
         results = pool.map(run_arm, labels)
     print("per-episode means over runs (each run = one seed's best checkpoint, 20 scenarios):")
     out = report(results)
-    json.dump(out, open(os.path.join(HERE, "postpone_behaviour_results.json"), "w"), indent=1)
+    json.dump(out, open(os.path.join(HERE, "postpone_behaviour_results.json" if REGIONS == 1
+                                else f"postpone_behaviour_results_n{REGIONS}.json"), "w"), indent=1)
 
 
 if __name__ == "__main__":
