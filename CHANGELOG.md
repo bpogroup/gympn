@@ -30,3 +30,9 @@ First release on PyPI.
   tests without any of them.
 - Documentation site at <https://bpogroup.github.io/gympn> with an API
   reference generated from the docstrings.
+
+### Notes
+
+- Requires `simpn` 1.3 to 1.6. Later simpn releases depend on PyQt6, which
+  cannot be imported on a headless Linux machine, and 1.8+ cannot deep-copy a
+  problem.

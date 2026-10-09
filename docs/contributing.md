@@ -54,8 +54,11 @@ imports those lazily, inside the function that needs them, with an error or
 warning that names the extra to install. Keep it that way: a new module-level
 import of an optional package fails `test_imports_are_declared`.
 
-`simpn` is pinned below 1.8: from 1.8 on, a problem cannot be deep-copied,
-which gympn relies on.
+`simpn` is pinned below 1.7. From 1.7 on, simpn depends on PyQt6 and imports
+it from its simulator module, so `import gympn` fails on a headless Linux
+machine without the system OpenGL libraries, and gympn's `Visualisation`
+extends the pygame-based API of the 1.3-1.6 releases. From 1.8 on, a problem
+cannot be deep-copied either, which gympn relies on.
 
 ## Documentation
 
