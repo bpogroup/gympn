@@ -100,22 +100,12 @@ With a single component the two scopes are identical.
 
 ## Net-Factored Credit (NF-GAE)
 
-When the net has several components, the reward of one component cannot be
-influenced by the decisions of another. Net-factored GAE uses this: each
-decision is credited only with the rewards of its own component, on that
-component's own decision clock, and the critic estimates the value of the
-deciding component. With a single component it is exactly PPO with SMDP-GAE.
+The same net components drive gympn's credit assignment method. With
+`nfgae=True` each decision is credited only with the rewards of its own
+component, on that component's own decision clock, and the critic estimates
+the value of the deciding component. With a single component it is exactly
+PPO with SMDP-GAE.
 
-```python
-agency.training_run(length=20, args_dict={
-    "algorithm": "ppo-clip",
-    "smdp_discount": True,   # discount the continuation by exp(-beta * tau)
-    "beta": 0.5,
-    "nfgae": True,
-})
-```
-
-NF-GAE needs `allow_postpone=False` or `postpone_scope='component'`: a global
-postpone couples the components. With `local_obs=True` (component turns,
-work-conserving nets only) each decision observes and encodes only its own
-component.
+NF-GAE requires `allow_postpone=False` or `postpone_scope='component'`: a
+global postpone couples the components. The method, its conditions and a
+worked example are on the [Net-Factored Credit (NF-GAE)](./nfgae.md) page.

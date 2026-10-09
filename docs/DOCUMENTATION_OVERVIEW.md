@@ -45,6 +45,13 @@ These documents explain key concepts and features:
 
 ### Specialized Topics
 
+**[Net-Factored Credit (NF-GAE)](./nfgae.md)** ⭐ Main method
+- Why whole-net rewards are noise for decisions in independent parts
+- Net components and how gympn derives them from the net
+- The per-component SMDP-GAE estimator and its conditions
+- A worked two-component example
+- ~30 minutes read
+
 **[Postponement and Net-Factored Credit](./postponement.md)** ⭐ Most Advanced
 - Postponement feature: defer decisions strategically
 - Net-factored credit (NF-GAE) for nets with independent parts

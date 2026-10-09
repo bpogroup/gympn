@@ -50,6 +50,7 @@ pip install -e ".[dev]"
 
 ### Core Concepts
 - **[Algorithms](./algorithms.md)** - Overview of PPO-Clip, PPO-Penalty and PG algorithms with hyperparameter tuning
+- **[Net-Factored Credit (NF-GAE)](./nfgae.md)** - Per-component credit assignment for nets with independent parts: what it computes, when it applies, how to use it
 - **[Agents Guide](./agents_guide.md)** - Detailed guide on PPOAgent and custom solvers
 - **[Advanced Features](./advanced_features.md)** - GNNs, parallelization
 

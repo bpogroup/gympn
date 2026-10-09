@@ -20,6 +20,7 @@ nav:
       - Complete Example: complete_example.md
   - Core Concepts:
       - Algorithms: algorithms.md
+      - Net-Factored Credit (NF-GAE): nfgae.md
       - Agents Guide: agents_guide.md
       - Advanced Features: advanced_features.md
   - Advanced Topics:

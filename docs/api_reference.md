@@ -416,6 +416,7 @@ args = parser.parse_args()
 | `--nfgae` | bool | False | Net-factored GAE: per-component credit and critic |
 | `--smdp_discount` | bool | False | Discount by exp(-beta * tau) instead of a constant γ |
 | `--beta` | float | 0.0 | SMDP discount rate β |
+| `--local_obs` | bool | False | NF-GAE only: component turns, each decision observes only its own component |
 
 ### Policy Network Arguments
 

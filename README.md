@@ -88,8 +88,9 @@ The [examples directory](https://github.com/bpogroup/gympn/tree/main/examples) c
 2. **Want a full example?** → See the [Complete Example](https://bpogroup.github.io/gympn/complete_example/)
 3. **Need quick answers?** → Use the [Documentation Overview](https://bpogroup.github.io/gympn/DOCUMENTATION_OVERVIEW/)
 4. **Want to understand algorithms?** → Read the [Algorithms Guide](https://bpogroup.github.io/gympn/algorithms/)
-5. **Working with concurrent decisions?** → See [Postponement and Net-Factored Credit](https://bpogroup.github.io/gympn/postponement/)
-6. **Looking up a class?** → Browse the [API Reference](https://bpogroup.github.io/gympn/reference/problem/)
+5. **Net with several independent parts?** → Read [Net-Factored Credit (NF-GAE)](https://bpogroup.github.io/gympn/nfgae/)
+6. **Agent needs to wait?** → See [Postponement](https://bpogroup.github.io/gympn/postponement/)
+7. **Looking up a class?** → Browse the [API Reference](https://bpogroup.github.io/gympn/reference/problem/)
 
 Other guides: [Agents Guide](https://bpogroup.github.io/gympn/agents_guide/), [Advanced Features](https://bpogroup.github.io/gympn/advanced_features/), [Extending GymPN](https://bpogroup.github.io/gympn/extending_gympn/), [Benchmarks](https://bpogroup.github.io/gympn/benchmarks/), [Troubleshooting](https://bpogroup.github.io/gympn/troubleshooting/).
 

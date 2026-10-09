@@ -74,6 +74,22 @@ config = {
 
 **Limitations:** Less stable than PPO, prone to high variance
 
+### 3. Advantage estimation: GAE, SMDP-GAE and NF-GAE
+
+All three algorithms above train the policy on advantages. gympn offers three
+ways to compute them, selected by training arguments rather than by the
+`algorithm` name:
+
+| Estimator | Arguments | When |
+|-----------|-----------|------|
+| GAE | default (`gam`, `lam`) | Constant discount per decision, as in standard PPO |
+| SMDP-GAE | `smdp_discount=True`, `beta` | Decisions are unevenly spaced in simulator time; the continuation is discounted by `exp(-beta * tau)` for the elapsed time `tau` |
+| NF-GAE | `nfgae=True` (plus the SMDP arguments) | The net has several independent components; each decision is credited only with its own component's rewards |
+
+NF-GAE is gympn's main contribution to credit assignment: it is exact PPO on a
+single-component net and provably lower-variance on nets with several. See
+[Net-Factored Credit (NF-GAE)](./nfgae.md).
+
 ## Algorithm Comparison
 
 | Aspect | PPO-Clip | PPO-Penalty | PG |
