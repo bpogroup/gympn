@@ -17,14 +17,11 @@ except Exception:  # pragma: no cover
     SimVarTime = ()
 
 from gympn.environment import AEPN_Env
-from gympn.solvers import BaseSolver, GymSolver
+from gympn.solvers import GymSolver
 from gympn.train import make_agent, make_parser, make_logdir, launch_tensorboard
-from gympn.plotter import GraphPlotter
-from gympn.visualisation import Visualisation
-from gympn.wandb_integration import init_wandb
 
 
-from typing import List, Tuple
+from typing import List
 
 def _is_real_binding_tuple(b) -> bool:
     return (
@@ -110,6 +107,11 @@ class GymProblem(SimProblem):
         self.solver = solver
         self.plot_observations = plot_observations #extra debugging
         if self.plot_observations:
+            try:
+                from gympn.plotter import GraphPlotter
+            except ImportError as e:
+                raise ImportError("plot_observations needs matplotlib and networkx; "
+                                  "install them with `pip install gympn[viz]`") from e
             self.plotter = GraphPlotter()
         else:
             self.plotter = None
@@ -1838,7 +1840,9 @@ class GymProblem(SimProblem):
         - 'wandb_mode' (str): W&B mode: 'online' (cloud), 'offline' (local), or 'disabled'. Default: `'offline'`.
         """
         self.length = length
-        args = make_parser().parse_args()
+        # Defaults only: settings come from args_dict, never from the command
+        # line of whatever program calls this (a notebook, pytest, a script).
+        args = make_parser().parse_args([])
 
         if args_dict is not None:
             try:
@@ -1936,7 +1940,7 @@ class GymProblem(SimProblem):
                 )
                 logger.info("Weights & Biases logger initialized")
             except ImportError:
-                logger.warning("wandb not installed, skipping W&B logging")
+                logger.warning("wandb is not installed, skipping W&B logging; install it with `pip install gympn[wandb]`")
             except Exception as e:
                 logger.warning(f"Could not initialize W&B: {e}")
 

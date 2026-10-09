@@ -3,7 +3,12 @@ import matplotlib.pyplot as plt
 import matplotlib
 import matplotlib.colors as mcolors
 from torch_geometric.data import HeteroData
-matplotlib.use("TkAgg")
+# An interactive backend is needed to show the plots; keep the default one
+# (e.g. Agg on a headless machine) when Tk is not available.
+try:
+    matplotlib.use("TkAgg")
+except ImportError:
+    pass
 
 class GraphPlotter:
     """

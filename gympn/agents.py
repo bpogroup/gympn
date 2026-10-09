@@ -8,14 +8,23 @@ import numpy as np
 import os
 import random
 import torch
-from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import CosineAnnealingLR
-import multiprocessing as mp
-from typing import Dict
 
 from gympn.data import TrajectoryBuffer, print_status_bar
 from gympn.flat_graph import is_flat
-from gympn.logging_utils import Logger, TrainingMetrics, TestMetrics, get_logger
+from gympn.logging_utils import TrainingMetrics, get_logger
+
+
+def _make_summary_writer(logdir):
+    """TensorBoard writer for logdir, or None if tensorboard is not installed."""
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+    except ImportError:
+        import warnings
+        warnings.warn("tensorboard is not installed, so training curves are not "
+                      "logged; install it with `pip install gympn[tensorboard]`")
+        return None
+    return SummaryWriter(log_dir=logdir)
 
 
 # torch.autograd.set_detect_anomaly(True)
@@ -261,7 +270,7 @@ class Agent:
             from gympn.seeding import seed_network_init
             seed_network_init(_agent_seed)
 
-        tb_writer = None if logdir is None else SummaryWriter(log_dir=logdir)
+        tb_writer = None if logdir is None else _make_summary_writer(logdir)
 
         # Initialize learning rate schedulers if enabled
         # Cosine annealing helps convergence by gradually reducing LR over training
@@ -702,7 +711,7 @@ class Agent:
             # Parallel episode collection using dill for serialization
             # Dill can handle lambda functions and complex objects like SimVar
             try:
-                import dill
+                import dill  # noqa: F401  (imported for its side effect: it patches pickle)
                 import multiprocessing
 
                 # Create environment copies for each worker

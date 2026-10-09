@@ -1,47 +1,11 @@
 #!/usr/bin/env python
 """Entry point for all training runs."""
 
-# Python 3.13+ compatibility: imghdr was removed from stdlib
-import sys
-if sys.version_info >= (3, 13):
-    try:
-        import imghdr
-        # Check if imghdr has the 'tests' attribute (for TensorBoard)
-        if not hasattr(imghdr, 'tests'):
-            # Need to patch it
-            raise AttributeError("imghdr missing 'tests' attribute")
-    except (ModuleNotFoundError, AttributeError):
-        # Inject imghdr compatibility module
-        import types
-        try:
-            from PIL import Image
-            def what(file, h=None):
-                """Identify image file type using PIL."""
-                if h is None and isinstance(file, str):
-                    try:
-                        return Image.open(file).format.lower() if Image.open(file).format else None
-                    except:
-                        return None
-                elif h is not None:
-                    try:
-                        from io import BytesIO
-                        return Image.open(BytesIO(h)).format.lower() if Image.open(BytesIO(h)).format else None
-                    except:
-                        return None
-                return None
-        except ImportError:
-            def what(file, h=None):
-                return None
-
-        imghdr_module = types.ModuleType('imghdr')
-        imghdr_module.what = what
-        imghdr_module.tests = []  # TensorBoard appends to this list
-        sys.modules['imghdr'] = imghdr_module
-
 import argparse
 import datetime
 import json
 import subprocess
+import sys
 import webbrowser
 import time
 import os
@@ -555,21 +519,15 @@ def launch_tensorboard(logdir, port=6006, wait_time=5, reload_interval=30):
         return None
 
     try:
-        import requests
+        import urllib.request
+        import urllib.error
 
         # Start TensorBoard as a subprocess
         print(f"ℹ Starting TensorBoard on port {port}...")
 
-        # Use wrapper script for Python 3.13+ imghdr compatibility
-        wrapper_script = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            'tensorboard_wrapper.py'
-        )
-
         tensorboard_process = subprocess.Popen(
             [
-                sys.executable,
-                wrapper_script,
+                sys.executable, "-m", "tensorboard.main",
                 "--logdir", logdir,
                 "--port", str(port),
                 "--reload_interval", str(reload_interval),
@@ -596,11 +554,11 @@ def launch_tensorboard(logdir, port=6006, wait_time=5, reload_interval=30):
         max_retries = 5
         for attempt in range(max_retries):
             try:
-                response = requests.get(f"http://localhost:{port}", timeout=2)
-                if response.status_code == 200:
+                response = urllib.request.urlopen(f"http://localhost:{port}", timeout=2)
+                if response.status == 200:
                     print(f"✓ TensorBoard is running on http://localhost:{port}")
                     break
-            except requests.exceptions.RequestException:
+            except (urllib.error.URLError, OSError):
                 if attempt < max_retries - 1:
                     print(f"ℹ Checking TensorBoard... (attempt {attempt + 1}/{max_retries})")
                     time.sleep(1)

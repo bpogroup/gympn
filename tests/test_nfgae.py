@@ -14,7 +14,7 @@ import torch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..",
                                 "examples", "paper_examples", "suite"))
 
-from gympn.data import TrajectoryBuffer, smdp_gae  # noqa: E402
+from gympn.data import TrajectoryBuffer  # noqa: E402
 from gympn.environment import AEPN_Env  # noqa: E402
 from gympn.networks import HeteroActor, HeteroCritic  # noqa: E402
 from bpm_envs import make_next_activity, make_next_activity_split  # noqa: E402

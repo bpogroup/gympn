@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gympn"
+dynamic = ["version"]
+description = "Reinforcement learning on Action-Evolution Petri Nets: model business processes and resource allocation problems as Petri nets and train graph-based PPO agents on them."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Riccardo Lo Bianco", email = "r.lo.bianco@tue.nl" }]
+keywords = [
+    "reinforcement learning", "petri nets", "business process management",
+    "resource allocation", "graph neural networks", "gymnasium",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy>=1.24",
+    "torch>=2.2",
+    "torch-geometric>=2.5",
+    "gymnasium>=1.0",
+    # simpn 1.8+ cannot deep-copy a problem (StateAccessor.__getattr__ recurses
+    # before `problem` is set), and gympn deep-copies the net; 1.3.6-1.7.11 work.
+    "simpn>=1.3,<1.8",
+    "dill>=0.3.8",
+]
+
+[project.optional-dependencies]
+tensorboard = ["tensorboard>=2.16"]
+wandb = ["wandb>=0.17"]
+viz = ["matplotlib>=3.7", "networkx>=3.0"]
+all = ["gympn[tensorboard,wandb,viz]"]
+docs = ["mkdocs>=1.6,<2", "mkdocs-material>=9.5", "mkdocstrings[python]>=0.26"]
+dev = ["gympn[all,docs]", "pytest>=7", "ruff>=0.6", "build>=1.2", "twine>=5"]
+
+[project.urls]
+Homepage = "https://github.com/bpogroup/gympn"
+Documentation = "https://bpogroup.github.io/gympn"
+Source = "https://github.com/bpogroup/gympn"
+Issues = "https://github.com/bpogroup/gympn/issues"
+
+[tool.setuptools.dynamic]
+version = { attr = "gympn.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["gympn*"]
+
+[tool.setuptools.package-data]
+gympn = ["assets/*.png", "py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: builds the wheel or installs into a fresh environment"]
+
+[tool.ruff]
+line-length = 120
+extend-exclude = ["research"]
+
+[tool.ruff.lint]
+# Errors and likely bugs only; style is not enforced on the existing code.
+select = ["E9", "F63", "F7", "F82", "F401", "F811"]

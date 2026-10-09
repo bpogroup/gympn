@@ -4,7 +4,7 @@ Provides clean, organized output for training progress and metrics.
 """
 
 import sys
-from typing import Optional, Dict, Any
+from typing import Optional
 from dataclasses import dataclass
 
 

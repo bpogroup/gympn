@@ -20,11 +20,11 @@ The goal is to optimize the processing of these applications to minimize the tot
 
 We propose a BPMN model of the process, shown in the figure below.
 
-![BPMN Model](images/bpmn_gympn_complete_example.png)
+<!-- TODO: figure missing from the repository: ![BPMN Model](images/bpmn_gympn_complete_example.png) -->
 
 Below, we include the A-E PN model of the process, including decision points and the problem objective in the form of a reward function. Guard functions are omitted when not necessary for clarity. Similarly, transitions whose firing generates a reward of zero are not annotated. The token's colours are also omitted since they are not relevant for this example.
 
-![AEPN Model](images/aepn_gympn_complete_example.png)
+<!-- TODO: figure missing from the repository: ![AEPN Model](images/aepn_gympn_complete_example.png) -->
 
 ## GymPN Implementation
 

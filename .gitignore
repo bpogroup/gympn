@@ -18,6 +18,7 @@ __pycache__/
 # fully reproducible from config.py + the cell id, so they stay out wholesale.
 *.pth
 events.out.tfevents.*
+research/suite/**/train/
 examples/paper_examples/suite/**/train/
 
 # Diagnostic record dumps (regenerable by re-running the _diag_* script)
@@ -37,3 +38,9 @@ examples/paper_examples/suite/**/train/
 
 # Raw event logs: large, public (4TU.ResearchData), not versioned here.
 *.xes
+
+# Build outputs and local training data
+/build/
+/dist/
+/site/
+/data/
