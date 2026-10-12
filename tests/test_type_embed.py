@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from torch_geometric.data import Batch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..",
-                                "examples", "paper_examples", "suite"))
+                                "examples", "paper_examples", "suite", "envs"))
 
 from gympn.networks import AEPNStack, HeteroActor, HeteroCritic, HGTStack, TypeEmbedStack  # noqa: E402
 from bpm_envs import make_next_activity  # noqa: E402

@@ -1,0 +1,45 @@
+\section{Experimental Setup}\label{sec:setup}
+
+\subsection{Benchmarks}
+\paragraph{The insurer.} Each region runs three processes, each with its own team.
+Cases arrive at one per time unit per process; a good completion earns a reward of~1,
+so the organisation's indicator is the total number of good completions over a horizon
+of 20 time units.
+\begin{itemize}
+  \item \emph{Claims} (next-activity selection): a claim has a visible risk level and a
+    hidden outcome; it can be approved (fast, pays only if the outcome is good) or
+    investigated (slow, always pays). Investigation is faster for the expert clerk than
+    for the normal clerk.
+  \item \emph{Underwriting} (resource assignment): applications are standard or complex;
+    each of the two underwriters is fast on one type and slow on the other.
+  \item \emph{Complaints} (rework and quality gate): a complaint can be resolved quickly
+    or checked; a wrongly closed complaint comes back after a delay and earns nothing the
+    first time.
+\end{itemize}
+Variants: \emph{regions} (1 or 2 copies of the three processes, so $K=3$ or $6$);
+\emph{shared clerks} (claims and complaints share one clerk pool with the same headcount,
+so $K=2$ per region); \emph{slow mismatch} (a mismatched underwriter takes 7 instead of 3
+time units, the slow-server regime in which leaving an underwriter idle pays).
+\todo{parameter table in the appendix or supplement}
+
+\paragraph{Multi-site routing.} Four identical sites, each with its own arrivals and two
+specialists; a symmetric structure with $K=4$.
+
+\subsection{Methods and protocol}
+We compare PPO, \nfgae{} and, as a baseline that also exploits independence but by hand,
+separate per-process learners (one PPO agent per process, each trained on its own
+process's reward). Postponement is absent, global or component-scoped. All methods share
+the policy network, hyperparameters and simulator. \todo{hyperparameter table}
+
+Each run trains for 40 epochs of 8 episodes (20 on multi-site). Every 3 epochs (2 on
+multi-site) the greedy policy is evaluated on 20 episodes with common random numbers,
+the same scenarios for every method and seed. Returns are normalised so that 0 is a
+uniformly random policy and 1 the best heuristic: a myopic rate rule, and in the
+slow-mismatch variant a waiting rule that never makes a mismatched underwriting
+assignment. We report final and whole-run mean normalised return, epochs to reach 0.9,
+and paired tests over seeds (paired $t$-test and Wilcoxon signed-rank), with Holm
+correction over the headline comparisons. The headline cells (the insurer with one and
+two regions, and every arm of the slow-mismatch variant) use 20 seeds; the shared-clerks
+variant and the per-process learners 10; the budget and tuning variants of
+Sect.~\ref{sec:results} 5. Seeds are paired across methods: seed $i$ of every method
+starts from the same seed and is evaluated on the same scenarios.

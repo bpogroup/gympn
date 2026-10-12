@@ -12,7 +12,7 @@ import pytest
 import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..",
-                                "examples", "paper_examples", "suite"))
+                                "examples", "paper_examples", "suite", "envs"))
 
 from gympn.data import TrajectoryBuffer  # noqa: E402
 from gympn.environment import AEPN_Env  # noqa: E402

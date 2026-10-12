@@ -1,0 +1,41 @@
+\section{Background}\label{sec:background}
+
+\subsection{Action-Evolution Petri Nets}
+An \aepn~\cite{aepn2023} is a timed, coloured Petri net whose transitions are split
+into \emph{actions}, fired by a decision maker, and \emph{events}, fired by the
+environment (arrivals, completions, outcomes). Places hold tokens with attributes and
+timestamps; a token can be consumed only once its timestamp has been reached. A
+\emph{binding} of an action is an assignment of available tokens to its input arcs; at
+every decision epoch the decision maker chooses one enabled binding. GymPN~\cite{gympn2025}
+exposes an \aepn{} as an RL environment: the observation is a graph whose nodes are
+tokens and transition bindings and whose edges follow the arcs of the
+net~\cite{aepn_repr2025}, and the action space is the set of enabled bindings.
+Fig.~\ref{fig:insurer} shows the \aepn{} of the insurer used in our experiments.
+
+\begin{figure}[t]
+\centering
+\resizebox{\textwidth}{!}{\input{figures/fig_insurer}}
+\caption{The insurer, one region. Each shaded box is one component of the
+independence certificate: a process with its own team. Circles are places, filled
+bars are actions chosen by the agent, open bars are events (arrivals and
+completions). In the shared-clerks variant, claims and complaints draw from a single
+clerk place, which merges them into one component.}\label{fig:insurer}
+\end{figure}
+
+\paragraph{Postponement.} GymPN optionally adds a \emph{postpone} pseudo-action: instead
+of firing a binding, the decision maker lets time advance to the next event. This makes
+non-work-conserving policies expressible, at the price of freezing every decision in
+the net until the next event.
+
+\subsection{Policy optimisation on an \aepn}
+Decisions happen at irregular times, so the decision process is a semi-Markov
+decision process (SMDP). Let $k=0,1,\dots$ index decision epochs at clock times
+$\tau_k$, let $r_k$ be the reward of all events firing in $[\tau_k,\tau_{k+1})$, and
+let $\Gamma_k = e^{-\beta(\tau_{k+1}-\tau_k)}$ be the continuation discount. With a
+critic $V$, GAE in SMDP form computes
+\begin{equation}
+  \delta_k = r_k + \Gamma_k V(s_{k+1}) - V(s_k), \qquad
+  \hat A_k = \sum_{l\ge 0} \Big(\lambda^l \prod_{j<l} \Gamma_{k+j}\Big)\, \delta_{k+l},
+\end{equation}
+and PPO~\cite{ppo2017} maximises the clipped surrogate objective with these advantages.
+Every decision is credited with $r_k$, the reward of the \emph{whole} net.

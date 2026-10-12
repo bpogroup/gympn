@@ -1,0 +1,47 @@
+\documentclass[runningheads]{llncs}
+
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{petri,fit,positioning,arrows.meta,backgrounds}
+\usepackage[hidelinks]{hyperref}
+
+% Drafting aids: remove before submission.
+\newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
+\newcommand{\pending}[1]{\textcolor{blue}{[PENDING: #1]}}
+
+% Notation
+\newcommand{\nfgae}{NF-GAE}
+\newcommand{\aepn}{A-E~PN}
+\newcommand{\comp}{\mathcal{C}}
+
+\begin{document}
+
+\title{Learning When to Wait: Independence-Aware Reinforcement Learning for
+Concurrent Business Processes}
+\titlerunning{Independence-Aware RL for Concurrent Business Processes}
+
+\author{Riccardo Lo Bianco\inst{1} \and \todo{co-authors}}
+\authorrunning{R. Lo Bianco et al.}
+\institute{Eindhoven University of Technology, Eindhoven, The Netherlands\\
+\email{r.lo.bianco@tue.nl}}
+
+\maketitle
+
+\input{sections/00_abstract}
+\input{sections/01_introduction}
+\input{sections/02_background}
+\input{sections/03_method}
+\input{sections/04_setup}
+\input{sections/05_results}
+\input{sections/06_related}
+\input{sections/07_discussion}
+\input{sections/08_conclusion}
+
+\bibliographystyle{splncs04}
+\bibliography{refs}
+
+\end{document}
