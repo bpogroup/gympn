@@ -45,3 +45,7 @@ examples/paper_examples/suite/**/train/
 /dist/
 /site/
 /data/
+
+# The BPM manuscript is an Overleaf clone (paper/bpm/); it is versioned on
+# Overleaf, not here. The figure script and notes next to it stay tracked.
+examples/paper_examples/suite/paper/bpm/

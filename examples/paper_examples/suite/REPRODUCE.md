@@ -11,7 +11,7 @@ tuned separately.
 | `envs/` | A-E PN environment builders and heuristics: `insurer_env.py` (claims, underwriting, complaints; `insurer`, `insurer_shared`, `insurer_slow`, and the three single-process variants), `bpm_envs.py` (building blocks and the BPM nets), `multisite_env.py` (multi-site routing), `common.py` (shared hyperparameters and metrics). |
 | `scripts/` | Runners and analyses: `run_bpm.py`, `run_multisite_protocol.py`, `postpone_behaviour.py`, `bpi2012_parse.py`. |
 | `results/` | One folder per experiment (`<name>/cells/*.json` holds one evaluation curve per seed, `summary.json` the aggregate, `baselines*.json` the random and heuristic anchors). `results/ablations/` holds the PPO-variant runs. `train/` subfolders hold the trained policies and are not versioned. |
-| `paper/` | `bpm/` is the Overleaf-synced manuscript (a git submodule), `bpm_aux/` the figure script and local notes, `NFGAE_THEORY.md` the theory note, `BPM_OUTLINE.md` the experiment log. |
+| `paper/` | `bpm/` is a local clone of the Overleaf manuscript (not tracked in this repository), `bpm_aux/` the figure script and local notes, `NFGAE_THEORY.md` the theory note, `BPM_OUTLINE.md` the experiment log. |
 
 Runners are resumable: a cell that already exists is skipped, so adding seeds means
 re-running the same command with a larger `seeds=` value. The trailing integer is the
