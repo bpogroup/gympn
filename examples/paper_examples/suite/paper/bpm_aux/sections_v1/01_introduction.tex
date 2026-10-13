@@ -1,0 +1,71 @@
+\section{Introduction}\label{sec:intro}
+
+Prescriptive process management uses data and models to recommend or take decisions
+in running business processes, such as which resource handles which case, which
+activity to perform next, or whether a case needs an extra check. Reinforcement
+learning (RL) is a natural fit when such decisions interact over time and their
+consequences are delayed, and a growing body of work trains RL policies in simulation
+models of business processes~\cite{aepn2023,gympn2025}. \todo{add RL-for-BPM
+references (resource allocation, next-best-action, prescriptive monitoring)}
+
+Real organisations, however, do not run one process. An insurer handles claims,
+underwriting and complaints; a hospital runs an emergency department, outpatient
+clinics and a pharmacy; a shared-service centre runs payables, receivables and payroll.
+These processes typically have dedicated teams and run side by side, while
+performance is measured on organisation-level indicators such as total throughput or
+profit. Treating such an organisation as one monolithic RL problem has three
+consequences:
+\begin{enumerate}
+  \item \emph{Diluted credit.} Each decision is credited with the reward noise of
+    every process, including processes it cannot influence. No critic can remove this
+    noise: it is the other processes' future randomness.
+  \item \emph{All-or-nothing waiting.} Good resource allocation sometimes requires
+    \emph{not} assigning available work, for example keeping a slow resource idle
+    rather than giving it a job a faster resource will soon handle~\cite{linkumar1984}.
+    In a monolithic model the only way to wait is to freeze the whole organisation.
+  \item \emph{Cost that grows with size.} Every decision reasons over the whole
+    organisation, so the cost of a decision grows with the organisation even when
+    only one process is involved.
+\end{enumerate}
+
+Our starting observation is that the process model already contains the information
+needed to avoid all three. In an Action-Evolution Petri Net (\aepn)~\cite{aepn2023},
+two parts of an organisation can influence each other only through shared places,
+such as a queue or a resource pool. The connected components of the net therefore
+\emph{certify} which processes are independent. We use this independence certificate
+consistently at three points of the RL pipeline:
+\begin{itemize}
+  \item \textbf{Credit}: Net-Factored GAE (\nfgae) credits each decision only with the
+    rewards of its own component, on that component's own decision clock.
+  \item \textbf{Decision timing}: component-scoped postponement lets one process wait
+    for a better resource while the others keep working.
+  \item \textbf{Observation}: component turns let each decision observe and encode only
+    its own component.
+\end{itemize}
+Each use is exact where the model certifies independence and reduces to standard
+proximal policy optimisation (PPO)~\cite{ppo2017} with generalised advantage
+estimation (GAE)~\cite{gae2016} when the net has a single component.
+
+\paragraph{Contributions.}
+\begin{enumerate}
+  \item The independence certificate for \aepn{}s and its three uses, with soundness
+    conditions, unbiasedness, variance dominance over PPO and exact equivalence to PPO
+    on a single process (Sect.~\ref{sec:method}).
+  \item Component-scoped postponement, which lets an agent learn policies that
+    deliberately leave a resource idle, per process and without coupling the processes; we show it is learnable only
+    together with factored credit.
+  \item An organisation-level benchmark: an insurer with a claims process
+    (next-activity selection), an underwriting process (resource assignment) and a
+    complaints process (rework and quality gate), with regions, a shared-team coupling
+    variant and a variant in which waiting pays (Sect.~\ref{sec:setup}).
+  \item An empirical study showing that standard PPO degrades as concurrency grows
+    while the independence-aware pipeline does not, that it learns to wait where
+    waiting pays and nowhere else, and that its cost grows linearly with the number of
+    processes (Sect.~\ref{sec:results}).
+\end{enumerate}
+In short: on an insurer with six concurrent processes, joint PPO reaches 0.75 of the
+heuristic's return after 40 epochs and factored credit 1.07, ahead on all 20 seeds and
+at the heuristic's level after a quarter of the epochs; where leaving an underwriter idle
+pays, only factored credit with component-scoped postponement learns to do so, beating
+the waiting heuristic on 18 of 20 seeds with one region and 12 of 20 with two, while PPO
+with the same option never does with two regions.

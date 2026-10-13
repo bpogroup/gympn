@@ -18,7 +18,6 @@ We plan to benchmark:
 - Policy Gradient (PG)
 - PPO with Clipping
 - PPO with KL Penalty
-- Deep Causal Learning (DCL)
 
 Against standard tasks:
 - Simple task assignment
@@ -107,7 +106,6 @@ While specific benchmarks are pending:
 - **PG** (Baseline): Simple, slower learning
 - **PPO-Clip** (Recommended): Best default choice
 - **PPO-Penalty**: Strict KL control variant
-- **DCL**: Best for credit assignment problems
 
 ### Episode Length
 - 100: Insufficient data (return: 15.2)
@@ -128,7 +126,6 @@ Method          Return      Notes
 Random          12.5        Baseline
 Heuristic       18.3        Rule-based
 PPO             22.1        Learned
-DCL             24.2        Planning-based
 ```
 
 ## Recommendations by Use Case
@@ -146,12 +143,3 @@ DCL             24.2        Planning-based
 - **Epochs:** 200
 - **Expected time:** ~40 minutes
 - **Expected performance:** 22.5 ± 1.5
-
-### Complex Problems
-- **Algorithm:** DCL with h=5
-- **Episodes:** 64
-- **Epochs:** 100
-- **Expected time:** ~43 minutes
-- **Expected performance:** 24.2 ± 0.9
-
-

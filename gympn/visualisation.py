@@ -1,3 +1,4 @@
+import os
 import simpn.visualisation
 from simpn.visualisation import *
 
@@ -44,8 +45,7 @@ class Visualisation(simpn.visualisation.Visualisation):
         pygame.init()
         pygame.font.init()
         pygame.display.set_caption('Petri Net Visualisation')
-        #assets.get_img_asset("assets")
-        icon = pygame.image.load('./assets/logo.png')
+        icon = pygame.image.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', 'logo.png'))
         pygame.display.set_icon(icon)
 
         self._grid_spacing = grid_spacing

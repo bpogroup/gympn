@@ -1,0 +1,150 @@
+\section{Results}\label{sec:results}
+
+\subsection{RQ1: Does concurrency hurt standard RL, and does factored credit help?}
+Table~\ref{tab:rq1} reports the insurer with 2, 3 and 6 independent components. Joint
+PPO degrades as concurrency grows: its final return falls from 0.965 with one region to
+0.748 with two, and with two regions it stays below 0.9 for all 40 epochs on 16 of 20
+seeds. \nfgae{} holds its level (1.101 and 1.070): it is ahead of PPO at the end on 17
+of 20 seeds with one region and on 20 of 20 with two, and over the whole run on 19 and
+20 of 20 (paired $t$-test $p<0.002$ in every case). The gain grows with the number of
+independent components (final $+0.034$, $+0.136$, $+0.321$ for $K=2,3,6$; whole-run
+mean $+0.069$, $+0.218$, $+0.406$); with shared clerks the certificate merges claims
+and complaints and the gain shrinks accordingly. Each process alone is learned by PPO
+within 3--9 epochs (median over seeds of the first evaluation at or above 0.9); inside
+the insurer PPO needs 18 with one region, and 3 of 20 seeds never get there, whereas
+\nfgae{} needs 6. This locates the problem in the other processes' noise
+(Fig.~\ref{fig:curves}). Fig.~\ref{fig:gaink} shows the gain against the number of
+independent processes. On multi-site, where every method reaches the heuristic,
+\nfgae{} gets there in half the epochs (4 vs 8, 20 of 20 seeds).
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.99\textwidth]{figures/fig_curves}
+\caption{Insurer: greedy normalised return during training (mean and 95\% confidence
+interval over 20 seeds; per-process: 10 seeds; 1 = heuristic). Per-process: separately
+trained PPO agents, one per process, combined.}\label{fig:curves}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.55\textwidth]{figures/fig_gain_vs_k}
+\caption{Gain of \nfgae{} over PPO against the number of independent processes $K$
+(mean and 95\% confidence interval of the paired differences; 20 seeds, 10 for $K=2$):
+$K=2$ shared clerks, $K=3$ one region, $K=6$ two regions. With $K=1$, \nfgae{} is PPO by
+construction.}\label{fig:gaink}
+\end{figure}
+
+\begin{table}[t]
+\centering
+\caption{Insurer: normalised return (1 = heuristic), mean over 20 seeds (shared clerks
+and per-process: 10). Per-process: one PPO agent per process, trained on its own
+process's reward. With shared clerks,
+claims and complaints form one coupled process, so there are no separate
+per-process learners.}\label{tab:rq1}
+\setlength{\tabcolsep}{4.6pt}
+\begin{tabular}{lc ccc ccc}
+\toprule
+ & & \multicolumn{3}{c}{Final return} & \multicolumn{3}{c}{Mean over training} \\
+\cmidrule(lr){3-5}\cmidrule(lr){6-8}
+Variant & $K$ & PPO & Per-process & \nfgae & PPO & Per-process & \nfgae \\
+\midrule
+Shared clerks & 2 & 0.989 & --    & \textbf{1.023} & 0.855 & --    & \textbf{0.925} \\
+1 region      & 3 & 0.965 & 1.058 & \textbf{1.101} & 0.811 & 0.960 & \textbf{1.029} \\
+2 regions     & 6 & 0.748 & 1.048 & \textbf{1.070} & 0.611 & 0.950 & \textbf{1.017} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{RQ2: When does waiting pay, and what does it take to learn it?}
+In the slow-mismatch insurer, waiting for the matched underwriter is worth about 14\% of
+underwriting's throughput. Table~\ref{tab:rq2} compares five arms with one and with two
+regions. Only the combination of factored credit and component-scoped postponement
+learns to wait reliably. With one region it reaches 1.054, at or above the waiting
+heuristic on 18 of 20 seeds, and improves on \nfgae{} without postponement on every seed
+($+0.127$). With two regions it reaches 1.005 (12 of 20 seeds at or above the waiting
+heuristic) and improves on \nfgae{} without postponement by $+0.109$ (18 of 20 seeds,
+Wilcoxon $p<0.001$): the value of waiting is about the same at both sizes. Giving PPO
+the same option does not help: with one region its final return is not significantly
+better than without ($+0.06$, $p=0.17$) and it is no better over the run ($-0.04$); with
+two regions it is level with PPO without postponement ($+0.02$, 12 of 20 seeds,
+$p=0.49$); the extra decisions cannot be credited through the other processes' noise.
+Global postponement helps PPO a little with one region ($+0.09$ at the end, $p=0.011$,
+nothing over the run) but not with two ($+0.02$, $p=0.40$): the more processes there
+are, the more each global wait freezes. With two regions the gap between \nfgae{} with
+component-scoped postponement and PPO's best arm grows from $+0.12$ to $+0.30$ (20 of 20
+seeds, $p<10^{-5}$ by both tests).
+
+The behaviour of the trained policies confirms the mechanism. \nfgae{} with
+component-scoped postponement waits almost only in underwriting (5.8 times per episode
+with one region, 10.7 with two; the waiting heuristic 6.5 and 15.3), almost never in
+claims or complaints, where waiting hurts (0.07 times per episode with two regions), and
+never while a useful assignment is available. Mismatched underwriting assignments fall
+from 1.23 to 0.36 per episode with one region and from 2.71 to 1.17 with two. PPO's
+waits with either kind of postponement include waits in claims and complaints while
+useful work is available (1.2 and 1.9 per episode with two regions), and its mismatched
+assignments do not fall. Fig.~\ref{fig:postpone} shows the final returns per seed and
+the learning curves.
+
+\begin{figure}[!tbp]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_postpone}
+\caption{Slow-mismatch insurer with one region (top) and two regions (bottom), 20 seeds.
+Left: final normalised return per seed (dots) and mean (bar); 1 = waiting heuristic.
+Right: greedy normalised return during training (mean and 95\% confidence
+interval).}\label{fig:postpone}
+\end{figure}
+
+\begin{table}[t]
+\centering
+\caption{Slow-mismatch insurer, 20 seeds per arm. Return: normalised so that
+1 = waiting heuristic (the work-conserving heuristic scores 0.873 with one region and
+0.865 with two); ``$\geq 1$'': seeds that end at or above the waiting heuristic.
+Behaviour: best checkpoint of each seed, averaged over 20 evaluation episodes, summed
+over regions; the waiting heuristic waits 6.5 (one region) and 15.3 (two regions) times
+per episode in underwriting.}\label{tab:rq2}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{ll cc cc}
+\toprule
+ & & \multicolumn{2}{c}{Return} & \multicolumn{2}{c}{Behaviour per episode} \\
+\cmidrule(lr){3-4}\cmidrule(lr){5-6}
+Credit & Postponement & Final & $\geq 1$ & \shortstack{Waits in\\underwriting} & \shortstack{Mismatched\\assignments} \\
+\midrule
+\multicolumn{6}{l}{\emph{One region} ($K=3$)} \\
+PPO    & none      & 0.847 & 0/20 & 0   & 1.52 \\
+\nfgae & none      & 0.928 & 1/20 & 0   & 1.23 \\
+PPO    & global    & 0.935 & 7/20 & 4.9 & 0.79 \\
+PPO    & component & 0.910 & 7/20 & 4.4 & 1.12 \\
+\nfgae & component & \textbf{1.054} & \textbf{18/20} & 5.8 & \textbf{0.36} \\
+\midrule
+\multicolumn{6}{l}{\emph{Two regions} ($K=6$)} \\
+PPO    & none      & 0.685 & 0/20 & 0    & 3.91 \\
+\nfgae & none      & 0.896 & 0/20 & 0    & 2.71 \\
+PPO    & global    & 0.703 & 0/20 & 4.4  & 3.84 \\
+PPO    & component & 0.707 & 0/20 & 3.7  & 4.19 \\
+\nfgae & component & \textbf{1.005} & \textbf{12/20} & 10.7 & \textbf{1.17} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{RQ3: Is it budget, tuning, or per-process learning?}
+On the 2-region insurer, doubling PPO's data per epoch raises it from 0.719 to 0.856, and
+tuning its learning rate to at most 0.782; \nfgae{} with half the data of the former
+reaches 1.087, and at PPO's best learning rate 1.093 (seeds 0--4, ahead on 5 of 5 in
+every comparison). Separate per-process learners capture most of the credit gain
+(Table~\ref{tab:rq1}); \nfgae{} adds a shared network that learns faster early
+(mean over epochs 3--12: 0.92 vs 0.77 at 2 regions) and a single policy, and, unlike
+per-process learners, it can use component-scoped postponement under one policy.
+\todo{Table: PPO variants}
+
+\subsection{RQ4: Cost}
+Encoding the whole organisation at every decision made \nfgae{} 1.7--2.2 times as
+expensive as per-process learners, growing with the number of processes. Component turns
+cancel this: on 2-epoch runs they speed \nfgae{} up 1.67 times with one region and 2.39
+times with two, with unchanged learning (whole-run mean 1.023 vs 1.017, $p=0.73$).
+\todo{Table: CPU time}
+
+\subsection{The policy network}
+On multi-site routing, PPO with a per-type HGT reaches 0.403 (6 of 20 seeds collapsed);
+with the relational network of Sect.~\ref{sec:network}, the same PPO reaches 1.039. A
+rerun of the HGT runs on the current code reproduces them bit for bit, so the difference
+is the network. All comparisons above use the same network.

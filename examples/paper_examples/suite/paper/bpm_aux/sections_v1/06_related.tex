@@ -1,0 +1,25 @@
+\section{Related Work}\label{sec:related}
+
+\paragraph{RL for business process management.} \todo{resource allocation with deep RL,
+prescriptive process monitoring, next-best-action recommendation} \aepn{}s and
+GymPN~\cite{aepn2023,aepn_repr2025,gympn2025} provide the modelling framework and the
+environment we build on.
+
+\paragraph{Structured credit assignment.} Factored policy gradients exploit a given
+influence structure between action factors and reward factors~\cite{spooner2021fpg};
+action-dependent factorised baselines reduce policy-gradient variance~\cite{wu2018adfb};
+value decomposition~\cite{vdn2018}, counterfactual baselines~\cite{coma2018} and
+difference rewards~\cite{difference2002} address credit in cooperative multi-agent
+settings. We derive the influence structure from the semantics of the process model and
+state the scheduling conditions (local actor, component-scoped postponement) under which
+it is valid.
+
+\paragraph{Non-work-conserving control.} In queueing systems with heterogeneous servers it
+can be optimal to leave a slow server idle~\cite{linkumar1984}. Component-scoped
+postponement makes such policies learnable per process. \todo{more queueing-control
+references}
+
+\paragraph{Graph neural networks for decision making.} Learned dispatching policies over
+graph representations have been studied in combinatorial
+optimisation~\cite{zhang2020jobshop}. Relational graph networks~\cite{rgcn2018,rgat2019,hu2020hgt}
+underlie our policy network.

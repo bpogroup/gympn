@@ -1,0 +1,79 @@
+\section{Independence-Aware Reinforcement Learning}\label{sec:method}
+
+\subsection{The independence certificate}\label{sec:certificate}
+Let $G$ be the undirected bipartite graph on the places and transitions of the net,
+with an edge between a place and every transition that consumes from it or produces
+into it. Transitions that can never fire (their input places can never be marked)
+are removed first; this least-fixpoint pruning over-approximates what can fire, so it
+is sound. The connected components $\comp_1,\dots,\comp_K$ of the remaining graph
+partition the places and transitions; every action, event and reward belongs to
+exactly one component. Any shared place, whether a queue or a resource pool, puts its
+transitions in the same component. The partition depends only on the net, not on the
+marking or on the policy. For the insurer of Sect.~\ref{sec:setup}, each process of
+each region is one component; if claims and complaints share their clerks, they form
+one component.
+
+\subsection{Factored credit: Net-Factored GAE}\label{sec:nfgae}
+For a component $c$, let $k^c_1<k^c_2<\dots$ be the decision epochs at which an action
+of $c$ is chosen, let $R^c_i$ be the reward of $c$'s events in
+$[\tau_{k^c_i},\tau_{k^c_{i+1}})$ and $\Gamma^c_i = e^{-\beta(\tau_{k^c_{i+1}}-\tau_{k^c_i})}$.
+\nfgae{} runs GAE per component, on the component's own decision clock:
+\begin{equation}
+  \delta^c_i = R^c_i + \Gamma^c_i V_c(s_{k^c_{i+1}}) - V_c(s_{k^c_i}), \qquad
+  \hat A^c_i = \sum_{l\ge 0} \Big(\lambda^l \prod_{j<l}\Gamma^c_{i+j}\Big)\, \delta^c_{i+l},
+\end{equation}
+and each decision is updated with the advantage of its own component. The critic $V_c$
+pools only the action nodes of the deciding component. With $K=1$, \nfgae{} is exactly
+PPO with SMDP-GAE.
+
+\subsection{Component-scoped postponement}\label{sec:postpone}
+Instead of one global postpone pseudo-action, every component with an enabled action
+gets its own. Choosing it blocks only that component: its actions are disabled until
+one of \emph{its own} events fires, while the other components keep deciding. Time
+advances to the next event once every component has acted, has nothing enabled, or
+is waiting. A component's decision instants therefore depend only on its own state,
+which preserves the independence the certificate relies on. Global postponement does
+not: when one process should wait, all processes are frozen, so a process's decision
+instants depend on the state of the others. \todo{counterexample figure or one-line
+example}
+
+\subsection{Component turns}\label{sec:turns}
+When several components have enabled work at the same instant, they are offered one at
+a time, lowest component index first, and the decision chooses among the active
+component's bindings only. No simulated time passes between turns, components share no
+place, and the setting is work-conserving or component-postponing, so the order of turns
+does not change any component's outcomes. Each decision then observes and encodes only
+its own component's subgraph, so the cost of a decision no longer grows with the size of
+the organisation.
+
+\subsection{Guarantees}\label{sec:guarantees}
+We state the results informally; proofs are in the supplementary material.
+
+\noindent\todo{formal statements; proofs in the supplement}
+\begin{itemize}
+  \item \textbf{Soundness.} If (C1) components are place-disjoint (by construction),
+    (C2) the logit of a binding depends only on its own component's marking (true for
+    the policy network of Sect.~\ref{sec:network}, whose message passing follows the
+    arcs of the net), and (C3) the agent postpones per component or not at all, then
+    the components evolve conditionally independently given the state.
+  \item \textbf{Unbiasedness.} Under these conditions the \nfgae{} policy gradient is
+    unbiased for the organisation's objective $J=\sum_c J_c$, and with $K=1$ it
+    coincides with PPO.
+  \item \textbf{Variance.} For any state-dependent baseline, \nfgae{} removes the term
+    $\mathbb{E}\big[\lVert\nabla\log\pi\rVert^2\,\mathrm{Var}(\text{other components'
+    return}\mid s)\big]$ from the variance of the policy gradient. No state-dependent
+    baseline can remove this term, since it stems from the other components' future
+    randomness.
+  \item \textbf{Component turns} leave every component's dynamics unchanged and give the
+    active component the same logits as an observation of the whole net.
+\end{itemize}
+
+\subsection{Policy network}\label{sec:network}
+The policy and critic are graph neural networks over the observation graph. We use
+relational attention with basis-decomposed relation weights, in the style of
+R-GCN~\cite{rgcn2018} and RGAT~\cite{rgat2019}, with the design choices of
+HGT~\cite{hu2020hgt} (per-type queries, gated skip connections, a learned prior per
+relation). This is not a contribution of the paper, but it matters: with a per-type
+HGT, PPO fails on our multi-site benchmark, while with this network it reaches the
+heuristic (Sect.~\ref{sec:results}). Message passing follows the arcs of the net, so
+condition (C2) holds.

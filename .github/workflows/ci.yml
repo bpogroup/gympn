@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main, experimental]
+  pull_request:
+
+jobs:
+  test:
+    name: Tests (Python ${{ matrix.python }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.10", "3.11", "3.12", "3.13"]
+        include:
+          - os: windows-latest
+            python: "3.13"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Install (CPU torch, all extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check gympn tests
+      - name: Test
+        run: pytest -p no:warnings
+
+  minimal-install:
+    # The wheel without extras: import, train and test must work without
+    # wandb, tensorboard, matplotlib or networkx.
+    name: Minimal install (no extras)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel
+      - name: Install the wheel only
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install dist/*.whl pytest
+      - name: Import, train and test without extras
+        # Run from outside the checkout, so the installed wheel is tested
+        # instead of the source tree.
+        working-directory: ${{ runner.temp }}
+        run: |
+          python -c "import gympn, sys; print(gympn.__version__); assert 'wandb' not in sys.modules"
+          pytest -p no:warnings "${{ github.workspace }}/tests/test_packaging.py" -k "train_and_test or import_does_not_load or package_data"

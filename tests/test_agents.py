@@ -1,5 +1,4 @@
 import unittest
-from unittest.mock import MagicMock
 
 from simpn.simulator import SimToken
 
@@ -37,7 +36,7 @@ class TestRLAgent(unittest.TestCase):
 
     def test_agent_initialization(self):
         self.assertEqual(self.agent.policy_model.decoder[-1].out_features, 1)
-        self.assertEqual(self.agent.value_model.lin.out_features, 1)
+        self.assertEqual(self.agent.value_model.value_head[-1].out_features, 1)
 
     def test_agent_action(self):
         # Mock the agent's policy to return a fixed action

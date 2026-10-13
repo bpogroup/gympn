@@ -12,7 +12,7 @@ python run_tests.py
 python run_tests.py network      # Network training tests
 python run_tests.py ppo          # PPO algorithm tests
 python run_tests.py batch        # Batch handling tests
-python run_tests.py causal       # Causal RL tests
+
 python run_tests.py pipeline     # Training pipeline tests
 ```
 
@@ -176,7 +176,7 @@ ModuleNotFoundError: No module named 'torch'
 ```
 Solution: Install required packages:
 ```bash
-pip install -r requirements.txt
+pip install -e ".[dev]"
 ```
 
 **3. Numerical Instability**
@@ -244,8 +244,8 @@ if __name__ == '__main__':
 ```yaml
 - name: Run tests
   run: |
-    pip install -r requirements.txt
-    pytest tests/ -v --cov=gympn
+    pip install -e ".[dev]"
+    pytest tests/ -v
 ```
 
 ### Pre-commit Hook

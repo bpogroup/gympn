@@ -1,0 +1,26 @@
+\section{Discussion and Limitations}\label{sec:discussion}
+
+\paragraph{The single-component boundary.} The certificate helps only when the process
+model has more than one component. A single process whose cases share a resource pool
+is one component, and there our pipeline is exactly PPO. This is common: in the BPI
+Challenge 2012 loan-application log~\cite{bpic2012}, a median case is handled by four
+different resources, and the resources form one connected group even without the
+validation team. The target of our method is therefore multi-process or multi-team
+control: several processes with dedicated teams under one indicator.
+
+\paragraph{Per-process learners.} When the processes are independent, separate learners
+also avoid the other processes' noise, and they capture most of the gain in credit. What
+the certificate adds is a single shared policy that learns faster early,
+postponement without freezing, an automatic decomposition that is sound by
+construction, and the correct merging of processes that turn out to be coupled.
+
+\paragraph{Granularity of postponement.} A component waits as a whole until one of its
+events; the agent can assign some resources first and then wait, but it cannot keep one
+resource idle while another keeps receiving work in the same decision round.
+\todo{check whether this needs qualification}
+
+\paragraph{Synthetic benchmark.} The insurer is designed, not mined from data. Its
+sub-processes reuse validated models, and the waiting regime is grounded in queueing
+theory, but a multi-organisation case from real data, such as the five municipalities of
+the BPI Challenge 2015, would strengthen the external validity. \todo{BPIC 2015 if the
+staff of the municipalities turn out to be disjoint}

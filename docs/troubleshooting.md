@@ -172,14 +172,6 @@ for param in agent.policy_net.parameters():
    agent = PGAgent(policy_net, value_net)
    ```
 
-6. **For DCL specifically: Reduce horizon or rollouts**
-   ```python
-   planner_cfg = PlannerConfig(
-       horizon=3,              # was 5
-       rollouts_per_action=16  # was 32
-   )
-   ```
-
 ---
 
 ### Environment Issues
@@ -389,16 +381,6 @@ if torch.isinf(obs['graph'].x_dict['place']).any():
        )
    ```
 
-5. **Try DCL instead of PPO**
-   ```python
-   # DCL's planning may find better solutions
-   agent = DCLAgent(
-       policy_network=policy_net,
-       value_network=value_net,
-       planner_cfg=PlannerConfig(horizon=5, rollouts_per_action=32)
-   )
-   ```
-
 #### Policy Overfits (High Train, Low Test)
 
 **Symptoms:**
@@ -591,6 +573,22 @@ print(s.getvalue())
 
 ---
 
+## Installation
+
+### `ImportError: libEGL.so.1: cannot open shared object file` on `import gympn`
+
+The traceback ends inside `simpn/visualisation/base.py` importing `PyQt6`.
+This means a simpn release of 1.7 or later is installed. gympn requires
+`simpn<1.7`, which uses pygame instead and imports on a headless machine.
+Reinstall the pinned version:
+
+```bash
+pip install "simpn>=1.3,<1.7"
+```
+
+If you need to keep a newer simpn for other work, put gympn in its own
+virtual environment.
+
 ## Getting Help
 
 If issues persist:
@@ -600,5 +598,3 @@ If issues persist:
 3. **Simplify the problem** to identify root cause
 4. **Consult examples** for similar problem types
 5. **Open an issue** with reproducible example
-
-

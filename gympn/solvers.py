@@ -79,15 +79,14 @@ class HeuristicSolver(BaseSolver):
         observable_net : GymProblem or observation-like object
             Used by the heuristic to inspect places/actions and flags.
         bindings : List
-            List of candidates to choose from. Items are either:
-              - REAL action timed bindings: ([ (place, token), ... ], time, transition)
-              - postpone pseudo-binding:   (['postpone'], current_clock, None)
+            List of candidates to choose from. Items are either REAL action
+            timed bindings, ``([(place, token), ...], time, transition)``, or
+            the postpone pseudo-binding, ``(['postpone'], current_clock, None)``.
 
         Returns
         -------
-        Either:
-          - 'postpone'
-          - a REAL timed binding (from 'bindings')
+        str or tuple
+            Either ``'postpone'`` or a REAL timed binding from ``bindings``.
         """
         self.bindings = bindings
 

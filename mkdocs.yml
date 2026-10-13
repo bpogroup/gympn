@@ -1,12 +1,17 @@
 site_name: gympn
-site_description: A Python library for building and interacting with custom reinforcement learning environments
+site_description: Reinforcement learning on Action-Evolution Petri Nets
 site_author: Riccardo Lo Bianco
+site_url: https://bpogroup.github.io/gympn/
 repo_url: https://github.com/bpogroup/gympn
+repo_name: bpogroup/gympn
 theme:
   name: material
   palette:
     primary: indigo
     accent: indigo
+  features:
+    - navigation.sections
+    - content.code.copy
 nav:
   - Home: index.md
   - Documentation Overview: DOCUMENTATION_OVERVIEW.md
@@ -15,15 +20,40 @@ nav:
       - Complete Example: complete_example.md
   - Core Concepts:
       - Algorithms: algorithms.md
+      - Net-Factored Credit (NF-GAE): nfgae.md
       - Agents Guide: agents_guide.md
       - Advanced Features: advanced_features.md
   - Advanced Topics:
-      - Postponement and Causal RL: postpone_causal.md
+      - Postponement and Net-Factored Credit: postponement.md
       - Extending GymPN: extending_gympn.md
       - Troubleshooting: troubleshooting.md
-  - Reference:
-      - API Quick Reference: api_reference.md
-      - Benchmarks: benchmarks.md
+  - API Reference:
+      - Problem definition: reference/problem.md
+      - Environment: reference/environment.md
+      - Agents: reference/agents.md
+      - Networks: reference/networks.md
+      - Solvers: reference/solvers.md
+      - Trajectories and advantages: reference/data.md
+      - Seeding: reference/seeding.md
+      - Quick reference: api_reference.md
+  - Benchmarks: benchmarks.md
   - Contributing: contributing.md
 plugins:
   - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: auto
+            show_source: false
+            show_root_heading: true
+            show_signature_annotations: true
+            separate_signature: true
+            members_order: source
+            filters: ["!^_"]
+markdown_extensions:
+  - admonition
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - toc:
+      permalink: true

@@ -13,6 +13,10 @@ class AEPN_Env(Env):
     Gym environment for training a Deep Reinforcement Learning agent on the AEPN simulator.
     """
 
+    # Use the lightweight PN snapshot in get_state/set_state (markings + scalars) instead of a full deepcopy of the net structure. Set False
+    # to fall back to the deepcopy path (equivalence testing / safety).
+    LIGHT_SNAPSHOT = True
+
     def __init__(self, aepn):
         """"Initialize the environment with a GymProblem instance."""
         super().__init__()
@@ -32,20 +36,33 @@ class AEPN_Env(Env):
         # debugging
         self.debug = False
 
-    def step(self, action: int):
+    def step(self, action: int, build_obs: bool = True):
         """
         Execute one step in the environment.
         Returns (observation, reward, terminated, truncated, info)
+
+        ``build_obs=False`` skips constructing the (expensive) HeteroData graph
+        observation and returns ``None`` in its place. Building the graph is
+        ~80% of a step's cost (profiled), so planners that only need the reward,
+        the ``done`` flag and the updated ``pn.pn_actions`` — e.g. MCTS descent
+        and rollout steps that continue with a cheap policy — pass False and
+        build the graph on demand only where a network forward is actually
+        required (node expansion).
         """
         old_rewards = self.pn.reward
+        old_comp = dict(getattr(self.pn, 'comp_reward', {}))
         if action < 0 or action >= len(self.pn.pn_actions):
             valid_len = len(self.pn.pn_actions) - 1
             raise ValueError(f"Action {action} is not valid. Must be between 0 and {valid_len}")
 
         # handle postpone
-        if action == len(self.pn.pn_actions) - 1 and self.pn.pn_actions[-1][0] == ['postpone']:
-            self.pn.postpone()
-            self.pn.just_postponed = True
+        chosen = self.pn.pn_actions[action]
+        if isinstance(chosen[0], list) and chosen[0] == ['postpone']:
+            if chosen[2] is None:                       # global postpone
+                self.pn.postpone()
+                self.pn.just_postponed = True
+            else:                                       # component postpone
+                self.pn.postpone(comp=chosen[2].comp)
             if self.debug:
                 print("Postpone!")
         else:
@@ -58,20 +75,16 @@ class AEPN_Env(Env):
             self.pn.update_reward(binding, result_tokens)
             self.pn.bindings()  # updates the network tag if needed
 
-        observation, terminated, self.i = self.pn.run_evolutions(self.run, self.i, self.active_model)
+        observation, terminated, self.i = self.pn.run_evolutions(
+            self.run, self.i, self.active_model, build_obs=build_obs)
 
-        # Prepare info dict
-        if self.pn.causal_rl:
-            # Always include causal trace when causal_rl is enabled
-            # It accumulates throughout the episode and is needed at episode end
-            info = {'pn_reward': self.pn.reward, 'eligibility_credits': self.pn.causal_trace}
-        else:
-            info = {'pn_reward': self.pn.reward}
-
-        if not self.pn.causal_rl:
-            reward = (self.pn.reward - old_rewards)
-        else:
-            reward = 0.0  # episode-level credit assignment via causal traces
+        info = {'pn_reward': self.pn.reward}
+        reward = (self.pn.reward - old_rewards)
+        # Per-component share of this step's reward (nfgae; see
+        # GymProblem.net_partition). Sums to `reward`.
+        info['comp_reward'] = {c: v - old_comp.get(c, 0.0)
+                               for c, v in getattr(self.pn, 'comp_reward', {}).items()
+                               if v != old_comp.get(c, 0.0)}
 
         return observation, reward, terminated, False, info
 
@@ -83,8 +96,6 @@ class AEPN_Env(Env):
         if self.debug:
             print(f"Entered reset with current reward for PN: {self.pn.reward} \n")
         self.pn = copy.deepcopy(self.frozen_pn)
-        # ensure per-episode action index alignment with buffer indices
-        self.pn._action_index = 0
         if self.pn.network_tag.is_evolution():
             self.pn.get_to_first_action()
 
@@ -128,7 +139,12 @@ class AEPN_Env(Env):
             }
         """
         snapshot = {
-            "pn": copy.deepcopy(self.pn),
+            # Lightweight PN snapshot (markings + scalars) instead
+            # of a full deepcopy of the net structure — ~20% of a search, profiled.
+            # LIGHT_SNAPSHOT=False falls back to the old deepcopy (used to verify
+            # behavioural equivalence).
+            "pn_state": (self.pn.save_state() if AEPN_Env.LIGHT_SNAPSHOT else None),
+            "pn": (None if AEPN_Env.LIGHT_SNAPSHOT else copy.deepcopy(self.pn)),
             "run": copy.deepcopy(self.run),
             "i": self.i,
             "active_model": self.active_model,
@@ -151,7 +167,10 @@ class AEPN_Env(Env):
             A dictionary produced by get_state().
         """
         # Simulator state
-        self.pn = copy.deepcopy(snapshot["pn"])
+        if snapshot.get("pn_state") is not None:
+            self.pn.restore_state(snapshot["pn_state"])
+        else:
+            self.pn = copy.deepcopy(snapshot["pn"])
         self.run = copy.deepcopy(snapshot["run"])
         self.i = int(snapshot["i"])
         self.active_model = bool(snapshot["active_model"])
@@ -186,39 +205,32 @@ class AEPN_Env(Env):
         except Exception:
             pass
 
-    def set_seed(self, seed: int) -> None:
+    def set_seed(self, seed: int, *, deterministic: bool = True) -> None:
         """
-        Seed *all* stochastic elements (Python, NumPy, PyTorch CPU/GPU, and Petri net if available).
+        Seed *all* stochastic elements for a reproducible run: Python, NumPy,
+        PyTorch (CPU/GPU), cuDNN, and the underlying Petri net if it exposes a
+        seed hook. Delegates to :func:`gympn.seed_everything` so there is a
+        single source of truth for seeding across the library.
 
         Parameters
         ----------
         seed : int
             The seed to set.
+        deterministic : bool, default True
+            Request deterministic PyTorch kernels (see ``seed_everything``).
         """
-        # Python & NumPy
-        random.seed(seed)
-        np.random.seed(seed)
+        from .seeding import seed_everything
+        seed_everything(seed, deterministic=deterministic)
 
-        # PyTorch CPU/GPU
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-
-        # Ensure deterministic settings (optional, might affect performance)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-
-        # Petri net internal seeding, if provided by your implementation
-        if hasattr(self.pn, "seed") and callable(getattr(self.pn, "seed")):
-            try:
-                self.pn.seed(seed)
-            except Exception:
-                print(f"Warning: pn.seed() failed for seed {seed}.")
-                pass
-        if hasattr(self.pn, "set_seed") and callable(getattr(self.pn, "set_seed")):
-            try:
-                self.pn.set_seed(seed)
-            except Exception:
-                pass
+        # Petri net internal seeding, if the problem exposes one.
+        for hook in ("set_seed", "seed"):
+            fn = getattr(self.pn, hook, None)
+            if callable(fn):
+                try:
+                    fn(seed)
+                    break
+                except Exception:
+                    pass
 
     def enabled_actions(self, state):
         # Return positions in the current enabled list (exact indices env.step expects)

@@ -10,26 +10,27 @@ This guide explains how to extend GymPN with custom components for your specific
 import torch
 from gympn.networks import GNNPolicyNetwork
 
+
 class AttentionPolicyNetwork(GNNPolicyNetwork):
     """Policy network with attention mechanism."""
-    
+
     def __init__(self, input_dim, hidden_dim, output_dim, num_heads=4):
         super().__init__(input_dim, hidden_dim, output_dim)
-        
+
         # Replace GCN with attention layers
         self.attention = torch.nn.MultiheadAttention(
             hidden_dim,
             num_heads,
             batch_first=True
         )
-    
+
     def forward(self, data):
         # Get base GNN features
         x = super().forward(data)
-        
+
         # Apply attention
         attn_out, _ = self.attention(x, x, x)
-        
+
         return attn_out
 ```
 
@@ -211,7 +212,7 @@ class ManufacturingProblem(GymProblem):
     """Custom problem: Job shop scheduling."""
     
     def __init__(self, num_machines=3, num_job_types=2):
-        super().__init__(allow_postpone=True, causal_rl=True)
+        super().__init__(allow_postpone=True)
         
         self.num_machines = num_machines
         self.num_job_types = num_job_types

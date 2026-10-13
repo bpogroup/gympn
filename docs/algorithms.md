@@ -74,66 +74,45 @@ config = {
 
 **Limitations:** Less stable than PPO, prone to high variance
 
-### 3. DCL (Deep Causal Learning)
+### 3. Advantage estimation: GAE, SMDP-GAE and NF-GAE
 
-**What it is:** A planning-based approach that uses Monte Carlo rollouts to improve action selection while learning from causal rewards.
+All three algorithms above train the policy on advantages. gympn offers three
+ways to compute them, selected by training arguments rather than by the
+`algorithm` name:
 
-```python
-config = {
-    "algorithm": "dcl",
-    "dcl_horizon": 5,           # Lookahead horizon
-    "dcl_rollouts": 32,         # Number of rollout trajectories
-    "dcl_temp": 1.0,            # Temperature for softmax
-    "policy_lr": 5e-4,
-    "policy_updates": 3,
-    "value_lr": 5e-4,
-    "value_updates": 5,
-    "episodes": 32,             # Fewer episodes due to planning overhead
-    "epochs": 25,               # Shorter schedule
-}
-```
+| Estimator | Arguments | When |
+|-----------|-----------|------|
+| GAE | default (`gam`, `lam`) | Constant discount per decision, as in standard PPO |
+| SMDP-GAE | `smdp_discount=True`, `beta` | Decisions are unevenly spaced in simulator time; the continuation is discounted by `exp(-beta * tau)` for the elapsed time `tau` |
+| NF-GAE | `nfgae=True` (plus the SMDP arguments) | The net has several independent components; each decision is credited only with its own component's rewards |
 
-**Best for:** Complex environments with causal rewards and postponement
-
-**Speed:** 2-3x slower than PPO due to planning overhead
-
-**Advantages:**
-- Uses lookahead planning for better action selection
-- Leverages causal reward information
-- Handles postponement naturally
-
-**Planning mechanism:**
-1. At each decision point, sample multiple rollout trajectories
-2. Evaluate trajectories under current value estimate
-3. Use these evaluations to compute improved policy probabilities
-4. Train policy to match the improved distribution
+NF-GAE is gympn's main contribution to credit assignment: it is exact PPO on a
+single-component net and provably lower-variance on nets with several. See
+[Net-Factored Credit (NF-GAE)](./nfgae.md).
 
 ## Algorithm Comparison
 
-| Aspect | PPO-Clip | PPO-Penalty | PG | DCL |
-|--------|----------|-------------|----|----|
-| **Speed** | Fast | Fast | Fastest | Slow (2-3x) |
-| **Stability** | Very High | High | Medium | High |
-| **Sample Efficiency** | High | High | Low | Very High |
-| **Complexity** | Medium | Medium | Low | High |
-| **Best For** | General use | Strict KL control | Learning | Complex planning |
-| **Causal RL** | Compatible | Compatible | Compatible | Integrated |
-| **Postponement** | Compatible | Compatible | Compatible | Native |
+| Aspect | PPO-Clip | PPO-Penalty | PG |
+|--------|----------|-------------|----|
+| **Speed** | Fast | Fast | Fastest |
+| **Stability** | Very High | High | Medium |
+| **Sample Efficiency** | High | High | Low |
+| **Complexity** | Medium | Medium | Low |
+| **Best For** | General use | Strict KL control | Learning |
+| **NF-GAE** | Compatible | Compatible | Compatible |
+| **Postponement** | Compatible | Compatible | Compatible |
 
 ## Choosing an Algorithm
 
 ### Quick Decision Tree
 
 ```
-Is your environment complex with causal dependencies?
-├─ YES: Consider DCL
-└─ NO: 
-    Is training speed critical?
-    ├─ YES: Use PPO-Clip
-    └─ NO:
-        Do you need strict KL control?
-        ├─ YES: Use PPO-Penalty
-        └─ NO: Use PPO-Clip (default)
+Is training speed critical?
+├─ YES: Use PPO-Clip
+└─ NO:
+    Do you need strict KL control?
+    ├─ YES: Use PPO-Penalty
+    └─ NO: Use PPO-Clip (default)
 ```
 
 ### Specific Scenarios
@@ -144,13 +123,7 @@ Is your environment complex with causal dependencies?
 
 **Business Process Optimization**
 - Start with PPO-Clip
-- If causal rewards important: Add causal_rl=True
-- If results plateau: Consider DCL
-
-**Manufacturing with Lookahead**
-- Start with DCL
-- Reduce episodes to 32, increase dcl_rollouts to 64
-- Use causal_rl=True for distributed rewards
+- Several independent processes in one net: add nfgae=True (see Postponement and Net-Factored Credit)
 
 **Testing/Debugging**
 - Use PG (simplest)
@@ -187,23 +160,6 @@ Is your environment complex with causal dependencies?
   - Higher: Better value estimates, more computational cost
   - Lower: Faster training, potentially worse value estimates
   - Default: 10
-
-### DCL-Specific
-
-- **dcl_horizon:** 3-10
-  - Larger: Better lookahead, exponentially slower
-  - Smaller: Faster, more myopic
-  - Default: 5 (good balance)
-
-- **dcl_rollouts:** 16-64
-  - More: Better planning quality, slower
-  - Fewer: Faster, noisier
-  - Default: 32
-
-- **dcl_temp:** 0.5-2.0
-  - Higher: Softer policy distribution, more exploration
-  - Lower: Sharper distribution, exploitation
-  - Default: 1.0
 
 ### Entropy Bonus
 
@@ -249,25 +205,7 @@ config = {
 }
 ```
 
-### Template 3: Planning-Based (DCL)
-```python
-config = {
-    "algorithm": "dcl",
-    "episodes": 32,
-    "epochs": 25,
-    "batch_size": 32,
-    "policy_lr": 5e-4,
-    "value_lr": 5e-4,
-    "policy_updates": 3,
-    "value_updates": 5,
-    "dcl_horizon": 5,
-    "dcl_rollouts": 32,
-    "dcl_temp": 1.0,
-    "ent_bonus": 0.005,
-}
-```
-
-### Template 4: Causal RL (PPO-Clip + Causal Rewards)
+### Template 3: Net-Factored Credit (PPO-Clip + NF-GAE)
 ```python
 config = {
     "algorithm": "ppo-clip",
@@ -280,7 +218,9 @@ config = {
     "value_updates": 10,
     "eps": 0.15,
     "ent_bonus": 0.005,
-    # Note: causal_rl=True is set in GymProblem(), not here
+    "smdp_discount": True,
+    "beta": 0.5,
+    "nfgae": True,
 }
 ```
 
@@ -288,9 +228,8 @@ config = {
 
 ### If you have:
 
-**Long horizons with delayed rewards**
-→ Use DCL with causal_rl=True
-→ Increase dcl_rollouts to 64
+**Several independent processes in one net**
+→ Use PPO-Clip with nfgae=True
 
 **Many small independent tasks**
 → Use PPO-Clip with high ent_bonus
@@ -339,8 +278,7 @@ Entropy
 
 1. **Reduce batch size** (but keep multiple of episodes)
 2. **Reduce policy_updates** and **value_updates**
-3. **Use PPO-Clip instead of DCL**
-4. **Reduce episode count** (but maintain statistical quality)
+3. **Reduce episode count** (but maintain statistical quality)
 
 ### If training is unstable:
 
@@ -354,6 +292,6 @@ Entropy
 1. **Increase entropy bonus** to 0.01-0.02
 2. **Increase policy_updates** to 8-10
 3. **Use larger batch_size** for gradient stability
-4. **Try DCL if causal structure present**
+4. **Enable nfgae if the net has independent parts**
 
 

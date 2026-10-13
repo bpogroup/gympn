@@ -1,47 +1,11 @@
 #!/usr/bin/env python
 """Entry point for all training runs."""
 
-# Python 3.13+ compatibility: imghdr was removed from stdlib
-import sys
-if sys.version_info >= (3, 13):
-    try:
-        import imghdr
-        # Check if imghdr has the 'tests' attribute (for TensorBoard)
-        if not hasattr(imghdr, 'tests'):
-            # Need to patch it
-            raise AttributeError("imghdr missing 'tests' attribute")
-    except (ModuleNotFoundError, AttributeError):
-        # Inject imghdr compatibility module
-        import types
-        try:
-            from PIL import Image
-            def what(file, h=None):
-                """Identify image file type using PIL."""
-                if h is None and isinstance(file, str):
-                    try:
-                        return Image.open(file).format.lower() if Image.open(file).format else None
-                    except:
-                        return None
-                elif h is not None:
-                    try:
-                        from io import BytesIO
-                        return Image.open(BytesIO(h)).format.lower() if Image.open(BytesIO(h)).format else None
-                    except:
-                        return None
-                return None
-        except ImportError:
-            def what(file, h=None):
-                return None
-
-        imghdr_module = types.ModuleType('imghdr')
-        imghdr_module.what = what
-        imghdr_module.tests = []  # TensorBoard appends to this list
-        sys.modules['imghdr'] = imghdr_module
-
 import argparse
 import datetime
 import json
 import subprocess
+import sys
 import webbrowser
 import time
 import os
@@ -50,8 +14,6 @@ from gympn.environment import AEPN_Env
 from gympn.networks import HeteroActor, HeteroCritic
 from gympn.agents import PGAgent, PPOAgent
 
-from gympn.dcl_planner import PlannerConfig
-from gympn.agents_dcl import DCLAgent
 
 
 #train = True
@@ -74,7 +36,7 @@ def make_parser():
     alg = parser.add_argument_group('algorithm', 'algorithm parameters')
 
     alg.add_argument('--algorithm',
-                     choices=['ppo-clip', 'ppo-penalty', 'pg', 'dcl'],
+                     choices=['ppo-clip', 'ppo-penalty', 'pg'],
                      default='ppo-clip',
                      help='training algorithm')
 
@@ -106,11 +68,42 @@ def make_parser():
                      type=lambda x: int(x) if x.lower() != 'none' else None,
                      default=None,
                      help='seed for the agent')
-    alg.add_argument('--causal_rl',
+    alg.add_argument('--nfgae',
                      type=lambda x: str(x).lower() == 'true',
                      default=False,
-                     help='whether to use causal RL (credit redistribution via causal traces)')
-
+                     help='net-factored GAE (suite/paper/NFGAE_THEORY.md): credit each decision '
+                          'only with the rewards of its own net component, on that component\'s '
+                          'own decision clock, with a per-component critic. Needs '
+                          'allow_postpone=False or postpone_scope=\'component\'. With a single '
+                          'component it is exactly SMDP-GAE PPO.')
+    alg.add_argument('--beta',
+                     type=float,
+                     default=0.0,
+                     help='SMDP time-discount rate: the continuation after a decision is '
+                          'discounted by exp(-beta * tau), tau = elapsed time to the next '
+                          'decision. Used with --smdp_discount and --nfgae.')
+    alg.add_argument('--smdp_discount',
+                     type=lambda x: str(x).lower() == 'true',
+                     default=False,
+                     help='replace the constant-gamma GAE with the per-sojourn SMDP discount '
+                          'exp(-beta * tau). False (default) = constant `gam` GAE.')
+    alg.add_argument('--test_episodes',
+                     type=int,
+                     default=10,
+                     help='episodes averaged per greedy (deterministic) eval point during '
+                          'training (test_in_train). On deterministic envs all episodes are '
+                          'identical so this is a no-op; on stochastic envs raise it for '
+                          'paper-grade eval curves.')
+    alg.add_argument('--eval_seed',
+                     type=int,
+                     default=None,
+                     help='base seed pinning the greedy-eval scenarios (common random numbers): '
+                          'eval episode i always runs scenario eval_seed+i, so every eval point, '
+                          'every epoch and every method scores on the SAME fixed scenario set. '
+                          'The surrounding RNG state is saved and restored, so training is '
+                          'unaffected. Default None = historical behaviour (fresh scenarios drawn '
+                          'from the live stream; measured +-0.231 SD per 20-episode point on s1, '
+                          'and an inflated greedy_drift).')
 
     policy = parser.add_argument_group('policy model')
     policy.add_argument('--policy_model',
@@ -131,8 +124,23 @@ def make_parser():
                         help='policy model updates per epoch')
     policy.add_argument('--policy_kld_limit',
                         type=float,
-                        default=1, #0.01
-                        help='KL divergence limit used for early stopping')
+                        default=None,
+                        help='early-stopping limit on the mean per-state KL(old||new), computed '
+                             'exactly over each state\'s own action set (valid for variable '
+                             '|A(s)|; checked after each inner policy epoch). Default: disabled. '
+                             '~0.15 stops the rare catastrophic updates that collapse a '
+                             'converged policy without braking normal learning.')
+    policy.add_argument('--lr_schedule',
+                        type=lambda x: str(x).lower() == 'true',
+                        default=False,
+                        help='whether to use cosine annealing learning rate schedule')
+    policy.add_argument('--normalize_advantages',
+                        type=lambda x: str(x).lower() == 'true',
+                        default=True,
+                        help='per-batch advantage normalization (zero-mean/unit-variance). '
+                             'Default True (standard PPO): needed to learn low-margin tasks. '
+                             'The post-peak drift it can cause is handled by best-checkpoint '
+                             'restore. Set False only for ablation.')
     policy.add_argument('--policy_weights',
                         type=str,
                         default="",#"policy-500.h5",
@@ -201,6 +209,16 @@ def make_parser():
                        type=bool,
                        default=False,
                        help='wether to load a previously trained policy as starting point for this run')
+    train.add_argument('--flat_obs',
+                       type=lambda x: str(x).lower() == 'true',
+                       default=False,
+                       help='convert observations to flat graphs (gympn/flat_graph.py) when they are '
+                            'built; needs a flat encoder (type_embed / aepn) and the PPO or nfgae path')
+    train.add_argument('--local_obs',
+                       type=lambda x: str(x).lower() == 'true',
+                       default=False,
+                       help='nfgae only: component turns, so each decision observes and encodes only '
+                            'its own component (GymProblem.component_turns); needs no global postpone')
     train.add_argument('--test_in_train',
                        type=lambda x: str(x).lower() == 'true',
                        default=True,
@@ -236,11 +254,6 @@ def make_parser():
                          type=lambda x: str(x).lower() == 'true',
                          default=True,
                          help='whether to automatically open W&B dashboard')
-
-    dcl = parser.add_argument_group('dcl', 'DCL planner parameters')
-    dcl.add_argument('--dcl_horizon', type=int, default=5)
-    dcl.add_argument('--dcl_rollouts', type=int, default=32)
-    dcl.add_argument('--dcl_temp', type=float, default=1.0)
 
     save = parser.add_argument_group('saving')
     save.add_argument('--name',
@@ -323,10 +336,18 @@ def make_policy_network(args, metadata=None):
         elif args.environment == 'ActionEvolutionPetriNetEnv':
             policy_network = HeteroActor(
                 input_size=args.policy_kwargs.get("input_size", -1),
-                hidden_size=args.policy_kwargs.get("hidden_size", 256),
-                output_size=args.policy_kwargs.get("output_size", 64),
+                hidden_size=args.policy_kwargs.get("hidden_size", 64),
+                num_layers=args.policy_kwargs.get("num_layers", 3),
+                metadata=metadata,
                 num_heads=args.policy_kwargs.get("num_heads", 1),
-                metadata=metadata
+                # Default 0.0: on-policy RL collects old log-probs in eval() (dropout
+                # off) but updates in train() (dropout on). Non-zero dropout makes the
+                # PPO ratio ≠ 1 even with unchanged weights → a permanent noise floor
+                # that prevents the policy from settling. See INSTABILITY_ANALYSIS.md.
+                dropout=args.policy_kwargs.get("dropout", 0.0),
+                residual=args.policy_kwargs.get("residual", True),
+                encoder=args.policy_kwargs.get("encoder", "aepn"),
+                encoder_kwargs=args.policy_kwargs.get("encoder_kwargs"),
             )
         else:
             raise Exception("No policy network to load!")
@@ -356,9 +377,20 @@ def make_value_network(args, metadata=None):
     elif args.environment == 'ActionEvolutionPetriNetEnv':
         value_network = HeteroCritic(
             input_size=args.value_kwargs.get("input_size", -1),
-            hidden_size=args.value_kwargs.get("hidden_size", 256),
+            hidden_size=args.value_kwargs.get("hidden_size", 64),
             output_size=args.value_kwargs.get("output_size", 64),
+            # num_layers/residual are the two biggest cost knobs for the HGT critic.
+            # Defaults match the historical hard-coded behaviour (L3, residual on) so
+            # existing configs are unchanged; pass value_kwargs to shrink the critic.
+            num_layers=args.value_kwargs.get("num_layers", 3),
             num_heads=args.value_kwargs.get("num_heads", 1),
+            # Default 0.0 for the same eval/train consistency reason as the policy:
+            # the critic's rollout values (eval, dropout off) feed GAE, but its
+            # targets are regressed in train (dropout on). See INSTABILITY_ANALYSIS.md.
+            dropout=args.value_kwargs.get("dropout", 0.0),
+            residual=args.value_kwargs.get("residual", True),
+            encoder=args.value_kwargs.get("encoder", "aepn"),
+            encoder_kwargs=args.value_kwargs.get("encoder_kwargs"),
             metadata=metadata
         )
     else:
@@ -386,46 +418,29 @@ def make_agent(args, metadata=None):
     policy_network = make_policy_network(args, metadata=metadata)
     value_network = make_value_network(args, metadata=metadata)
 
+    common = dict(policy_lr=args.policy_lr, policy_updates=args.policy_updates,
+                  value_network=value_network, value_lr=args.value_lr, value_updates=args.value_updates,
+                  gam=args.gam, lam=args.lam, kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus,
+                  beta=getattr(args, 'beta', 0.0),
+                  smdp_discount=getattr(args, 'smdp_discount', False),
+                  nfgae=getattr(args, 'nfgae', False),
+                  normalize_advantages=getattr(args, 'normalize_advantages', False),
+                  lr_schedule=getattr(args, 'lr_schedule', True))
     if args.algorithm == 'pg':
-        agent = PGAgent(policy_network=policy_network,policy_lr=args.policy_lr, policy_updates=args.policy_updates,
-                        value_network=value_network, value_lr=args.value_lr, value_updates=args.value_updates,
-                        gam=args.gam, lam=args.lam, kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus)
+        agent = PGAgent(policy_network=policy_network, **common)
     elif args.algorithm == 'ppo-clip':
-        agent = PPOAgent(policy_network=policy_network, method='clip', eps=args.eps,
-                         policy_lr=args.policy_lr, policy_updates=args.policy_updates,
-                         value_network=value_network, value_lr=args.value_lr, value_updates=args.value_updates,
-                         gam=args.gam, lam=args.lam, kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus)
+        agent = PPOAgent(policy_network=policy_network, method='clip', eps=args.eps, **common)
     elif args.algorithm == 'ppo-penalty':
-        agent = PPOAgent(policy_network=policy_network, method='penalty', c=args.c,
-                         policy_lr=args.policy_lr, policy_updates=args.policy_updates,
-                         value_network=value_network, value_lr=args.value_lr, value_updates=args.value_updates,
-                         gam=args.gam, lam=args.lam, kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus)
-
-
-
-    elif args.algorithm == 'dcl':
-        planner_cfg = PlannerConfig(
-            horizon=args.dcl_horizon,
-            rollouts_per_action=args.dcl_rollouts,
-            gamma=args.gam,
-            temperature=args.dcl_temp,
-            use_crn=True,
-            use_lineage=True
-        )
-
-        agent = DCLAgent(
-            policy_network=policy_network,
-            value_network=value_network,
-            planner_cfg=planner_cfg,
-            policy_lr=args.policy_lr,
-            policy_updates=args.policy_updates,
-            value_lr=args.value_lr,
-            value_updates=args.value_updates,
-            gam=args.gam, lam=args.lam,
-            kld_limit=args.policy_kld_limit, ent_bonus=args.ent_bonus)
-
+        agent = PPOAgent(policy_network=policy_network, method='penalty', c=args.c, **common)
     else:
         raise Exception("Unknown algorithm! Are you sure it is spelled correctly?")
+
+    # Carried so Agent.train can pin the initial policy to the seed alone
+    # (gympn.seeding.seed_network_init); without it, how many RNG draws are
+    # consumed before the lazy parameters materialise varies by method and by
+    # run, so two arms of one experiment do not share an initial policy.
+    agent.agent_seed = getattr(args, 'agent_seed', None)
+
     return agent
 
 
@@ -504,21 +519,15 @@ def launch_tensorboard(logdir, port=6006, wait_time=5, reload_interval=30):
         return None
 
     try:
-        import requests
+        import urllib.request
+        import urllib.error
 
         # Start TensorBoard as a subprocess
         print(f"ℹ Starting TensorBoard on port {port}...")
 
-        # Use wrapper script for Python 3.13+ imghdr compatibility
-        wrapper_script = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            'tensorboard_wrapper.py'
-        )
-
         tensorboard_process = subprocess.Popen(
             [
-                sys.executable,
-                wrapper_script,
+                sys.executable, "-m", "tensorboard.main",
                 "--logdir", logdir,
                 "--port", str(port),
                 "--reload_interval", str(reload_interval),
@@ -545,11 +554,11 @@ def launch_tensorboard(logdir, port=6006, wait_time=5, reload_interval=30):
         max_retries = 5
         for attempt in range(max_retries):
             try:
-                response = requests.get(f"http://localhost:{port}", timeout=2)
-                if response.status_code == 200:
+                response = urllib.request.urlopen(f"http://localhost:{port}", timeout=2)
+                if response.status == 200:
                     print(f"✓ TensorBoard is running on http://localhost:{port}")
                     break
-            except requests.exceptions.RequestException:
+            except (urllib.error.URLError, OSError):
                 if attempt < max_retries - 1:
                     print(f"ℹ Checking TensorBoard... (attempt {attempt + 1}/{max_retries})")
                     time.sleep(1)

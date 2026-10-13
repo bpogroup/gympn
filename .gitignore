@@ -1,1 +1,51 @@
 /examples/data/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+
+# IDE / tooling
+.idea/
+
+# Experiment tracking / debug artifacts (regenerable)
+.wandb_offline/
+*.log
+
+# Heavy training outputs: checkpoints and tensorboard event files live next
+# to the suite's cell JSONs (which ARE committed — they're the paper data).
+# The suite's per-cell train/ dirs hold only checkpoints/events/args and are
+# fully reproducible from config.py + the cell id, so they stay out wholesale.
+*.pth
+events.out.tfevents.*
+examples/paper_examples/suite/**/train/
+
+# Diagnostic record dumps (regenerable by re-running the _diag_* script)
+*.pkl
+
+# LaTeX build artifacts (latexmk bookkeeping). .bbl is NOT ignored: Elsevier
+# wants it with the submission.
+*.aux
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+*.blg
+*.spl
+*.tex.bak
+
+# Raw event logs and tables derived from them: large, public (4TU.ResearchData),
+# not versioned here.
+*.xes
+*.csv.gz
+
+# Build outputs and local training data
+/build/
+/dist/
+/site/
+/data/
+
+# The BPM manuscript is an Overleaf clone (paper/bpm/); it is versioned on
+# Overleaf, not here. The figure script and notes next to it stay tracked.
+examples/paper_examples/suite/paper/bpm/

@@ -1,0 +1,25 @@
+\begin{abstract}
+Organisations run several business processes side by side and are measured on
+organisation-level indicators. Reinforcement learning (RL) for prescriptive process
+management usually treats such an organisation as one monolithic decision problem:
+every decision is credited with the reward noise of every process, the only way to
+wait for a better resource is to freeze the whole organisation, and every decision
+reasons over the entire organisation. We observe that the process model already
+certifies which parts of the organisation are independent: the connected components
+of its Action-Evolution Petri Net. We use this independence certificate at three points
+of the RL pipeline: to credit each decision only with the rewards of its own process
+(\nfgae), to let a single process postpone its decisions without freezing the others
+(component-scoped postponement), and to let each decision observe only its own process
+(component turns). Each use is exact where the model certifies independence and
+reduces to standard PPO on a single process. On an insurer benchmark with claims,
+underwriting and complaints processes, standard PPO degrades as the number of
+concurrent processes grows, whereas the independence-aware pipeline does not; it
+learns to wait exactly where waiting pays, and only together with factored credit,
+outperforming a waiting heuristic, at a compute cost linear in the number of processes.
+With six concurrent processes, PPO ends at 0.75 of the heuristic's return and factored
+credit at 1.07, ahead on 20 of 20 seeds; where waiting pays, factored credit with
+component-scoped postponement is the only arm that beats the waiting heuristic.
+
+\keywords{Prescriptive process management \and Reinforcement learning \and
+Petri nets \and Resource allocation \and Credit assignment}
+\end{abstract}

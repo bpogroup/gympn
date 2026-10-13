@@ -1,4 +1,3 @@
-import copy
 import unittest
 
 from simpn.simulator import SimToken
