@@ -6,6 +6,37 @@ All notable changes to gympn are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- Component agents (`gympn.component_agents`, `--component_agents true`): one
+  PPO agent per net component, with its own networks, deciding in component
+  turns and credited with its own component's return. With the marking
+  certificate, the agent of a coupled component hands over to one agent per
+  part once the coupling can no longer fire, and is credited with their
+  returns. Component turns now also work with component postponement.
+- Marking-based certificate (`--marking_certificate true`): the net partition
+  is recomputed whenever the set of marked places changes, so transitions that
+  can no longer fire stop coupling components.
+
+### Changed
+
+- Every action is now scored from the whole visible net by default.
+  `GymProblem.global_view` defaults to `'edges'`, which adds the reverse of
+  every edge type to the observation. `AEPNStack` adds per-layer global
+  attention and count-aware aggregation (`global_attn=True`,
+  `count_aggr=True` by default). The attention is restricted to the node's
+  net component (`net_partition`, carried as a per-node `comp` attribute of
+  the observation), so action logits stay local to their component and
+  NF-GAE's Theorem 1 still applies. `HeteroCritic` turns the restriction
+  off (`component_mask=False`), so the value network reads the whole net;
+  NF-GAE does not need a local critic. Before this, an
+  action's logit depended only on what flows into it within `num_layers`
+  hops. `--global_view false` restores the forward-only graph, and with it
+  the encoder's attention and count terms default to off.
+- `GymProblem.testing_run` with a trained policy uses the view the policy
+  was trained on (`GymProblem.match_policy_view`,
+  `networks.policy_global_view`), so policies saved by 0.1.0 still run.
+
 ## 0.1.0 - 2026-10-09
 
 First release on PyPI.

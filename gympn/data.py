@@ -253,6 +253,8 @@ class TrajectoryBuffer:
         comp = list(self._nf_comp[:T])
         rw = list(self._nf_rew[:T])
         times = self.times[self.start:self.end]
+        if any(isinstance(c, frozenset) for c in comp):
+            return self._nfgae_refining(values_ep, comp, rw, times)
         adv_ep = torch.zeros(T, dtype=torch.float32)
         for c in set(comp):
             idx = [t for t in range(T) if comp[t] == c]
@@ -270,6 +272,59 @@ class TrajectoryBuffer:
                 gae = delta + d * self.lam * gae
                 adv_ep[t] = gae
         return adv_ep
+
+    def _nfgae_refining(self, values_ep: Tensor, comp, rw, times) -> Tensor:
+        """Net-factored GAE under the marking-based certificate. comp[t] is the
+        deciding component at step t as a frozenset of transition ids, and
+        rw[t] maps transition id -> reward fired during step t. Components only
+        refine along a trajectory (GymProblem.net_partition), so a component
+        that stops deciding either has no further decisions or has split into
+        children, whose first decisions carry its future.
+
+        Successors of step t with component g:
+          * the next step u > t with comp[u] == g, if any (the static case);
+          * otherwise the first step of every maximal child component
+            (comp[u] a proper subset of g), plus the transitions of g that no
+            child covers, whose rewards run to the episode end with no
+            bootstrap.
+        For each successor u: R_u = rewards of comp[u]'s transitions over steps
+        [t, u), d_u = exp(-beta (time[u] - time[t])), and
+          delta_t = sum_u (R_u + d_u V(s_u)) + R_uncovered - V(s_t)
+          A_t     = delta_t + lam * sum_u d_u A_u
+        With lam = 1 this telescopes to g's discounted return minus V_g(s_t);
+        with a partition that never refines it is _nfgae term for term."""
+        T = values_ep.shape[0]
+        V = [float(v) for v in values_ep]
+
+        def disc(t, u):
+            return math.exp(-self.beta * max(0.0, float(times[u]) - float(times[t])))
+
+        def rsum(members, t, u):
+            return sum(r for step in range(t, u) for k, r in rw[step].items() if k in members)
+
+        adv = [0.0] * T
+        for t in range(T - 1, -1, -1):
+            g = comp[t]
+            nxt = next((u for u in range(t + 1, T) if comp[u] == g), None)
+            if nxt is not None:
+                succ = [nxt]
+                uncovered = frozenset()
+            else:
+                succ, covered = [], set()
+                for u in range(t + 1, T):
+                    gu = comp[u]
+                    if gu < g and not (gu & covered):     # first step of a maximal child
+                        succ.append(u)
+                        covered |= gu
+                uncovered = g - covered
+            delta = rsum(uncovered, t, T) - V[t]
+            follow = 0.0
+            for u in succ:
+                d = disc(t, u)
+                delta += rsum(comp[u], t, u) + d * V[u]
+                follow += d * adv[u]
+            adv[t] = delta + self.lam * follow
+        return torch.tensor(adv, dtype=torch.float32)
 
     @torch.no_grad()
     def finish(self):
@@ -329,6 +384,29 @@ class TrajectoryBuffer:
         self._nf_comp = self._nf_rew = None
         self.start = 0
         self.end = 0
+
+    @torch.no_grad()
+    def subset(self, idx: List[int]) -> 'TrajectoryBuffer':
+        """A new buffer holding the finished steps idx (in that order), with
+        their advantages and value targets as computed here. Used to hand each
+        component's agent its own decisions (gympn.component_agents)."""
+        self._materialize_steps()
+        if self.advantages_.numel() != len(self.states):
+            raise RuntimeError("Not all steps finalized; call finish() after each episode.")
+        out = TrajectoryBuffer(gam=self.gam, lam=self.lam, beta=self.beta,
+                               smdp_discount=self.smdp_discount, nfgae=self.nfgae)
+        t = torch.as_tensor(idx, dtype=torch.long)
+        out.states = [self.states[i] for i in idx]
+        out.actions = [self.actions[i] for i in idx]
+        out.logpis_nodes = [self.logpis_nodes[i] for i in idx]
+        out.times = [self.times[i] for i in idx]
+        out.rewards_raw = self.rewards_raw[t]
+        out.logprobs_sel = self.logprobs_sel[t]
+        out.values_pred = self.values_pred[t]
+        out.advantages_ = self.advantages_[t]
+        out.returns_ = self.returns_[t]
+        out.start = out.end = len(idx)
+        return out
 
     @torch.no_grad()
     def _normalize_advantages(self, adv: Tensor) -> Tensor:

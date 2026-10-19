@@ -17,6 +17,16 @@ Runners are resumable: a cell that already exists is skipped, so adding seeds me
 re-running the same command with a larger `seeds=` value. The trailing integer is the
 number of parallel workers; `threads=1` gives each worker one torch thread.
 
+Observation view. Since 2026-10-17 the library scores every action from the whole visible
+net by default (`GymProblem.global_view='edges'`: reverse edges, plus global attention and
+count aggregation in the AEPN encoder). Every results directory listed below was produced
+with the earlier forward-only graph: add `view=local` to `run_bpm.py` and
+`run_multisite_protocol.py` commands to reproduce them. Without it the runners use the new
+view and write to `*_fv` directories, never into the old ones. Since 2026-10-19 the
+critic's attention reads across components (the actor's stays inside its component);
+`*_fv_cm` directories hold runs with the earlier critic, masked like the actor, and
+`critic_mask=1` reproduces them.
+
 ## Insurer (RQ1): PPO versus NF-GAE
 
 ```

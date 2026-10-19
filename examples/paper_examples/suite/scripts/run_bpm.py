@@ -5,12 +5,20 @@ episodes under common random numbers (eval_seed 555000), seeds 0-19, shared
 hyperparameters (common.Hyper), no per-arm tuning. Anchors: random and
 heuristic policies over 40 episodes (insurer_slow: the waiting heuristic).
 
-Arms: ppo (SMDP-GAE PPO) and nfgae (net-factored GAE, ../paper/NFGAE_THEORY.md).
+Arms: ppo (SMDP-GAE PPO, one agent), nfgae (net-factored GAE, one agent,
+../paper/NFGAE_THEORY.md) and agents (one PPO agent per net component, in
+component turns, credited with its component's return; gympn.component_agents).
 
 Run:  python scripts/run_bpm.py env=insurer N=2 [workers] [seeds=20] [methods=ppo,nfgae]
-                        [epochs=40] [threads=k] [episodes=8] [plr=x]
+                        [epochs=40] [threads=k] [episodes=8] [plr=x] [bs=k] [cert=static|marking]
                         [net=aepn|hgt|temb|tembf] [bases=K] [flat=1] [local=1]
                         [beta=0.5]   (SMDP discount; routes to *_beta<val>)
+                        [view=full]  (default for aepn: reverse edges + per-layer global attention +
+                                      count-aware aggregation, the lossless whole-net view; *_fv)
+                        [view=local]  (forward edges only, the pre-2026-10-17 default and the
+                                       unsuffixed result dirs; default for non-aepn nets)
+                        [critic_mask=1]  (view=full: the critic's attention also stays inside
+                                          each component, as the actor's does; *_cm)
                         [postpone=0|1|component]  (no / global / per-component
                                      postpone; *_nopp, unsuffixed, *_ppc)
 The insurer envs default to postpone=0. nfgae needs postpone=0 or component.
@@ -57,6 +65,10 @@ PLR = None                     # plr=x: policy learning rate override (routes to
 FLAT = False                   # flat=1: flat graph observations (needs net=temb|tembf|aepn; routes to *_flat)
 NET = "aepn"                   # net=hgt|temb|tembf|aepn: actor+critic encoder (default aepn; *_aepn dirs, hgt = the old unsuffixed dirs)
 BASES = None                   # bases=K: AEPNStack basis count (default 8; routes to *_b<K>)
+BS = None                      # bs=k: minibatch size override (default Hyper.batch_size; routes to *_bs<k>)
+MARKING = False                # cert=marking: nfgae recomputes the certificate at the current marking (routes to *_mc)
+VIEW = None                    # view=local|full (*'' / *_fv); default full for aepn (the library default), local otherwise
+CRITIC_MASK = False            # critic_mask=1: view=full critic attention also stays inside components (*_cm)
 
 for _a in sys.argv[1:]:
     if _a.startswith("env="):
@@ -81,6 +93,20 @@ for _a in sys.argv[1:]:
         PLR = float(_a.split("=", 1)[1])
     elif _a.startswith("flat="):
         FLAT = _a.split("=", 1)[1] not in ("0", "false", "False")
+    elif _a.startswith("cert="):
+        _v = _a.split("=", 1)[1]
+        if _v not in ("static", "marking"):
+            raise SystemExit(f"cert must be static or marking, got {_v!r}")
+        MARKING = _v == "marking"
+    elif _a.startswith("view="):
+        _v = _a.split("=", 1)[1]
+        if _v not in ("local", "full"):
+            raise SystemExit(f"view must be local or full, got {_v!r}")
+        VIEW = _v
+    elif _a.startswith("critic_mask="):
+        CRITIC_MASK = _a.split("=", 1)[1] in ("1", "true", "True")
+    elif _a.startswith("bs="):
+        BS = int(_a.split("=", 1)[1])
     elif _a.startswith("bases="):
         BASES = int(_a.split("=", 1)[1])
     elif _a.startswith("net="):
@@ -95,8 +121,11 @@ for _a in sys.argv[1:]:
 # The insurer is work-conserving by design (insurer_env.py): no postpone unless asked.
 if ENV.startswith("insurer") and not _POSTPONE_SET:
     POSTPONE = False
-if set(METHODS) - {"ppo", "nfgae"}:
-    raise SystemExit(f"unknown methods {sorted(set(METHODS) - {'ppo', 'nfgae'})}; choose from ppo, nfgae")
+if VIEW is None:
+    VIEW = "full" if NET == "aepn" else "local"
+if set(METHODS) - {"ppo", "nfgae", "agents"}:
+    raise SystemExit(f"unknown methods {sorted(set(METHODS) - {'ppo', 'nfgae', 'agents'})}; "
+                     "choose from ppo, nfgae, agents")
 if ENV not in BPM_BUILDERS:
     raise SystemExit(f"unknown env {ENV!r}; choose from {sorted(BPM_BUILDERS)}")
 BUILD = BPM_BUILDERS[ENV]
@@ -110,8 +139,12 @@ OUTDIR = RESULTS / (f"bpm_{ENV}_n{N}_ep{EPOCHS}" + ("" if EPOCHS == 40 else f"_s
               + ("" if BASES is None else f"_b{BASES}")
               + ("" if EPISODES == 8 else f"_eps{EPISODES}")
               + ("" if PLR is None else f"_plr{PLR:g}")
+              + ("" if BS is None else f"_bs{BS}")
               + ("_flat" if FLAT else "")
-              + ("_local" if LOCAL else ""))
+              + ("_local" if LOCAL else "")
+              + ("_mc" if MARKING else "")
+              + {"local": "", "full": "_fv"}[VIEW]
+              + ("_cm" if CRITIC_MASK else ""))
 TAG = f"bpm-{ENV}-n{N}"
 
 
@@ -137,7 +170,7 @@ def _baselines():
 def _args(method, seed, cfg, logdir):
     a = {
         "algorithm": "ppo-clip",
-        "episodes": EPISODES, "epochs": EPOCHS, "batch_size": cfg.batch_size,
+        "episodes": EPISODES, "epochs": EPOCHS, "batch_size": cfg.batch_size if BS is None else BS,
         "policy_lr": cfg.policy_lr if PLR is None else PLR, "policy_updates": cfg.policy_updates,
         "value_lr": cfg.value_lr, "value_updates": cfg.value_updates,
         "eps": cfg.ppo_eps, "gam": cfg.gam, "lam": cfg.lam, "ent_bonus": cfg.ent_bonus,
@@ -154,13 +187,25 @@ def _args(method, seed, cfg, logdir):
     net_kw = {"encoder": NET}
     if BASES is not None:
         net_kw["encoder_kwargs"] = {"num_bases": BASES}
+    if VIEW == "full":
+        if NET != "aepn":
+            raise SystemExit("view=full needs net=aepn (global attention is built into AEPNStack)")
+        net_kw["encoder_kwargs"] = {**net_kw.get("encoder_kwargs", {}), "global_attn": True, "count_aggr": True}
     a["policy_kwargs"] = dict(net_kw)
     a["value_kwargs"] = dict(net_kw)
+    if CRITIC_MASK:
+        if VIEW != "full":
+            raise SystemExit("critic_mask=1 needs view=full")
+        a["value_kwargs"]["encoder_kwargs"] = {**net_kw.get("encoder_kwargs", {}), "component_mask": True}
     if FLAT:
         a["flat_obs"] = True
     if LOCAL and method == "nfgae":
         a["local_obs"] = True
-    a.update({"smdp_discount": True, "nfgae": method == "nfgae"})
+    if MARKING and method in ("nfgae", "agents"):
+        a["marking_certificate"] = True
+    a["global_view"] = {"local": False, "full": "edges"}[VIEW]
+    a.update({"smdp_discount": True, "nfgae": method in ("nfgae", "agents"),
+              "component_agents": method == "agents"})
     return a
 
 

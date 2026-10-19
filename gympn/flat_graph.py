@@ -117,6 +117,11 @@ def hetero_to_flat(graph, metadata, width: int = None) -> FlatGraph:
         o, n = spans.get(nt, (0, 0))
         return torch.arange(o, o + n, dtype=torch.long)
 
+    kw = {}
+    kept = [nt for nt, (o, n) in spans.items() if n > 0]
+    if kept and all(getattr(graph[nt], 'comp', None) is not None for nt in kept):
+        # net component of every node, in flat order (global attention groups)
+        kw['comp'] = torch.cat([graph[nt].comp for nt in kept])
     return FlatGraph(x=x, ntype=t, edge_index=edge_index, etype=et,
                      a_idx=positions('a_transition'), p_idx=positions('postpone'),
-                     num_nodes=int(x.size(0)))
+                     num_nodes=int(x.size(0)), **kw)

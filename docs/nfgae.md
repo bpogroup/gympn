@@ -88,9 +88,11 @@ each of them:
 
 1. **A local actor.** The logit of an action must depend only on its own
    component's marking. gympn's graph actor satisfies this by construction:
-   messages flow only along the net's arcs, so no information crosses a
-   component boundary. Do not use `global_context=True` on the actor with
-   NF-GAE.
+   messages flow only along the net's arcs, and the AEPN encoder's global
+   attention stays inside the node's component, so no information crosses a
+   component boundary. Do not turn that restriction off on the actor
+   (`encoder_kwargs={"component_mask": False}`) with NF-GAE; the critic may
+   read the whole net, and does by default.
 2. **No global postponement.** A global postpone action reads the whole net and
    freezes every component at once, which couples them. Either leave
    postponement off (the default) or use component-scoped postponement, which

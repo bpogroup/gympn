@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import HGTConv, TransformerConv, global_max_pool
-from torch_geometric.utils import softmax as pyg_softmax
+from torch_geometric.utils import softmax as pyg_softmax, to_dense_batch
 
 from gympn.flat_graph import cat_flat, feature_width, flatten_hetero, is_flat
 
@@ -128,6 +128,23 @@ def _pool_mask(graph, ntype):
     return None
 
 
+def _attention_groups(batch, comp):
+    """Global-attention group of every node: its graph in the batch and, when
+    the observation carries net components (GymProblem._add_component_ids),
+    its component. Nodes of no component (comp -1) form a group each."""
+    if comp is None:
+        return batch
+    comp = comp.to(batch.device)
+    span = int(comp.max().item()) + 2 if comp.numel() else 1
+    key = batch * span + comp + 1
+    lone = comp < 0
+    if lone.any():
+        top = int(key.max().item()) + 1
+        key = key.clone()
+        key[lone] = top + torch.arange(int(lone.sum()), device=key.device)
+    return torch.unique(key, return_inverse=True)[1]
+
+
 def _encode_graph(encoder, graph, input_size, params):
     """Node embeddings for the action-side types, from a HeteroData or a
     FlatGraph (the latter needs a flat encoder: TypeEmbedStack / AEPNStack)."""
@@ -135,8 +152,14 @@ def _encode_graph(encoder, graph, input_size, params):
         if not hasattr(encoder, 'encode_flat'):
             raise TypeError("flat observations need encoder='type_embed', 'type_embed_film' or 'aepn'")
         dev = encoder.in_weight.device
+        kw = {}
+        if getattr(encoder, 'global_attn', False):
+            b = getattr(graph, 'batch', None)
+            b = torch.zeros(graph.x.size(0), dtype=torch.long, device=dev) if b is None else b.to(dev)
+            comp = getattr(graph, 'comp', None) if getattr(encoder, 'component_mask', True) else None
+            kw['batch'] = _attention_groups(b, comp)
         h = encoder.encode_flat(graph.x.to(dev), graph.ntype.to(dev),
-                                graph.edge_index.to(dev), graph.etype.to(dev))
+                                graph.edge_index.to(dev), graph.etype.to(dev), **kw)
         x_enc = {'a_transition': h[graph.a_idx.to(dev)], 'postpone': h[graph.p_idx.to(dev)]}
     else:
         x_enc = encoder(x_dict=graph.x_dict, edge_index_dict=graph.edge_index_dict,
@@ -276,8 +299,10 @@ def _project_in(x, t, in_weight, in_bias):
     return torch.einsum('nf,nfh->nh', x, in_weight[:, :w][t]) + in_bias[t]
 
 
-def _encode_hetero(enc, x_dict, edge_index_dict):
-    """HeteroData dicts -> dict of node embeddings by type, via enc.encode_flat."""
+def _encode_hetero(enc, x_dict, edge_index_dict, graph=None):
+    """HeteroData dicts -> dict of node embeddings by type, via enc.encode_flat.
+    An encoder with global attention also gets each node's graph index, read
+    from graph (a batched HeteroData; all zeros for a single graph)."""
     x_dict, edge_index_dict = x_dict or {}, edge_index_dict or {}
     device, H = enc.in_weight.device, enc.hidden_channels
     w = feature_width(x_dict)
@@ -285,7 +310,15 @@ def _encode_hetero(enc, x_dict, edge_index_dict):
     if not xs:
         return {nt: torch.empty((0, H), device=device) for nt in spans}
     x, t, edge_index, e_t = cat_flat(xs, tidx, eis, eidx, w, device=device, dtype=enc.in_weight.dtype)
-    h = enc.encode_flat(x, t, edge_index.to(device), e_t.to(device))
+    kw = {}
+    if getattr(enc, 'global_attn', False):
+        kept = [nt for nt, (o, n) in spans.items() if n > 0]
+        batch = torch.cat([_batch_index_for(graph, nt, spans[nt][1], device).to(device) for nt in kept])
+        comps = [getattr(graph[nt], 'comp', None) if graph is not None else None for nt in kept]
+        comp = (torch.cat(comps).to(device) if getattr(enc, 'component_mask', True) and comps
+                and all(c is not None for c in comps) else None)
+        kw['batch'] = _attention_groups(batch, comp)
+    h = enc.encode_flat(x, t, edge_index.to(device), e_t.to(device), **kw)
     return {nt: h[o:o + n] if n > 0 else h.new_empty((0, H)) for nt, (o, n) in spans.items()}
 
 
@@ -433,10 +466,33 @@ class AEPNStack(nn.Module):
         activation: str = "relu",
         max_in_features: int = 32,
         num_bases: int = 8,
+        global_attn: bool = True,
+        count_aggr: bool = True,
+        component_mask: bool = True,
     ):
         super().__init__()
         if metadata is None:
             raise ValueError("AEPNStack needs the graph metadata (node and edge types)")
+        # Lossless whole-net conditioning (both on by default; networks
+        # pickled before they existed load with both off):
+        #  * global_attn: every layer adds multi-head self-attention over all
+        #    nodes of the same graph, restricted to the node's net component
+        #    when the observation carries components, so NF-GAE's locality
+        #    (Theorem 1, C2) holds (GPS: local message passing + global
+        #    attention), so each node reads every other node directly, with
+        #    its own query, instead of through a shared summary;
+        #  * count_aggr: every layer adds the mean incoming message scaled by
+        #    log(1 + in-degree) (PNA-style degree scaling) to the attention
+        #    aggregate, which alone is a weighted average and cannot tell one
+        #    token from two identical ones.
+        #  * component_mask: the attention stays inside the node's net
+        #    component when the observation carries components. NF-GAE needs
+        #    it in the actor (C2); a critic may read the whole graph
+        #    (Theorem 2(b) holds for any V_c), and HeteroCritic turns the
+        #    mask off by default.
+        self.global_attn = bool(global_attn)
+        self.count_aggr = bool(count_aggr)
+        self.component_mask = bool(component_mask)
         self.num_layers = int(num_layers)
         self.hidden_channels = H = int(hidden_channels)
         self.heads = int(heads)
@@ -479,6 +535,12 @@ class AEPNStack(nn.Module):
             self.r_bases = nn.ParameterList([bases() for _ in range(L)])
             self.r_coef = nn.ParameterList([coeffs(n_nt) for _ in range(L)])
 
+        if self.global_attn:
+            self.g_attn = nn.ModuleList([nn.MultiheadAttention(H, self.heads, dropout=float(dropout),
+                                                               batch_first=True) for _ in range(L)])
+        if self.count_aggr:
+            self.cnt_lin = nn.ModuleList([nn.Linear(H, H) for _ in range(L)])
+
         if activation == "relu":
             self.act = nn.ReLU()
         elif activation == "elu":
@@ -487,12 +549,25 @@ class AEPNStack(nn.Module):
             self.act = nn.GELU()
         self.drop = nn.Dropout(float(dropout))
 
+    def _global(self, li, h, batch):
+        """Self-attention of every node over the nodes of its own group:
+        its graph, and within it its net component when the observation
+        carries components (networks._attention_groups)."""
+        if batch is None:
+            batch = torch.zeros(h.size(0), dtype=torch.long, device=h.device)
+        perm = torch.argsort(batch, stable=True)          # to_dense_batch needs sorted graphs
+        hd, mask = to_dense_batch(h[perm], batch[perm])   # [G, Nmax, H]
+        out, _ = self.g_attn[li](hd, hd, hd, key_padding_mask=~mask, need_weights=False)
+        res = torch.empty_like(h)
+        res[perm] = out[mask]
+        return res
+
     def _mix(self, h, bases, coef, idx):
         """Per-item transform sum_b coef[idx, b] * (h @ V_b), for h [M, H]."""
         P = (h @ bases).view(h.size(0), self.num_bases, self.hidden_channels)
         return torch.einsum('mb,mbh->mh', coef[idx], P)
 
-    def _layer(self, li, h, t, src, dst, e_t):
+    def _layer(self, li, h, t, src, dst, e_t, batch=None):
         N, H, nh = h.size(0), self.hidden_channels, self.heads
         d = H // nh
         if src.numel() > 0:
@@ -506,9 +581,15 @@ class AEPNStack(nn.Module):
             alpha = pyg_softmax(score, dst, num_nodes=N)                    # [E, heads]
             msg = (v.view(-1, nh, d) * alpha.unsqueeze(-1)).view(-1, H)
             agg = h.new_zeros(N, H).index_add_(0, dst, msg)
+            if getattr(self, 'count_aggr', False):
+                deg = h.new_zeros(N).index_add_(0, dst, torch.ones_like(dst, dtype=h.dtype))
+                mean_v = h.new_zeros(N, H).index_add_(0, dst, v) / deg.clamp(min=1).unsqueeze(-1)
+                agg = agg + self.cnt_lin[li](mean_v * torch.log1p(deg).unsqueeze(-1))
         else:
             agg = h.new_zeros(N, H)
         out = self._mix(F.gelu(agg), self.o_bases[li], self.o_coef[li], t)
+        if getattr(self, 'global_attn', False):
+            out = out + self._global(li, h, batch)
         if li > 0:
             g = torch.sigmoid(self.skip[li][t]).unsqueeze(-1)
             out = g * out + (1 - g) * h
@@ -516,17 +597,30 @@ class AEPNStack(nn.Module):
             out = out + self._mix(h, self.r_bases[li], self.r_coef[li], t)
         return self.drop(self.act(out))
 
-    def encode_flat(self, x, t, edge_index, e_t):
-        """Flat graph -> node embeddings [N, H]."""
+    def encode_flat(self, x, t, edge_index, e_t, batch=None):
+        """Flat graph -> node embeddings [N, H]. batch: each node's graph
+        index (global_attn only; None = one graph)."""
         h = _project_in(x, t, self.in_weight, self.in_bias)
         src, dst = edge_index[0], edge_index[1]
         for li in range(self.num_layers):
-            h = self._layer(li, h, t, src, dst, e_t)
+            h = self._layer(li, h, t, src, dst, e_t, batch)
         return h
 
     def forward(self, x_dict, edge_index_dict, input_size=None, graph=None, params_iter=None):
-        return _encode_hetero(self, x_dict, edge_index_dict)
+        return _encode_hetero(self, x_dict, edge_index_dict, graph)
 
+
+
+def policy_global_view(model):
+    """The GymProblem.global_view a trained network was built for, read from
+    its metadata: 'edges' (reverse edge types) or False (none). None when the
+    network has no metadata."""
+    meta = getattr(model, 'metadata', None)
+    if meta is None:
+        return None
+    if any(str(e[1]).endswith('_rev') for e in meta[1]):
+        return 'edges'
+    return False
 
 
 def _make_encoder(encoder, **kw):
@@ -710,6 +804,11 @@ class HeteroCritic(ActorCritic):
         self.num_heads = num_heads
         self.dropout = dropout
 
+        # The critic's attention reads the whole net by default: NF-GAE needs
+        # component-local logits in the actor only (C2), and a critic that
+        # sees every component can value a partial allocation.
+        if encoder == "aepn":
+            encoder_kwargs = {"component_mask": False, **(encoder_kwargs or {})}
         self.encoder = _make_encoder(
             encoder,
             **(encoder_kwargs or {}),

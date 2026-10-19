@@ -178,7 +178,8 @@ def test_aepn_matches_reference(heads, bases):
     torch.manual_seed(0)
     meta, gs = _graphs(2, 2)
     g = gs[1]
-    enc = AEPNStack(-1, 16, 3, meta, heads=heads, dropout=0.0, num_bases=bases).eval()
+    enc = AEPNStack(-1, 16, 3, meta, heads=heads, dropout=0.0, num_bases=bases,
+                    global_attn=False, count_aggr=False).eval()   # the reference is the local layer
     with torch.no_grad():                    # move gates/scales off their init so they are exercised
         for li in range(3):
             enc.skip[li].normal_(); enc.p_rel[li].uniform_(0.5, 2.0)

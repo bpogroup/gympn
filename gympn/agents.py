@@ -538,7 +538,10 @@ class Agent:
                     g_['a_transition'].pool_mask = mask_a
                     if any(is_pp):                     # postpone nodes, in the same order
                         g_['postpone'].pool_mask = mask_p
-                nf_comp_ep.append(c_dec)
+                # Marking-based certificate: name the component by its member
+                # transitions (ids are renumbered as the partition refines).
+                nf_comp_ep.append(pn.net_component_members(c_dec)
+                                  if getattr(pn, 'marking_certificate', False) else c_dec)
 
             # Collect for batch processing
             states_batch.append(state)

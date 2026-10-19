@@ -81,6 +81,23 @@ class GymProblem(SimProblem):
         self.comp_reward = {}
         self._net_partition_cache = None
         self._net_place_partition = None
+        # Marking-based certificate (nfgae): recompute the partition whenever
+        # the set of marked places changes, so transitions that can no longer
+        # fire stop coupling components. Off by default: the partition is then
+        # computed once and cached. With it on, comp_reward is keyed by
+        # transition id instead of component id (component ids are renumbered
+        # when the partition refines; see net_component_members).
+        self.marking_certificate = False
+        self._net_partition_sig = None
+        # Global view: score every action from the whole visible net. 'edges'
+        # (the default) adds the reverse of every edge type (u, rel, v) as
+        # (v, rel + '_rev', u), so messages flow against token flow too, and
+        # gives every node its net component (_add_component_ids); the AEPN
+        # encoder then attends over the whole component
+        # (AEPNStack(global_attn=True, count_aggr=True), its default). False
+        # gives the old forward-only graph, where an action's logit depends
+        # only on what is forward-reachable from it within num_layers hops.
+        self.global_view = 'edges'
         # Postpone scope. 'global' (default): one postpone pseudo-binding; choosing
         # it blocks every action until the next event fires anywhere.
         # 'component': one postpone_c per net component (net_partition) with an
@@ -915,6 +932,10 @@ class GymProblem(SimProblem):
             transition_binding_map.append((['postpone'], self.clock, None)) #no binding, time is current clock
 
 
+        if getattr(self, 'global_view', False):
+            self._add_global_view(ret_graph)
+            self._add_component_ids(ret_graph, transition_binding_map, keep_comp)
+
         if self.metadata is None: #TODO: handle case where postpone is initially not available
             # a component-turn observation holds one component only
             self.metadata = self.make_metadata() if keep_comp is not None else ret_graph.metadata()
@@ -925,8 +946,64 @@ class GymProblem(SimProblem):
         if getattr(self, 'flat_obs', False):
             ret_graph = self._to_flat(ret_graph)
 
-        return {'graph': ret_graph, 'actions_dict': transition_binding_map}#{'graph': ret_graph, 'mask': mask_graph, 'actions_dict': transition_binding_map}
+        obs = {'graph': ret_graph, 'actions_dict': transition_binding_map}
+        if keep_comp is not None:
+            # whose turn it is, by member transitions (gympn.component_agents)
+            obs['component'] = self.net_component_members(keep_comp)
+        return obs
 
+
+    def match_policy_view(self, model):
+        """Set global_view to the one a trained policy was built for
+        (networks.policy_global_view), so policies trained before the
+        whole-net view became the default still get the graphs they know.
+        Component agents (gympn.component_agents.ComponentPolicy) also bring
+        the turn and certificate settings they were trained under."""
+        from .networks import policy_global_view
+        view = policy_global_view(model)
+        if view is not None and view != self.global_view:
+            self.global_view = view
+            self.metadata = None
+            self._flat_meta = None
+        for k, v in (getattr(model, 'pn_settings', None) or {}).items():
+            setattr(self, k, v)
+
+    def _add_component_ids(self, g, transition_binding_map, keep_comp=None):
+        """Store each node's net component (net_partition, so the marking
+        certificate when it is on) as g[nt].comp, a long tensor, -1 for nodes
+        of no component (dead parts, a global postpone). The AEPN encoder's
+        global attention stays inside a component, so an action's logit is a
+        function of its own component only (NF-GAE Theorem 1, C2), while it
+        still reads every node of that component. Same node attribution as
+        _add_component_postpone_nodes."""
+        part, place_part = self.net_partition(), self.net_place_partition()
+        real = [b for b in transition_binding_map if b[0] != ['postpone']]
+        a_comp = [part.get(b[2]._id) for b in real]
+        e_comp = [part.get(GymProblem._get_string_before_last_dot(t._id) if '.' in t._id else t._id)
+                  for t in self.expanded_pn.events]
+        pp = self._postpone_entries(real) if self._component_postpone() else []
+        for nt in list(g.node_types):
+            x = g[nt].x
+            n = 0 if x is None else x.size(0)
+            if keep_comp is not None:
+                comps = [keep_comp] * n
+            elif nt == 'a_transition':
+                comps = a_comp[:n]
+            elif nt == 'e_transition':
+                comps = e_comp[:n]
+            elif nt == 'postpone':
+                comps = [e[2].comp for e in pp][:n] if pp else [None] * n
+            else:
+                comps = [place_part.get(nt)] * n
+            g[nt].comp = torch.tensor([-1 if c is None else int(c) for c in comps], dtype=torch.long)
+
+    def _add_global_view(self, g):
+        """global_view: add the reverse of every edge type (self-loops
+        excepted), in place. make_metadata lists the same types."""
+        for (src, rel, dst) in list(g.edge_types):
+            if rel == 'self_loop':
+                continue
+            g[(dst, rel + '_rev', src)].edge_index = g[(src, rel, dst)].edge_index.flip(0)
 
     def _to_flat(self, ret_graph):
         """HeteroData observation -> FlatGraph (flat_obs; see gympn/flat_graph.py).
@@ -1524,7 +1601,16 @@ class GymProblem(SimProblem):
         at that time (the initial one, in practice) and cached; the topology
         is fixed."""
         cache = getattr(self, '_net_partition_cache', None)
-        if cache is not None:
+        if getattr(self, 'marking_certificate', False):
+            # Marking-based certificate: valid while the set of marked places is
+            # unchanged. Live(M') is a subset of Live(M) for every M' reachable
+            # from M (the places marked at M' are markable from M), so the
+            # partition only ever refines along a trajectory.
+            sig = frozenset(p._id for p in self.places if p.marking)
+            if cache is not None and sig == getattr(self, '_net_partition_sig', None):
+                return cache
+            self._net_partition_sig = sig
+        elif cache is not None:
             return cache
         parent = {}
 
@@ -1573,6 +1659,14 @@ class GymProblem(SimProblem):
         """Component id of every place (see net_partition)."""
         self.net_partition()
         return self._net_place_partition
+
+    def net_component_members(self, c):
+        """The live transitions of component c in the current partition, as a
+        frozenset of transition ids. With the marking-based certificate this is
+        the stable name of a component: ids are renumbered when the partition
+        refines, member sets are not."""
+        part = self.net_partition()
+        return frozenset(t for t, k in part.items() if k == c and k is not None)
 
     def _turn_component(self, expanded_pn):
         """Component turns (nfgae local encoding): the lowest component id with
@@ -1669,7 +1763,10 @@ class GymProblem(SimProblem):
                     "Transition " + transition._id + ": reward function evaluate to a non-numeric type for values " + str(
                         variable_values) + ".")
             self.reward += r_f
-            c = self.net_partition().get(transition._id)
+            if getattr(self, 'marking_certificate', False):
+                c = transition._id         # matched against member sets by nfgae
+            else:
+                c = self.net_partition().get(transition._id)
             self.comp_reward[c] = self.comp_reward.get(c, 0.0) + r_f
 
         else:
@@ -1731,6 +1828,13 @@ class GymProblem(SimProblem):
             a2a = ('a_transition', 'a_to_a', 'a_transition')
             if a2a not in edges_meta:
                 edges_meta.append(a2a)
+
+        if getattr(self, 'global_view', False):
+            # the reverse edge types _add_global_view creates
+            for (src, rel, dst) in list(edges_meta):
+                rev = (dst, rel + '_rev', src)
+                if rel != 'self_loop' and rev not in edges_meta:
+                    edges_meta.append(rev)
 
         # Optionally add reverse edge types for all discovered edge types so the GNN
         # can pass messages bidirectionally without relying on the conv implementation
@@ -1873,16 +1977,27 @@ class GymProblem(SimProblem):
             encs = [(getattr(args, k, None) or {}).get('encoder', 'aepn') for k in ('policy_kwargs', 'value_kwargs')]
             if any(e not in flat_encoders for e in encs):
                 raise ValueError(f"flat_obs needs a flat encoder for actor and critic, got {encs}")
+        if getattr(args, 'component_agents', False):
+            # one agent per component: component turns and net-factored credit
+            args.local_obs = True
+            args.nfgae = True
         if getattr(args, 'local_obs', False):
             if not args.nfgae:
                 raise ValueError("local_obs is for nfgae: its advantage and critic are per component")
-            if self.allow_postpone:
-                raise ValueError("local_obs needs allow_postpone=False (component turns are work-conserving)")
+            if self.allow_postpone and getattr(self, 'postpone_scope', 'global') != 'component':
+                raise ValueError("local_obs needs allow_postpone=False or postpone_scope='component' "
+                                 "(a global postpone couples the components)")
         # Set before AEPN_Env deep-copies the problem, so the frozen copy (reset)
         # and the test env carry it too.
         self.component_turns = bool(getattr(args, 'local_obs', False))
+        if getattr(args, 'marking_certificate', False) and not args.nfgae:
+            raise ValueError("marking_certificate is for nfgae: it changes how decisions are credited")
+        self.marking_certificate = bool(getattr(args, 'marking_certificate', False))
         self.flat_obs = bool(getattr(args, 'flat_obs', False))
+        self.global_view = getattr(args, 'global_view', 'edges') or False
         self._flat_meta = None
+        if self.global_view:
+            self.metadata = None        # re-read with the extra edge types
 
         env = AEPN_Env(self)
 
@@ -2125,6 +2240,8 @@ class GymProblem(SimProblem):
         :return: The total reward accumulated during the testing run.
         """
         # ---- Setup identical to environment.reset() ----
+        if hasattr(solver, 'policy_model'):
+            self.match_policy_view(solver.policy_model)
         if seed is not None:
             self.set_seed(seed)
         self.length = length

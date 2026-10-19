@@ -42,10 +42,16 @@ Conditions:
 - **C1 (place-disjointness).** Holds by construction of the partition.
 - **C2 (local actor).** The logit of a binding a in component c is a function of
   component c's marking only: ℓ(a, s) = ℓ(a, s_c). The policy is the softmax over
-  all enabled bindings. HeteroActor satisfies this when `global_context=False`: the
+  all enabled bindings. HeteroActor satisfies this: the
   observation graph's edges are directed token-flow edges inside the net, so there
   is no message-passing path between components. The postpone node only *receives*
-  edges (`simulator.py:916`), and it is absent under C3.
+  edges (`simulator.py:916`), and it is absent under C3. The default whole-net view
+  (`global_view='edges'`, since 2026-10-17) keeps C2: reverse edges and count
+  aggregation follow the same edges, and the AEPN encoder's global attention is
+  restricted to the node's component in the actor (`GymProblem._add_component_ids`),
+  so a logit reads every node of its own component and nothing outside it. The
+  critic's attention is not restricted (Theorem 2(b) holds for any V_c)
+  (`tests/test_nfgae.py`, `tests/test_global_view.py`, bit-identical checks).
 - **C3 (work-conserving).** No postpone. Time advances to the next event only when
   no binding is enabled anywhere.
 - **C3' (component postpone — replaces C3).** Implemented as
@@ -92,8 +98,8 @@ the same under every a_k.
    event noise, and c's own local-softmax draws. These are independent across c. ∎
 
 **Why each condition is needed.**
-- *C2.* `global_context=True` pools the whole graph into every logit, so it breaks
-  C2.
+- *C2.* Global attention without the component restriction in the actor
+  (`component_mask=False`) lets every logit read the whole graph, so it breaks C2.
 - *C3.* A global postpone breaks C3. Its logit reads the whole graph, and choosing it
   ends the instant for every component. Hence the paper runs postpone OFF, as
   multi-site already does. A per-component postpone would restore C3; that is future
@@ -109,8 +115,13 @@ For decision i of component c:
     A^c_i = δ^c_i + λ Γ^c_i A^c_{i+1}
 
 The policy gradient is ĝ = Σ_c Σ_i ∇log π(a_{k_i} | s_{k_i}) A^c_i. The critic is
-additive, V(s) = Σ_c V_c(s). Head V_c reads only component c's nodes and is
-regressed on A^c_i + V_c(s_{k_i}) at c's own epochs.
+additive, V(s) = Σ_c V_c(s). Head V_c pools component c's nodes and is
+regressed on A^c_i + V_c(s_{k_i}) at c's own epochs. Under the default view those
+node embeddings also attend to the other components (the critic's attention is not
+component-masked, since 2026-10-19), so V_c is a function of the whole state. Nothing
+below needs V_c to be local: (b) holds for any V_c, and under Theorem 1 the target
+V_c^π(s) = E[c's return | s] depends on s_c only, so a whole-state V_c can still reach
+it.
 
 **Theorem 2.**
 - **(a) Exactness at K=1.** With K=1, every epoch is an epoch of the single

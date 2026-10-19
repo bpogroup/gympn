@@ -104,19 +104,20 @@ def _uw_done(b):
     return [SimToken(b[-1])]
 
 
-def _add_underwriting(ag, tag, mismatch=3):
+def _add_underwriting(ag, tag, mismatch=3, codes=(0, 1)):
     arrival = ag.add_var(f"uw_arrival_{tag}", var_attributes=['task_type'])
     wait = ag.add_var(f"uw_wait_{tag}", var_attributes=['task_type'])
     busy = ag.add_var(f"uw_busy_{tag}", var_attributes=['task_type', 'code'])
     team = ag.add_var(f"uw_team_{tag}", var_attributes=['code'])
-    team.put({'code': 0})
-    team.put({'code': 1})
+    for code in codes:
+        team.put({'code': code})
     arrival.put({'task_type': 0})
     wait.put({'task_type': 0})
     wait.put({'task_type': 1})
     ag.add_event([arrival], [arrival, wait], _uw_arrive, name=f'uw_arrive_{tag}')
     ag.add_action([wait, team], [busy], behavior=_uw_starter(mismatch), name=f"uw_start_{tag}")
     ag.add_event([busy], [team], _uw_done, name=f'uw_done_{tag}', reward_function=lambda x: 1)
+    return team
 
 
 # --------------------------------------------------------- complaints
@@ -313,6 +314,119 @@ def _builder(processes, shared_clerks=False, uw_mismatch=3):
     return build
 
 
+# ------------------------------------------------- start-of-shift allocation
+# ALLOCATION VARIANT (builder "insurer_alloc"). Same headcount as the insurer
+# (6 staff per region), but half of it is a flexible pool assigned at the start
+# of the shift: each region starts with one generalist claims clerk, one
+# generalist complaints clerk and one type-0 underwriter, plus a pool of two
+# expert clerks and one generalist. An allocation action moves one pool member
+# to claims, to complaints, or to underwriting as a type-0 or type-1
+# underwriter. The pool has no producer, so once it is empty the allocation
+# transitions are dead for good.
+#
+# WHY. The allocation couples the three processes of a region (the pool place
+# touches all of them), so the static certificate sees ONE component per region
+# and NF-GAE reduces to joint PPO there. After the pool is empty the processes
+# are exactly independent again: a marking-based certificate (dead transitions
+# pruned at the current marking) splits each region into 3 components. The
+# allocation needs the organisation's credit; every later decision needs only
+# its own process's credit. Separate per-process learners cannot make the
+# allocation at all.
+#
+# All allocation happens at time 0: allocation bindings stay enabled while the
+# pool is non-empty and the clock only advances when no binding is enabled.
+ALLOC_POOL = (1, 1, 0)                    # skills of the flexible staff
+ALLOC_DESTS = ("cl", "co", "uw0", "uw1")
+
+
+def _alloc_to_clerks(s):
+    return [SimToken({'skill': s['skill']})]
+
+
+def _alloc_to_uw(code):
+    def move(s):
+        return [SimToken({'code': code})]
+    return move
+
+
+def make_insurer_alloc(regions=1, allow_postpone=False, pool=ALLOC_POOL):
+    """The insurer with a start-of-shift allocation of a flexible pool (see the
+    comment above). Without the pool (pool=()), the regions are understaffed
+    insurers with three independent processes each."""
+    ag = GymProblem(allow_postpone=allow_postpone)
+    hidden = {}
+    for i in range(regions):
+        tag = str(i)
+        cl_clerks = ag.add_var(f"cl_clerks_{tag}", var_attributes=['skill'])
+        cl_clerks.put({'skill': 0})
+        co_clerks = ag.add_var(f"co_clerks_{tag}", var_attributes=['skill'])
+        co_clerks.put({'skill': 0})
+        _add_claims(ag, tag, hidden, cl_clerks)
+        team = _add_underwriting(ag, tag, codes=(0,))
+        _add_complaints(ag, tag, hidden, co_clerks)
+        if pool:
+            staff = ag.add_var(f"staff_{tag}", var_attributes=['skill'])
+            for skill in pool:
+                staff.put({'skill': skill})
+            ag.add_action([staff], [cl_clerks], behavior=_alloc_to_clerks, name=f"al_cl_{tag}")
+            ag.add_action([staff], [co_clerks], behavior=_alloc_to_clerks, name=f"al_co_{tag}")
+            ag.add_action([staff], [team], behavior=_alloc_to_uw(0), name=f"al_uw0_{tag}")
+            ag.add_action([staff], [team], behavior=_alloc_to_uw(1), name=f"al_uw1_{tag}")
+    ag.set_unobservable(token_attrs=hidden)
+    return ag
+
+
+def _alloc_binding(b):
+    """(destination, skill) of an allocation binding, or None."""
+    tr = str(getattr(b[2], '_id', None) or getattr(b[2], 'name', ''))
+    if not tr.startswith('al_'):
+        return None
+    dest = tr.split('_')[1]
+    vals = [getattr(tok, 'value', tok) for (_place, tok) in b[0]]
+    skill = next(v['skill'] for v in vals if isinstance(v, dict) and 'skill' in v)
+    return dest, skill
+
+
+def make_alloc_heuristic(plan):
+    """Heuristic for the allocation variant: allocate by `plan`, an ordered list
+    of (destination, skill), then run the insurer's myopic rule. Step k of a
+    region's allocation is read off the bindings (k = pool size - pool members
+    still enabled), so the heuristic is stateless and works with
+    HeuristicSolver."""
+    plan = list(plan)
+
+    def heuristic(observable_net, tokens_comb, bindings=None):
+        if not bindings:
+            return None
+        alloc, ops = [], []
+        for b in bindings:
+            ab = (_alloc_binding(b) if isinstance(b, tuple) and b and isinstance(b[0], list)
+                  else None)
+            (alloc if ab is not None else ops).append((b, ab))
+        if alloc:
+            pool_left = {}
+            for b, _ in alloc:
+                region = str(getattr(b[2], '_id', '')).rsplit('_', 1)[-1]
+                pool_left.setdefault(region, set()).add(id(b[0][0][1]))
+            for b, (dest, skill) in alloc:
+                region = str(getattr(b[2], '_id', '')).rsplit('_', 1)[-1]
+                k = len(plan) - len(pool_left[region])
+                if 0 <= k < len(plan) and plan[k] == (dest, skill):
+                    return b
+            return alloc[0][0]
+        return insurer_heuristic(observable_net, tokens_comb, [b for b, _ in ops])
+    heuristic.plan = list(plan)
+    return heuristic
+
+
+# Best plan by enumeration (all 40 allocations of the pool, heuristic operations,
+# 40 episodes each under common random numbers): one expert to claims, one to
+# complaints, the generalist to underwriting as a type-1 underwriter (53.6
+# completions at 1 region; worst plan 40.6, mean over plans 47.2).
+ALLOC_PLAN = [("cl", 1), ("co", 1), ("uw1", 0)]
+alloc_heuristic = make_alloc_heuristic(ALLOC_PLAN)
+
+
 # N = regions. "insurer" is the full organisation; the *_alone builders are the
 # same sub-nets on their own (the per-process controls).
 INSURER_BUILDERS = {
@@ -325,4 +439,14 @@ INSURER_BUILDERS = {
     "insurer_slow": _builder(PROCESSES, uw_mismatch=7),
     "insurer_underwriting_slow": _builder(("underwriting",), uw_mismatch=7),
 }
+
+
+def _alloc_builder(n=1, allow_postpone=False):
+    return make_insurer_alloc(n, allow_postpone=allow_postpone)
+
+
+_alloc_builder.uw_mismatch = 3
+_alloc_builder.wait_anchor = False
+INSURER_BUILDERS["insurer_alloc"] = _alloc_builder
 INSURER_HEURISTICS = {name: insurer_heuristic for name in INSURER_BUILDERS}
+INSURER_HEURISTICS["insurer_alloc"] = alloc_heuristic

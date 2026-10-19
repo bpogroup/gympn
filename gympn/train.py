@@ -2,6 +2,7 @@
 """Entry point for all training runs."""
 
 import argparse
+import copy
 import datetime
 import json
 import subprocess
@@ -219,6 +220,26 @@ def make_parser():
                        default=False,
                        help='nfgae only: component turns, so each decision observes and encodes only '
                             'its own component (GymProblem.component_turns); needs no global postpone')
+    train.add_argument('--component_agents',
+                       type=lambda x: str(x).lower() == 'true',
+                       default=False,
+                       help='one PPO agent per net component, with its own networks, deciding in '
+                            'component turns and credited with the return of its component (implies '
+                            'local_obs and nfgae; gympn.component_agents)')
+    train.add_argument('--global_view',
+                       type=lambda x: {'false': False, 'off': False, 'true': 'edges',
+                                       'edges': 'edges'}[str(x).lower()],
+                       default='edges',
+                       help="'edges' (default): reverse edges for every arc type, with the AEPN "
+                            "encoder's global attention and count aggregation, so every action is "
+                            "scored from the whole visible net; false: forward edges only, no global "
+                            "attention (GymProblem.global_view)")
+    train.add_argument('--marking_certificate',
+                       type=lambda x: str(x).lower() == 'true',
+                       default=False,
+                       help='nfgae only: recompute the net partition at the current marking, so '
+                            'transitions that can no longer fire stop coupling components; a decision '
+                            'is credited with its component at decision time (GymProblem.marking_certificate)')
     train.add_argument('--test_in_train',
                        type=lambda x: str(x).lower() == 'true',
                        default=True,
@@ -347,13 +368,24 @@ def make_policy_network(args, metadata=None):
                 dropout=args.policy_kwargs.get("dropout", 0.0),
                 residual=args.policy_kwargs.get("residual", True),
                 encoder=args.policy_kwargs.get("encoder", "aepn"),
-                encoder_kwargs=args.policy_kwargs.get("encoder_kwargs"),
+                encoder_kwargs=_view_encoder_kwargs(args, args.policy_kwargs),
             )
         else:
             raise Exception("No policy network to load!")
     else:
         raise Exception("Unknown environment! Are you sure it is spelled correctly?")
     return policy_network
+
+
+def _view_encoder_kwargs(args, net_kwargs):
+    """encoder_kwargs for one network. The AEPN encoder's global attention and
+    count aggregation (on by default) belong to the default whole-net view,
+    global_view='edges'; with another view they default to off. Values set
+    in encoder_kwargs win."""
+    kw = net_kwargs.get("encoder_kwargs")
+    if net_kwargs.get("encoder", "aepn") != "aepn" or getattr(args, 'global_view', 'edges') == 'edges':
+        return kw
+    return {"global_attn": False, "count_aggr": False, **(kw or {})}
 
 
 def make_value_network(args, metadata=None):
@@ -390,7 +422,7 @@ def make_value_network(args, metadata=None):
             dropout=args.value_kwargs.get("dropout", 0.0),
             residual=args.value_kwargs.get("residual", True),
             encoder=args.value_kwargs.get("encoder", "aepn"),
-            encoder_kwargs=args.value_kwargs.get("encoder_kwargs"),
+            encoder_kwargs=_view_encoder_kwargs(args, args.value_kwargs),
             metadata=metadata
         )
     else:
@@ -415,6 +447,15 @@ def make_agent(args, metadata=None):
     agent : PGAgent (experimental) or PPOAgent
         The agent.
     """
+    if getattr(args, 'component_agents', False):
+        from gympn.component_agents import ComponentAgents
+        sub = copy.copy(args)
+        sub.component_agents = False
+        agents = ComponentAgents(lambda: make_agent(sub, metadata=metadata),
+                                 beta=getattr(args, 'beta', 0.0), lam=args.lam,
+                                 marking_certificate=getattr(args, 'marking_certificate', False))
+        agents.agent_seed = getattr(args, 'agent_seed', None)
+        return agents
     policy_network = make_policy_network(args, metadata=metadata)
     value_network = make_value_network(args, metadata=metadata)
 

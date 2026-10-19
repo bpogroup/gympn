@@ -140,7 +140,7 @@ def test_actor_logits_local_to_component(encoder):
     pn_a, g_a, c_a = _obs(0)
     pn_b, g_b, c_b = _obs(3)
     actor = HeteroActor(input_size=-1, hidden_size=32, num_layers=3,
-                        metadata=pn_a.make_metadata(), num_heads=2, global_context=False,
+                        metadata=pn_a.make_metadata(), num_heads=2,
                         encoder=encoder)
     actor.eval()
 
@@ -270,7 +270,7 @@ def test_actor_logits_local_with_component_postpone(encoder):
     pn_a, g_a, c_a = obs(0)
     pn_b, g_b, c_b = obs(3)
     actor = HeteroActor(input_size=-1, hidden_size=32, num_layers=3,
-                        metadata=pn_a.make_metadata(), num_heads=2, global_context=False,
+                        metadata=pn_a.make_metadata(), num_heads=2,
                         encoder=encoder)
     actor.eval()
 
@@ -394,3 +394,197 @@ def test_component_turns_same_logits(encoder):
         used.add(i); sel.append(i)
     assert len(loc_binds) >= 1 and len(loc_binds) < len(full_binds)
     assert torch.allclose(l_full[sel], l_loc, atol=1e-5)
+
+
+# --------------------------------------------------------------------------- #
+# Start-of-shift allocation variant (insurer_alloc)
+# --------------------------------------------------------------------------- #
+def _alloc_run(regions, plan, seed=0, marking=False, probe=None):
+    """Step an insurer_alloc episode with a plan-following heuristic until the
+    allocation is over; return the env. probe(pn) runs on the initial state."""
+    from insurer_env import make_insurer_alloc, make_alloc_heuristic, _alloc_binding
+    random.seed(seed); np.random.seed(seed)
+    pn = make_insurer_alloc(regions)
+    pn.length = 20
+    pn.marking_certificate = marking
+    env = AEPN_Env(pn)
+    env.reset()
+    if probe is not None:
+        probe(env.pn)
+    heur = make_alloc_heuristic(plan)
+    while any(_alloc_binding(b) for b in env.pn.pn_actions):
+        b = heur(None, None, env.pn.pn_actions)
+        env.step(env.pn.pn_actions.index(b))
+    return env
+
+
+@pytest.mark.parametrize("regions", [1, 2])
+def test_partition_insurer_alloc_static(regions):
+    """The pool couples the three processes of a region: one component each."""
+    from insurer_env import INSURER_BUILDERS
+    assert _n_comps(INSURER_BUILDERS["insurer_alloc"](regions)) == regions
+
+
+@pytest.mark.parametrize("regions", [1, 2])
+def test_partition_insurer_alloc_after_allocation(regions):
+    """Once the pool is empty the allocation transitions are dead, and the
+    certificate recomputed at the current marking splits every region into
+    its three processes."""
+    from insurer_env import ALLOC_PLAN
+    env = _alloc_run(regions, ALLOC_PLAN)
+    assert env.pn.clock == 0                          # allocation takes no time
+    places = {p._id: p for p in env.pn.places}
+    assert all(len(places[f"staff_{r}"].marking) == 0 for r in range(regions))
+    env.pn._net_partition_cache = None
+    assert _n_comps(env.pn) == 3 * regions
+
+
+def test_alloc_heuristic_follows_plan():
+    """The stateless heuristic executes an ordered plan, including a split of
+    the two identical experts."""
+    env = _alloc_run(1, [("cl", 1), ("co", 1), ("uw1", 0)])
+    places = {p._id: p for p in env.pn.places}
+
+    def skills(name, key):
+        return sorted(getattr(t, 'value', t)[key] for t in places[name].marking)
+    # busy clerks are not in their pool place, so count pool + busy
+    def staff(proc, key):
+        busy = [getattr(t, 'value', t)[1][key] for t in places[f"{proc}_busy_0"].marking]
+        return sorted(skills(f"{proc}_{'team' if proc == 'uw' else 'clerks'}_0", key) + busy)
+    assert staff("cl", "skill") == [0, 1]
+    assert staff("co", "skill") == [0, 1]
+    assert staff("uw", "code") == [0, 1]
+
+
+# --------------------------------------------------------------------------- #
+# Marking-based certificate (GymProblem.marking_certificate)
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("regions", [1, 2])
+def test_marking_certificate_refines(regions):
+    """Marking-based: one component per region while the pool is non-empty,
+    three per region once it is empty. Static (default): the partition is
+    computed once, at first use, and stays coarse."""
+    from insurer_env import ALLOC_PLAN
+    seen = {}
+    env = _alloc_run(regions, ALLOC_PLAN, marking=True,
+                     probe=lambda pn: seen.setdefault("start", _n_comps(pn)))
+    assert seen["start"] == regions
+    assert _n_comps(env.pn) == 3 * regions
+    env = _alloc_run(regions, ALLOC_PLAN, marking=False,
+                     probe=lambda pn: seen.setdefault("static", _n_comps(pn)))
+    assert seen["static"] == regions and _n_comps(env.pn) == regions
+
+
+def test_marking_certificate_members_and_reward_labels():
+    """Members of a component are its live transitions; rewards are keyed by
+    transition and still sum to the step reward."""
+    from insurer_env import make_insurer_alloc
+    random.seed(0); np.random.seed(0)
+    pn = make_insurer_alloc(1)
+    pn.length = 20
+    pn.marking_certificate = True
+    env = AEPN_Env(pn)
+    env.reset()
+    region = env.pn.net_component_members(0)
+    assert {"al_cl_0", "cl_approve_0", "uw_start_0", "co_check_0"} <= region
+    done = False
+    while not done and env.pn.pn_actions:
+        _, r, done, _, info = env.step(np.random.randint(len(env.pn.pn_actions)))
+        assert abs(sum(info['comp_reward'].values()) - r) < 1e-9
+        assert all(k in region for k in info['comp_reward'])
+    assert abs(sum(env.pn.comp_reward.values()) - env.pn.reward) < 1e-9
+
+
+def test_refining_gae_equals_static_without_splits():
+    """With components that never split, the refining recursion (frozenset
+    components, rewards keyed by transition) equals the static one."""
+    rng = np.random.default_rng(1)
+    T = 60
+    comp = rng.integers(0, 3, T).tolist()
+    members = {c: frozenset({f"t{c}a", f"t{c}b"}) for c in range(3)}
+    rw_static, rw_trans = [], []
+    for _ in range(T):
+        st, tr = {}, {}
+        for c in range(3):
+            if rng.random() < 0.4:
+                r = float(rng.integers(1, 3))
+                st[c] = st.get(c, 0.0) + r
+                key = f"t{c}" + ("a" if rng.random() < 0.5 else "b")
+                tr[key] = tr.get(key, 0.0) + r
+        rw_static.append(st)
+        rw_trans.append(tr)
+    rewards = [sum(d.values()) for d in rw_static]
+    values = rng.normal(size=T)
+    times = np.cumsum(rng.integers(0, 3, T)).astype(float)
+    kw = dict(nfgae=True, gam=0.99, lam=0.9, beta=0.3, smdp_discount=True)
+    a_static = _finish(TrajectoryBuffer(**kw), rewards, values, times, comp=comp, rw=rw_static)
+    a_ref = _finish(TrajectoryBuffer(**kw), rewards, values, times,
+                    comp=[members[c] for c in comp], rw=rw_trans)
+    assert torch.allclose(a_static, a_ref, atol=1e-5)
+
+
+def test_refining_gae_lambda1_is_component_return():
+    """lam = 1 with nested splits: the advantage of a decision is its
+    component's return minus its value. Each reward of transition x fired at
+    step s is discounted from the latest step u in [t, s] at which x's
+    component decided (the SMDP convention: undiscounted within a step)."""
+    G, A, BC, B, C = (frozenset(x) for x in ("abc", "a", "bc", "b", "c"))
+    comp = [G, G, A, BC, A, B, C, A, B, C]
+    T = len(comp)
+    rng = np.random.default_rng(2)
+    rw = [{x: float(rng.integers(1, 4)) for x in "abc" if rng.random() < 0.5} for _ in range(T)]
+    rewards = [sum(d.values()) for d in rw]
+    values = rng.normal(size=T)
+    times = np.cumsum(rng.integers(0, 3, T)).astype(float)
+    beta = 0.4
+    a = _finish(TrajectoryBuffer(nfgae=True, gam=1.0, lam=1.0, beta=beta, smdp_discount=True),
+                rewards, values, times, comp=comp, rw=rw)
+    expected = []
+    for t in range(T):
+        ret = 0.0
+        for x in comp[t]:
+            chain = [u for u in range(t, T) if x in comp[u]]
+            for s_ in range(t, T):
+                p = max(u for u in chain if u <= s_)
+                ret += rw[s_].get(x, 0.0) * math.exp(-beta * (times[p] - times[t]))
+        expected.append(ret - values[t])
+    assert torch.allclose(a, torch.tensor(expected, dtype=torch.float32), atol=1e-5)
+
+
+def test_marking_certificate_training_path(monkeypatch, tmp_path):
+    """One real nfgae epoch on insurer_alloc with the marking certificate goes
+    through the refining recursion: the first decisions are credited to the
+    whole region, the later ones to the region's three processes."""
+    from gympn.data import TrajectoryBuffer as TB
+    from insurer_env import make_insurer_alloc
+    seen = []
+    orig = TB._nfgae_refining
+
+    def spy(self, values_ep, comp, rw, times):
+        seen.append(list(comp))
+        return orig(self, values_ep, comp, rw, times)
+    monkeypatch.setattr(TB, "_nfgae_refining", spy)
+    random.seed(0); np.random.seed(0)
+    pn = make_insurer_alloc(1)
+    args = {"algorithm": "ppo-clip", "episodes": 1, "epochs": 1, "batch_size": 8,
+            "nfgae": True, "marking_certificate": True, "smdp_discount": True,
+            "flat_obs": True, "policy_kwargs": {"encoder": "aepn"},
+            "value_kwargs": {"encoder": "aepn"},
+            "test_in_train": False, "use_wandb": False, "open_tensorboard": False,
+            "verbose": 0, "use_gpu": False, "agent_seed": 0, "logdir": str(tmp_path),
+            "save_freq": 1_000_000, "datetag": False, "name": "mc"}
+    saved = sys.argv
+    sys.argv = sys.argv[:1]
+    try:
+        pn.training_run(length=20, args_dict=args)
+    finally:
+        sys.argv = saved
+    assert seen, "the refining recursion was not used"
+    comps = seen[0]
+    region = comps[0]
+    assert {"al_cl_0", "cl_approve_0", "uw_start_0", "co_check_0"} <= region
+    later = {c for c in comps if c != region}
+    assert len(later) == 3 and all(c < region for c in later)
+    assert not any((x & y) for x in later for y in later if x != y)
+    first_split = next(i for i, c in enumerate(comps) if c != region)
+    assert all(c != region for c in comps[first_split:])     # never coarsens again

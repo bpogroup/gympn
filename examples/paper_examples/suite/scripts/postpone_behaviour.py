@@ -40,6 +40,9 @@ def _process(tid):
     return {"cl": "claims", "uw": "underwriting", "co": "complaints"}[tid[:2]]
 
 
+PN_VIEW = None     # global_view of the replayed policy (set by policy_chooser)
+
+
 def episode(seed, mode, choose):
     import torch
     from gympn.environment import AEPN_Env
@@ -47,6 +50,8 @@ def episode(seed, mode, choose):
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
     pn = INSURER_BUILDERS["insurer_slow"](REGIONS, allow_postpone=mode is not None)
     pn.length = LENGTH
+    if PN_VIEW is not None:
+        pn.global_view = PN_VIEW
     if mode == "component":
         pn.postpone_scope = 'component'
     env = AEPN_Env(pn)
@@ -85,8 +90,11 @@ def episode(seed, mode, choose):
 
 def policy_chooser(path):
     import torch
+    from gympn.networks import policy_global_view
+    global PN_VIEW
     pol = torch.load(path, weights_only=False)
     pol.eval()
+    PN_VIEW = policy_global_view(pol)       # the graphs this policy was trained on
 
     def choose(env, obs):
         with torch.no_grad():

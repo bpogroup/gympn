@@ -8,7 +8,7 @@ allow_postpone=False. Anchors are the stored ones
 computed on the same no-postpone net.
 
 Run: python scripts/run_multisite_protocol.py [workers] [seeds=20] [methods=ppo,nfgae] [epochs=40]
-                                      [net=aepn|hgt] [flat=1] [threads=T] [tag=X]
+                                      [net=aepn|hgt] [flat=1] [threads=T] [tag=X] [view=local|full]
 (epochs != 40 routes to a scratch dir: smoke only). Resumable by cell file.
 net: actor+critic encoder, default aepn. The cells in
 results/multisite_protocol are HGT (PPO only), so net=hgt keeps that
@@ -16,6 +16,9 @@ directory and any other net routes to results/multisite_protocol_<net>[_flat]:
 the two networks never share a results directory. flat=1: flat graph
 observations (gympn/flat_graph.py; non-HGT nets). threads=T overrides the
 per-worker torch threads (default: physical cores / workers).
+view: full (default for aepn; routes to *_fv) is the library's whole-net
+view (reverse edges + global attention); local is the forward-only graph
+that every existing results directory was produced with.
 """
 import json
 import os
@@ -49,6 +52,7 @@ METHODS = ["ppo", "nfgae"]
 NET = "aepn"
 FLAT = False
 THREADS = None
+VIEW = None     # view=local|full (default full for aepn, local otherwise)
 TAG = None      # tag=X: separate results directory *_X (e.g. a rerun next to existing cells)
 
 for _a in sys.argv[1:]:
@@ -56,6 +60,10 @@ for _a in sys.argv[1:]:
         NET = _a.split("=", 1)[1]
     elif _a.startswith("flat="):
         FLAT = _a.split("=", 1)[1] not in ("0", "false", "False")
+    elif _a.startswith("view="):
+        VIEW = _a.split("=", 1)[1]
+        if VIEW not in ("local", "full"):
+            raise SystemExit(f"view must be local or full, got {VIEW!r}")
     elif _a.startswith("tag="):
         TAG = _a.split("=", 1)[1]
     elif _a.startswith("threads="):
@@ -69,6 +77,12 @@ for _a in sys.argv[1:]:
         OUTDIR = RESULTS / f"multisite_protocol_smoke{EPOCHS}"
 if NET != "hgt" or FLAT:
     OUTDIR = Path(f"{OUTDIR}_{NET}" + ("_flat" if FLAT else ""))
+if VIEW is None:
+    VIEW = "full" if NET == "aepn" else "local"
+if VIEW == "full":
+    if NET != "aepn":
+        raise SystemExit("view=full needs net=aepn (global attention is built into AEPNStack)")
+    OUTDIR = Path(f"{OUTDIR}_fv")
 if TAG:
     OUTDIR = Path(f"{OUTDIR}_{TAG}")
 if set(METHODS) - {"ppo", "nfgae"}:
@@ -94,6 +108,7 @@ def _args(method, seed, cfg, logdir):
     }
     if FLAT:
         a["flat_obs"] = True
+    a["global_view"] = "edges" if VIEW == "full" else False
     a.update({"smdp_discount": True, "nfgae": method == "nfgae"})
     return a
 
