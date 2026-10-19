@@ -63,6 +63,8 @@ def train():
     import torch
     torch.set_num_threads(THREADS)
     Agent.test_in_train = _snapshotting(Agent.test_in_train)
+    from gympn.component_agents import ComponentAgents
+    ComponentAgents.test_in_train = _snapshotting(ComponentAgents.test_in_train)
     base = os.path.join(run_bpm.RESULTS, "bpm_insurer_alloc_n1_ep40_nopp_aepn_flat", "baselines_N1.json")
     baselines = json.load(open(base))
     cfg = run_bpm.Hyper()

@@ -96,10 +96,12 @@ def policy_chooser(path):
     view = policy_global_view(pol)          # the graphs this policy was trained on
     if view is not None:
         PN_ATTRS["global_view"] = view
+    PN_ATTRS.update(getattr(pol, 'pn_settings', None) or {})   # component agents: turns, certificate
 
     def choose(env, obs):
         with torch.no_grad():
-            probs = pol({'graph': obs['graph']}).flatten()   # the actor outputs probabilities
+            data = {'graph': obs['graph'], 'component': obs.get('component')}
+            probs = pol(data).flatten()                      # the actor outputs probabilities
             assert abs(float(probs.sum()) - 1.0) < 1e-4, "expected action probabilities"
             return int(torch.argmax(probs).item()), probs.tolist()
     return choose
