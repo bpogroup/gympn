@@ -94,120 +94,72 @@ def series(ax, x, C, color, label, ls="-", marker=None):
     return m
 
 
-# ------------------------------------------------------- Fig. 2: curves
+# ------------------------------------------------------- learning curves
+AGENTS_F = "#0d6e4c"                  # component agents with a full batch: darker aqua
+
+
+def probe_curves(pattern, w=5):
+    """{seed: normalised greedy curve} for the allocation runs of alloc_long_probe,
+    as a trailing moving average over w evaluations (single evaluations are noisy)."""
+    out = {}
+    for f in glob.glob(os.path.join(RESULTS, "alloc_long_probe", pattern, "cell.json")):
+        c = json.load(open(f))
+        b = c["baselines"]
+        seed = int(os.path.basename(os.path.dirname(f)).split("_s")[1].split("_")[0])
+        g = (np.array(c["greedy_curve"]) - b["random_mean"]) / (b["heuristic_mean"] - b["random_mean"])
+        out[seed] = np.array([g[max(0, i - w + 1):i + 1].mean() for i in range(len(g))])
+    return out
+
+
+def panel(ax, arms, title, epochs):
+    for C, color, label, ls in arms:
+        x = 3 * (np.arange(len(next(iter(C.values())))) + 1)
+        series(ax, x, C, color, label, ls=ls)
+    ax.axhline(1.0, color=MUTED, lw=0.8, ls=(0, (4, 3)), zorder=1)
+    ax.set_xlim(0, epochs)
+    ax.set_title(title, color=INK, loc="left")
+
+
 def fig_curves():
-    fig, axes = plt.subplots(1, 2, figsize=(TEXT_W, 2.25), sharey=True)
-    for ax, regions, title in ((axes[0], 1, "1 region ($K=3$)"), (axes[1], 2, "2 regions ($K=6$)")):
-        d = f"bpm_insurer_n{regions}_ep40_nopp_aepn_flat"
-        P, N, U = curves(d, "ppo"), curves(d, "nfgae"), per_process(regions)
-        x = 3 * (np.arange(len(next(iter(P.values())))) + 1)
-        ax.set_xlim(0, 40)
-        series(ax, x, P, PPO, "PPO")
-        series(ax, x, U, UNIT, "Per-process", ls=(0, (3, 2)))
-        series(ax, x, N, NFGAE, "NF-GAE")
+    """Insurer with 1 and 2 regions, start-of-shift allocation, slow mismatch."""
+    fig, axes = plt.subplots(2, 2, figsize=(TEXT_W, 4.3))
+    for ax, regions in ((axes[0][0], 1), (axes[0][1], 2)):
+        d = f"bpm_insurer_n{regions}_ep40_nopp_aepn_flat_fv"
+        panel(ax, [(curves(d, "ppo"), PPO, "PPO", "-"),
+                   (curves(d, "agents"), UNIT, "Comp. agents (S)", (0, (3, 2))),
+                   (curves(d + "_abfull", "agents"), AGENTS_F, "Comp. agents (F)", (0, (1, 1.5))),
+                   (curves(d, "nfgae"), NFGAE, "NF-GAE", "-")],
+              f"Insurer, {regions} region{'s' if regions > 1 else ''} ($K={3 * regions}$)", 40)
         ax.set_ylim(0.2, 1.25)
-        ref_line(ax, 1.0, "heuristic") if regions == 2 else ax.axhline(1.0, color=MUTED, lw=0.8, ls=(0, (4, 3)), zorder=1)
-        ax.set_title(title, color=INK)
-        ax.set_xlabel("epoch")
-    axes[0].set_ylabel("normalised return")
-    fig.tight_layout(w_pad=1.2, rect=(0, 0.1, 1, 1))
-    h, l = axes[0].get_legend_handles_labels()
-    fig.legend(h, l, loc="lower center", ncol=3, frameon=False, handlelength=2.4, columnspacing=2.0,
-               bbox_to_anchor=(0.5, -0.01))
-    fig.savefig(os.path.join(OUT, "fig_curves.pdf"))
-    plt.close(fig)
-
-
-# ------------------------------------------------------- Fig. 3: gain vs K
-def fig_gain_vs_k():
-    cells = [(2, "bpm_insurer_shared_n1_ep40_nopp_aepn_flat"),
-             (3, "bpm_insurer_n1_ep40_nopp_aepn_flat"),
-             (6, "bpm_insurer_n2_ep40_nopp_aepn_flat")]
-    rows = []
-    for k, d in cells:
-        P, N = curves(d, "ppo"), curves(d, "nfgae")
-        s = sorted(set(P) & set(N))
-        for name, f in (("final", lambda g: g[-1]), ("whole-run mean", lambda g: g.mean())):
-            dd = np.array([f(N[i]) - f(P[i]) for i in s])
-            rows.append((name, k, dd.mean(), tcrit(len(dd)) * dd.std(ddof=1) / np.sqrt(len(dd))))
-    fig, ax = plt.subplots(figsize=(TEXT_W * 0.62, 2.2))
-    ax.axhline(0, color=MUTED, lw=0.8)
-    for name, color, ls, mk, dx in (("whole-run mean", NFGAE, "-", "o", -0.08), ("final", NFGAE, (0, (3, 2)), "s", 0.08)):
-        R = [r for r in rows if r[0] == name]
-        ks = np.array([r[1] for r in R]) + dx
-        ax.errorbar(ks, [r[2] for r in R], yerr=[r[3] for r in R], color=color, ls=ls, marker=mk, ms=4,
-                    capsize=2, lw=1.4, elinewidth=0.9, label=name)
-        ax.text(ks[-1] + 0.25, R[-1][2], name, color=INK, fontsize=7.5, va="center")
-    ax.plot([1], [0], marker="D", ms=4, color=MUTED, ls="none")
-    ax.annotate("$K=1$: identical\nto PPO", (1, 0), xytext=(0.75, 0.24), fontsize=7.5, color=MUTED,
-                arrowprops=dict(arrowstyle="-", color=MUTED, lw=0.6, shrinkA=1, shrinkB=3))
-    ax.set_xticks([1, 2, 3, 6])
-    ax.set_xlim(0.6, 9.2)
-    ax.set_xlabel("independent processes $K$")
-    ax.set_ylabel("NF-GAE $-$ PPO")
-    fig.tight_layout()
-    fig.savefig(os.path.join(OUT, "fig_gain_vs_k.pdf"))
-    plt.close(fig)
-
-
-# ------------------------------------------------------- Fig. 4: postponement
-def fig_postpone():
-    arms = [("PPO", "none", "_nopp", "ppo", PPO, "o"),
-            ("NF-GAE", "none", "_nopp", "nfgae", NFGAE, "o"),
-            ("PPO", "global", "", "ppo", PPO, "^"),
-            ("PPO", "component", "_ppc", "ppo", PPO, "s"),
-            ("NF-GAE", "component", "_ppc", "nfgae", NFGAE, "s")]
-    # work-conserving rate rule, normalised with the same anchors (1 = waiting heuristic)
-    work_conserving = {1: 0.873, 2: 0.865}
-    fig, axes = plt.subplots(2, 2, figsize=(TEXT_W, 4.75), gridspec_kw={"width_ratios": [1, 1.25]})
-    rng = np.random.default_rng(0)
-    for row, regions in enumerate((1, 2)):
-        ax1, ax2 = axes[row]
-        d = lambda suf: f"bpm_insurer_slow_n{regions}_ep40{suf}_aepn_flat"
-        for i, (meth, pp, suf, m, color, mk) in enumerate(arms):
-            C = curves(d(suf), m)
-            fin = np.array([C[s][-1] for s in sorted(C)])
-            y = len(arms) - 1 - i
-            ax1.scatter(fin, y + rng.uniform(-0.13, 0.13, len(fin)), s=16, color=color, alpha=0.6, lw=0,
-                        marker=mk, zorder=3)
-            ax1.plot([fin.mean()] * 2, [y - 0.3, y + 0.3], color=INK, lw=1.4, zorder=4)
-        ax1.set_yticks(range(len(arms)))
-        ax1.set_yticklabels([f"{a[0]}, {a[1]}" for a in arms][::-1])
-        ax1.grid(axis="y", visible=False)
-        ax1.set_xlim(0.42, 1.18)
-        for xv, lab, ha, dx in ((1.0, "waiting\nheuristic", "left", 0.008),
-                                (work_conserving[regions], "work-\nconserving", "right", -0.008)):
-            ax1.axvline(xv, color=MUTED, lw=0.8, ls=(0, (4, 3)), zorder=1)
-            ax1.text(xv + dx, len(arms) - 0.45, lab, color=MUTED, fontsize=7, ha=ha, va="bottom")
-        ax1.set_ylim(-0.5, len(arms) + 0.15)
-        ax1.set_xticks([0.5, 0.7, 0.9, 1.1])
-        ax1.set_title(f"{regions} region{'s' if regions > 1 else ''} ($K={3 * regions}$): final return per seed",
-                      color=INK, loc="left", x=-0.62)
-
-        for meth, pp, suf, m, color, ls in (("NF-GAE", "component", "_ppc", "nfgae", NFGAE, "-"),
-                                            ("NF-GAE", "none", "_nopp", "nfgae", NFGAE, (0, (3, 2))),
-                                            ("PPO", "global", "", "ppo", PPO, "-"),
-                                            ("PPO", "component", "_ppc", "ppo", PPO, (0, (3, 2)))):
-            C = curves(d(suf), m)
-            x = 3 * (np.arange(len(next(iter(C.values())))) + 1)
-            series(ax2, x, C, color, f"{meth} ({pp})", ls=ls)
-        ax2.set_xlim(0, 40)
-        ax2.set_ylim(0.15, 1.12)
-        ax2.axhline(1.0, color=MUTED, lw=0.8, ls=(0, (4, 3)), zorder=1)
-        ax2.set_ylabel("normalised return")
-        ax2.set_title("training curves", color=INK, loc="left")
-    axes[1][0].set_xlabel("final normalised return")
-    axes[1][1].set_xlabel("epoch")
-    fig.tight_layout(w_pad=1.0, h_pad=1.4, rect=(0, 0.075, 1, 1))
-    h, l = axes[0][1].get_legend_handles_labels()
-    fig.legend(h, l, loc="lower center", ncol=2, frameon=False, handlelength=2.4, columnspacing=2.0,
+    ax = axes[1][0]
+    panel(ax, [(probe_curves("ppo_s*_ep150_beta0.05_fv"), PPO, "PPO", "-"),
+               (probe_curves("agents_mc_s*_ep150_beta0.05_fv"), UNIT, "Comp. agents (S)", (0, (3, 2))),
+               (probe_curves("agents_mc_s*_ep150_beta0.05_fv_abfull"), AGENTS_F, "Comp. agents (F)", (0, (1, 1.5))),
+               (probe_curves("nfgae_mc_s*_ep150_beta0.05"), NFGAE, "NF-GAE, forward only", (0, (5, 1, 1, 1))),
+               (probe_curves("nfgae_mc_s*_ep150_beta0.05_fv"), NFGAE, "NF-GAE", "-")],
+          "Start-of-shift allocation", 150)
+    ax.set_ylim(0.0, 1.25)
+    ax.text(147, 0.62, "NF-GAE,\nforward only", color=NFGAE, fontsize=7, ha="right", va="top")
+    ax = axes[1][1]
+    d = lambda suf: f"bpm_insurer_slow_n1_ep40{suf}_aepn_flat_fv"
+    panel(ax, [(curves(d(""), "ppo"), PPO, "PPO, global wait", "-"),
+               (curves(d("_ppc"), "ppo"), PPO, "PPO, component wait", (0, (3, 2))),
+               (curves(d("_ppc"), "nfgae"), NFGAE, "NF-GAE, component wait", "-")],
+          "Slow mismatch, 1 region", 40)
+    ax.set_ylim(0.0, 1.2)
+    ax.legend(loc="lower right", frameon=False, fontsize=7, handlelength=2.2, labelspacing=0.25, borderaxespad=0.1)
+    for a in axes[1]:
+        a.set_xlabel("epoch")
+    for a in axes[:, 0]:
+        a.set_ylabel("normalized return")
+    fig.tight_layout(w_pad=1.0, h_pad=1.2, rect=(0, 0.06, 1, 1))
+    h, l = axes[0][0].get_legend_handles_labels()
+    fig.legend(h, l, loc="lower center", ncol=4, frameon=False, handlelength=2.4, columnspacing=1.4,
                bbox_to_anchor=(0.5, -0.005))
-    fig.savefig(os.path.join(OUT, "fig_postpone.pdf"))
+    fig.savefig(os.path.join(OUT, "fig_curves.pdf"))
     plt.close(fig)
 
 
 if __name__ == "__main__":
     fig_curves()
-    fig_gain_vs_k()
-    fig_postpone()
     print("figures written to", OUT)
