@@ -27,6 +27,9 @@ import numpy as np  # noqa: E402
 RESULTS = os.path.join(SUITE, "results")
 LENGTH, EPISODES, SEED0 = 20, 20, 777_000
 REGIONS = int(next((a.split("=")[1] for a in sys.argv[1:] if a.startswith("regions=")), 1))
+# view=full replays the runs with the component-scoped observation (results dirs *_fv)
+VIEW = next((a.split("=")[1] for a in sys.argv[1:] if a.startswith("view=")), "local")
+TAG = "_fv" if VIEW == "full" else ""
 ARMS = {  # (label, results dir suffix, method, postpone mode)
     "PPO / none": ("_nopp_aepn_flat", "ppo", None),
     "NF-GAE / none": ("_nopp_aepn_flat", "nfgae", None),
@@ -111,7 +114,7 @@ def run_arm(label):
         eps = [episode(SEED0 + i, "component", choose) for i in range(EPISODES)]
         return label, [eps]
     suffix, method, mode = ARMS[label]
-    d = os.path.join(RESULTS, f"bpm_insurer_slow_n{REGIONS}_ep40{suffix}", "train")
+    d = os.path.join(RESULTS, f"bpm_insurer_slow_n{REGIONS}_ep40{suffix}{TAG}", "train")
     runs = []
     for path in sorted(glob.glob(os.path.join(d, f"{method}__s*", "best_policy.pth"))):
         ch = policy_chooser(path)
@@ -140,8 +143,8 @@ def main():
         results = pool.map(run_arm, labels)
     print("per-episode means over runs (each run = one seed's best checkpoint, 20 scenarios):")
     out = report(results)
-    json.dump(out, open(os.path.join(RESULTS, "postpone_behaviour_results.json" if REGIONS == 1
-                                else f"postpone_behaviour_results_n{REGIONS}.json"), "w"), indent=1)
+    name = "postpone_behaviour_results" + ("" if REGIONS == 1 else f"_n{REGIONS}") + TAG + ".json"
+    json.dump(out, open(os.path.join(RESULTS, name), "w"), indent=1)
 
 
 if __name__ == "__main__":

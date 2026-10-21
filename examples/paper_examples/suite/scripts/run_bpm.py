@@ -68,6 +68,7 @@ BASES = None                   # bases=K: AEPNStack basis count (default 8; rout
 BS = None                      # bs=k: minibatch size override (default Hyper.batch_size; routes to *_bs<k>)
 MARKING = False                # cert=marking: nfgae recomputes the certificate at the current marking (routes to *_mc)
 VIEW = None                    # view=local|full (*'' / *_fv); default full for aepn (the library default), local otherwise
+AGENT_BATCH = "share"          # abatch=full: component agents each get the full batch size (*_abfull)
 CRITIC_MASK = False            # critic_mask=1: view=full critic attention also stays inside components (*_cm)
 
 for _a in sys.argv[1:]:
@@ -93,6 +94,10 @@ for _a in sys.argv[1:]:
         PLR = float(_a.split("=", 1)[1])
     elif _a.startswith("flat="):
         FLAT = _a.split("=", 1)[1] not in ("0", "false", "False")
+    elif _a.startswith("abatch="):
+        AGENT_BATCH = _a.split("=", 1)[1]
+        if AGENT_BATCH not in ("share", "full"):
+            raise SystemExit(f"abatch must be share or full, got {AGENT_BATCH!r}")
     elif _a.startswith("cert="):
         _v = _a.split("=", 1)[1]
         if _v not in ("static", "marking"):
@@ -144,7 +149,8 @@ OUTDIR = RESULTS / (f"bpm_{ENV}_n{N}_ep{EPOCHS}" + ("" if EPOCHS == 40 else f"_s
               + ("_local" if LOCAL else "")
               + ("_mc" if MARKING else "")
               + {"local": "", "full": "_fv"}[VIEW]
-              + ("_cm" if CRITIC_MASK else ""))
+              + ("_cm" if CRITIC_MASK else "")
+              + ("_abfull" if AGENT_BATCH == "full" else ""))
 TAG = f"bpm-{ENV}-n{N}"
 
 
@@ -204,6 +210,8 @@ def _args(method, seed, cfg, logdir):
     if MARKING and method in ("nfgae", "agents"):
         a["marking_certificate"] = True
     a["global_view"] = {"local": False, "full": "edges"}[VIEW]
+    if method == "agents":
+        a["agent_batch"] = AGENT_BATCH
     a.update({"smdp_discount": True, "nfgae": method in ("nfgae", "agents"),
               "component_agents": method == "agents"})
     return a

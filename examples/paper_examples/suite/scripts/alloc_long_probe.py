@@ -9,7 +9,7 @@ decision puts on each allocation option, and its return.
 
 Run: python scripts/alloc_long_probe.py [epochs=150] [seed=0] [method=nfgae]
                                         [cert=marking|static] [threads=4] [beta=x]
-                                        [view=local|full] [critic_mask=1]
+                                        [view=local|full] [critic_mask=1] [abatch=share|full]
 Output: results/alloc_long_probe/<method><_mc>_s<seed>_ep<epochs>/
         (train/ snapshots, cell.json, probe.json)
 """
@@ -31,16 +31,18 @@ THREADS = int(opts.get("threads", 4))
 BETA = float(opts["beta"]) if "beta" in opts else None   # SMDP discount (Hyper.beta if None)
 VIEW = opts.get("view", "full")
 CRITIC_MASK = opts.get("critic_mask", "0") in ("1", "true", "True")
+AGENT_BATCH = opts.get("abatch", "share")   # component agents: share (default) or full batch
 
 # run_bpm parses sys.argv at import: configure it as the 40-epoch cells were.
 sys.argv = [sys.argv[0], "env=insurer_alloc", "N=1", f"epochs={EPOCHS}", f"methods={METHOD}",
-            "flat=1", "postpone=0", f"cert={CERT}", f"view={VIEW}"] + (["critic_mask=1"] if CRITIC_MASK else [])
+            "flat=1", "postpone=0", f"cert={CERT}", f"view={VIEW}", f"abatch={AGENT_BATCH}"] + (["critic_mask=1"] if CRITIC_MASK else [])
 import run_bpm  # noqa: E402
 import numpy as np  # noqa: E402
 from gympn.agents import Agent  # noqa: E402
 
 TAG = (f"{METHOD}{'_mc' if CERT == 'marking' and METHOD in ('nfgae', 'agents') else ''}_s{SEED}_ep{EPOCHS}"
-       + ("" if BETA is None else f"_beta{BETA:g}") + {"local": "", "full": "_fv"}[VIEW] + ("_cm" if CRITIC_MASK else ""))
+       + ("" if BETA is None else f"_beta{BETA:g}") + {"local": "", "full": "_fv"}[VIEW] + ("_cm" if CRITIC_MASK else "")
+       + ("_abfull" if AGENT_BATCH == "full" else ""))
 OUT = os.path.join(SUITE, "results", "alloc_long_probe", TAG)
 TRAIN = os.path.join(OUT, "train")
 

@@ -226,6 +226,12 @@ def make_parser():
                        help='one PPO agent per net component, with its own networks, deciding in '
                             'component turns and credited with the return of its component (implies '
                             'local_obs and nfgae; gympn.component_agents)')
+    train.add_argument('--agent_batch',
+                       choices=['share', 'full'],
+                       default='share',
+                       help="component agents only: 'share' gives each agent batch_size times its share "
+                            "of the epoch's decisions (every agent takes as many gradient steps as one "
+                            "agent would); 'full' gives each agent batch_size (fewer steps, larger batches)")
     train.add_argument('--global_view',
                        type=lambda x: {'false': False, 'off': False, 'true': 'edges',
                                        'edges': 'edges'}[str(x).lower()],
@@ -453,7 +459,8 @@ def make_agent(args, metadata=None):
         sub.component_agents = False
         agents = ComponentAgents(lambda: make_agent(sub, metadata=metadata),
                                  beta=getattr(args, 'beta', 0.0), lam=args.lam,
-                                 marking_certificate=getattr(args, 'marking_certificate', False))
+                                 marking_certificate=getattr(args, 'marking_certificate', False),
+                                 equal_steps=getattr(args, 'agent_batch', 'share') == 'share')
         agents.agent_seed = getattr(args, 'agent_seed', None)
         return agents
     policy_network = make_policy_network(args, metadata=metadata)
