@@ -1,0 +1,1001 @@
+{
+ "best_allocation_value": 53.95,
+ "arms": {
+  "joint PPO": [
+   {
+    "seed": 0,
+    "allocations": {
+     "(('co', 1), ('co', 1), ('uw1', 0))": 20
+    },
+    "main_allocation": [
+     [
+      "co",
+      1
+     ],
+     [
+      "co",
+      1
+     ],
+     [
+      "uw1",
+      0
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.932,
+     "('cl', 1)": 0.002,
+     "('cl', 0)": 0.003,
+     "('co', 1)": 0.014,
+     "('co', 0)": 0.011,
+     "('uw0', 1)": 0.003,
+     "('uw0', 0)": 0.004,
+     "('uw1', 1)": 0.013,
+     "('uw1', 0)": 0.017
+    },
+    "return": 50.35,
+    "heuristic_ops_same_allocation": 51.2
+   },
+   {
+    "seed": 1,
+    "allocations": {
+     "(('cl', 0), ('co', 1), ('co', 1))": 20
+    },
+    "main_allocation": [
+     [
+      "cl",
+      0
+     ],
+     [
+      "co",
+      1
+     ],
+     [
+      "co",
+      1
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.689,
+     "('cl', 1)": 0.066,
+     "('cl', 0)": 0.012,
+     "('co', 1)": 0.082,
+     "('co', 0)": 0.011,
+     "('uw0', 1)": 0.075,
+     "('uw0', 0)": 0.005,
+     "('uw1', 1)": 0.059,
+     "('uw1', 0)": 0.002
+    },
+    "return": 42.9,
+    "heuristic_ops_same_allocation": 47.9
+   },
+   {
+    "seed": 2,
+    "allocations": {
+     "(('co', 1), ('co', 1), ('uw1', 0))": 20
+    },
+    "main_allocation": [
+     [
+      "co",
+      1
+     ],
+     [
+      "co",
+      1
+     ],
+     [
+      "uw1",
+      0
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.966,
+     "('cl', 1)": 0.004,
+     "('cl', 0)": 0.004,
+     "('co', 1)": 0.007,
+     "('co', 0)": 0.004,
+     "('uw0', 1)": 0.001,
+     "('uw0', 0)": 0.001,
+     "('uw1', 1)": 0.006,
+     "('uw1', 0)": 0.006
+    },
+    "return": 51.55,
+    "heuristic_ops_same_allocation": 51.2
+   },
+   {
+    "seed": 3,
+    "allocations": {
+     "(('uw1', 0), ('uw1', 1), ('uw1', 1))": 20
+    },
+    "main_allocation": [
+     [
+      "uw1",
+      0
+     ],
+     [
+      "uw1",
+      1
+     ],
+     [
+      "uw1",
+      1
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.988,
+     "('cl', 1)": 0.003,
+     "('cl', 0)": 0.001,
+     "('co', 1)": 0.0,
+     "('co', 0)": 0.0,
+     "('uw0', 1)": 0.001,
+     "('uw0', 0)": 0.0,
+     "('uw1', 1)": 0.005,
+     "('uw1', 0)": 0.001
+    },
+    "return": 42.05,
+    "heuristic_ops_same_allocation": 42.65
+   },
+   {
+    "seed": 4,
+    "allocations": {
+     "(('uw1', 0), ('uw1', 1), ('uw1', 1))": 20
+    },
+    "main_allocation": [
+     [
+      "uw1",
+      0
+     ],
+     [
+      "uw1",
+      1
+     ],
+     [
+      "uw1",
+      1
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.837,
+     "('cl', 1)": 0.024,
+     "('cl', 0)": 0.012,
+     "('co', 1)": 0.03,
+     "('co', 0)": 0.015,
+     "('uw0', 1)": 0.005,
+     "('uw0', 0)": 0.002,
+     "('uw1', 1)": 0.05,
+     "('uw1', 0)": 0.024
+    },
+    "return": 42.55,
+    "heuristic_ops_same_allocation": 42.65
+   },
+   {
+    "seed": 5,
+    "allocations": {
+     "(('cl', 1), ('cl', 1), ('uw1', 0))": 20
+    },
+    "main_allocation": [
+     [
+      "cl",
+      1
+     ],
+     [
+      "cl",
+      1
+     ],
+     [
+      "uw1",
+      0
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.774,
+     "('cl', 1)": 0.057,
+     "('cl', 0)": 0.045,
+     "('co', 1)": 0.001,
+     "('co', 0)": 0.002,
+     "('uw0', 1)": 0.005,
+     "('uw0', 0)": 0.016,
+     "('uw1', 1)": 0.039,
+     "('uw1', 0)": 0.061
+    },
+    "return": 45.1,
+    "heuristic_ops_same_allocation": 51.25
+   },
+   {
+    "seed": 6,
+    "allocations": {
+     "(('cl', 0), ('cl', 1), ('cl', 1))": 20
+    },
+    "main_allocation": [
+     [
+      "cl",
+      0
+     ],
+     [
+      "cl",
+      1
+     ],
+     [
+      "cl",
+      1
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.789,
+     "('cl', 1)": 0.069,
+     "('cl', 0)": 0.031,
+     "('co', 1)": 0.012,
+     "('co', 0)": 0.005,
+     "('uw0', 1)": 0.01,
+     "('uw0', 0)": 0.005,
+     "('uw1', 1)": 0.054,
+     "('uw1', 0)": 0.026
+    },
+    "return": 41.2,
+    "heuristic_ops_same_allocation": 42.8
+   },
+   {
+    "seed": 7,
+    "allocations": {
+     "(('cl', 1), ('cl', 1), ('uw1', 0))": 20
+    },
+    "main_allocation": [
+     [
+      "cl",
+      1
+     ],
+     [
+      "cl",
+      1
+     ],
+     [
+      "uw1",
+      0
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.852,
+     "('cl', 1)": 0.047,
+     "('cl', 0)": 0.009,
+     "('co', 1)": 0.01,
+     "('co', 0)": 0.002,
+     "('uw0', 1)": 0.033,
+     "('uw0', 0)": 0.007,
+     "('uw1', 1)": 0.031,
+     "('uw1', 0)": 0.01
+    },
+    "return": 43.2,
+    "heuristic_ops_same_allocation": 51.25
+   },
+   {
+    "seed": 8,
+    "allocations": {
+     "(('cl', 0), ('uw0', 1), ('uw0', 1))": 20
+    },
+    "main_allocation": [
+     [
+      "cl",
+      0
+     ],
+     [
+      "uw0",
+      1
+     ],
+     [
+      "uw0",
+      1
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.844,
+     "('cl', 1)": 0.041,
+     "('cl', 0)": 0.013,
+     "('co', 1)": 0.003,
+     "('co', 0)": 0.001,
+     "('uw0', 1)": 0.042,
+     "('uw0', 0)": 0.013,
+     "('uw1', 1)": 0.032,
+     "('uw1', 0)": 0.011
+    },
+    "return": 44.15,
+    "heuristic_ops_same_allocation": 45.25
+   },
+   {
+    "seed": 9,
+    "allocations": {
+     "(('cl', 0), ('uw0', 1), ('uw0', 1))": 20
+    },
+    "main_allocation": [
+     [
+      "cl",
+      0
+     ],
+     [
+      "uw0",
+      1
+     ],
+     [
+      "uw0",
+      1
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.533,
+     "('cl', 1)": 0.087,
+     "('cl', 0)": 0.044,
+     "('co', 1)": 0.06,
+     "('co', 0)": 0.031,
+     "('uw0', 1)": 0.088,
+     "('uw0', 0)": 0.044,
+     "('uw1', 1)": 0.073,
+     "('uw1', 0)": 0.039
+    },
+    "return": 42.3,
+    "heuristic_ops_same_allocation": 45.25
+   }
+  ],
+  "NF-GAE static": [
+   {
+    "seed": 0,
+    "allocations": {
+     "(('co', 0), ('co', 1), ('co', 1))": 20
+    },
+    "main_allocation": [
+     [
+      "co",
+      0
+     ],
+     [
+      "co",
+      1
+     ],
+     [
+      "co",
+      1
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.594,
+     "('cl', 1)": 0.026,
+     "('cl', 0)": 0.016,
+     "('co', 1)": 0.164,
+     "('co', 0)": 0.133,
+     "('uw0', 1)": 0.03,
+     "('uw0', 0)": 0.018,
+     "('uw1', 1)": 0.012,
+     "('uw1', 0)": 0.006
+    },
+    "return": 42.25,
+    "heuristic_ops_same_allocation": 42.5
+   },
+   {
+    "seed": 1,
+    "allocations": {
+     "(('co', 0), ('co', 1), ('co', 1))": 20
+    },
+    "main_allocation": [
+     [
+      "co",
+      0
+     ],
+     [
+      "co",
+      1
+     ],
+     [
+      "co",
+      1
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.903,
+     "('cl', 1)": 0.015,
+     "('cl', 0)": 0.007,
+     "('co', 1)": 0.024,
+     "('co', 0)": 0.013,
+     "('uw0', 1)": 0.018,
+     "('uw0', 0)": 0.009,
+     "('uw1', 1)": 0.008,
+     "('uw1', 0)": 0.004
+    },
+    "return": 42.65,
+    "heuristic_ops_same_allocation": 42.5
+   },
+   {
+    "seed": 2,
+    "allocations": {
+     "(('uw1', 0), ('uw1', 1), ('uw1', 1))": 20
+    },
+    "main_allocation": [
+     [
+      "uw1",
+      0
+     ],
+     [
+      "uw1",
+      1
+     ],
+     [
+      "uw1",
+      1
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.684,
+     "('cl', 1)": 0.029,
+     "('cl', 0)": 0.02,
+     "('co', 1)": 0.023,
+     "('co', 0)": 0.016,
+     "('uw0', 1)": 0.045,
+     "('uw0', 0)": 0.032,
+     "('uw1', 1)": 0.088,
+     "('uw1', 0)": 0.063
+    },
+    "return": 43.5,
+    "heuristic_ops_same_allocation": 42.65
+   },
+   {
+    "seed": 3,
+    "allocations": {
+     "(('cl', 0), ('uw1', 1), ('uw1', 1))": 20
+    },
+    "main_allocation": [
+     [
+      "cl",
+      0
+     ],
+     [
+      "uw1",
+      1
+     ],
+     [
+      "uw1",
+      1
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.747,
+     "('cl', 1)": 0.064,
+     "('cl', 0)": 0.041,
+     "('co', 1)": 0.019,
+     "('co', 0)": 0.009,
+     "('uw0', 1)": 0.007,
+     "('uw0', 0)": 0.004,
+     "('uw1', 1)": 0.067,
+     "('uw1', 0)": 0.041
+    },
+    "return": 42.9,
+    "heuristic_ops_same_allocation": 46.45
+   },
+   {
+    "seed": 4,
+    "allocations": {
+     "(('uw1', 0), ('uw1', 1), ('uw1', 1))": 20
+    },
+    "main_allocation": [
+     [
+      "uw1",
+      0
+     ],
+     [
+      "uw1",
+      1
+     ],
+     [
+      "uw1",
+      1
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.842,
+     "('cl', 1)": 0.018,
+     "('cl', 0)": 0.011,
+     "('co', 1)": 0.018,
+     "('co', 0)": 0.011,
+     "('uw0', 1)": 0.008,
+     "('uw0', 0)": 0.004,
+     "('uw1', 1)": 0.054,
+     "('uw1', 0)": 0.034
+    },
+    "return": 42.1,
+    "heuristic_ops_same_allocation": 42.65
+   },
+   {
+    "seed": 5,
+    "allocations": {
+     "(('cl', 1), ('cl', 1), ('uw1', 0))": 20
+    },
+    "main_allocation": [
+     [
+      "cl",
+      1
+     ],
+     [
+      "cl",
+      1
+     ],
+     [
+      "uw1",
+      0
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.644,
+     "('cl', 1)": 0.107,
+     "('cl', 0)": 0.045,
+     "('co', 1)": 0.045,
+     "('co', 0)": 0.027,
+     "('uw0', 1)": 0.017,
+     "('uw0', 0)": 0.015,
+     "('uw1', 1)": 0.049,
+     "('uw1', 0)": 0.051
+    },
+    "return": 51.05,
+    "heuristic_ops_same_allocation": 51.25
+   },
+   {
+    "seed": 6,
+    "allocations": {
+     "(('co', 1), ('co', 1), ('uw1', 0))": 20
+    },
+    "main_allocation": [
+     [
+      "co",
+      1
+     ],
+     [
+      "co",
+      1
+     ],
+     [
+      "uw1",
+      0
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.992,
+     "('cl', 1)": 0.001,
+     "('cl', 0)": 0.0,
+     "('co', 1)": 0.001,
+     "('co', 0)": 0.001,
+     "('uw0', 1)": 0.001,
+     "('uw0', 0)": 0.001,
+     "('uw1', 1)": 0.001,
+     "('uw1', 0)": 0.002
+    },
+    "return": 50.3,
+    "heuristic_ops_same_allocation": 51.2
+   },
+   {
+    "seed": 7,
+    "allocations": {
+     "(('co', 0), ('uw1', 1), ('uw1', 1))": 20
+    },
+    "main_allocation": [
+     [
+      "co",
+      0
+     ],
+     [
+      "uw1",
+      1
+     ],
+     [
+      "uw1",
+      1
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.61,
+     "('cl', 1)": 0.031,
+     "('cl', 0)": 0.004,
+     "('co', 1)": 0.128,
+     "('co', 0)": 0.013,
+     "('uw0', 1)": 0.032,
+     "('uw0', 0)": 0.004,
+     "('uw1', 1)": 0.167,
+     "('uw1', 0)": 0.012
+    },
+    "return": 48.1,
+    "heuristic_ops_same_allocation": 46.65
+   },
+   {
+    "seed": 8,
+    "allocations": {
+     "(('uw1', 0), ('uw1', 1), ('uw1', 1))": 20
+    },
+    "main_allocation": [
+     [
+      "uw1",
+      0
+     ],
+     [
+      "uw1",
+      1
+     ],
+     [
+      "uw1",
+      1
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.708,
+     "('cl', 1)": 0.019,
+     "('cl', 0)": 0.017,
+     "('co', 1)": 0.06,
+     "('co', 0)": 0.053,
+     "('uw0', 1)": 0.003,
+     "('uw0', 0)": 0.002,
+     "('uw1', 1)": 0.073,
+     "('uw1', 0)": 0.065
+    },
+    "return": 42.25,
+    "heuristic_ops_same_allocation": 42.65
+   },
+   {
+    "seed": 9,
+    "allocations": {
+     "(('uw1', 0), ('uw1', 1), ('uw1', 1))": 20
+    },
+    "main_allocation": [
+     [
+      "uw1",
+      0
+     ],
+     [
+      "uw1",
+      1
+     ],
+     [
+      "uw1",
+      1
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.888,
+     "('cl', 1)": 0.019,
+     "('cl', 0)": 0.011,
+     "('co', 1)": 0.016,
+     "('co', 0)": 0.006,
+     "('uw0', 1)": 0.007,
+     "('uw0', 0)": 0.003,
+     "('uw1', 1)": 0.03,
+     "('uw1', 0)": 0.02
+    },
+    "return": 41.6,
+    "heuristic_ops_same_allocation": 42.65
+   }
+  ],
+  "NF-GAE marking": [
+   {
+    "seed": 0,
+    "allocations": {
+     "(('cl', 0), ('co', 1), ('co', 1))": 20
+    },
+    "main_allocation": [
+     [
+      "cl",
+      0
+     ],
+     [
+      "co",
+      1
+     ],
+     [
+      "co",
+      1
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.924,
+     "('cl', 1)": 0.003,
+     "('cl', 0)": 0.024,
+     "('co', 1)": 0.007,
+     "('co', 0)": 0.009,
+     "('uw0', 1)": 0.007,
+     "('uw0', 0)": 0.018,
+     "('uw1', 1)": 0.002,
+     "('uw1', 0)": 0.006
+    },
+    "return": 47.0,
+    "heuristic_ops_same_allocation": 47.9
+   },
+   {
+    "seed": 1,
+    "allocations": {
+     "(('co', 1), ('co', 1), ('uw1', 0))": 20
+    },
+    "main_allocation": [
+     [
+      "co",
+      1
+     ],
+     [
+      "co",
+      1
+     ],
+     [
+      "uw1",
+      0
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.976,
+     "('cl', 1)": 0.001,
+     "('cl', 0)": 0.0,
+     "('co', 1)": 0.008,
+     "('co', 0)": 0.002,
+     "('uw0', 1)": 0.001,
+     "('uw0', 0)": 0.0,
+     "('uw1', 1)": 0.008,
+     "('uw1', 0)": 0.003
+    },
+    "return": 50.55,
+    "heuristic_ops_same_allocation": 51.2
+   },
+   {
+    "seed": 2,
+    "allocations": {
+     "(('co', 0), ('co', 1), ('co', 1))": 20
+    },
+    "main_allocation": [
+     [
+      "co",
+      0
+     ],
+     [
+      "co",
+      1
+     ],
+     [
+      "co",
+      1
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.241,
+     "('cl', 1)": 0.162,
+     "('cl', 0)": 0.078,
+     "('co', 1)": 0.175,
+     "('co', 0)": 0.085,
+     "('uw0', 1)": 0.167,
+     "('uw0', 0)": 0.081,
+     "('uw1', 1)": 0.007,
+     "('uw1', 0)": 0.002
+    },
+    "return": 42.55,
+    "heuristic_ops_same_allocation": 42.5
+   },
+   {
+    "seed": 3,
+    "allocations": {
+     "(('co', 1), ('co', 1), ('uw0', 0))": 20
+    },
+    "main_allocation": [
+     [
+      "co",
+      1
+     ],
+     [
+      "co",
+      1
+     ],
+     [
+      "uw0",
+      0
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.677,
+     "('cl', 1)": 0.017,
+     "('cl', 0)": 0.013,
+     "('co', 1)": 0.072,
+     "('co', 0)": 0.048,
+     "('uw0', 1)": 0.064,
+     "('uw0', 0)": 0.051,
+     "('uw1', 1)": 0.036,
+     "('uw1', 0)": 0.023
+    },
+    "return": 47.15,
+    "heuristic_ops_same_allocation": 48.6
+   },
+   {
+    "seed": 4,
+    "allocations": {
+     "(('uw1', 0), ('uw1', 1), ('uw1', 1))": 20
+    },
+    "main_allocation": [
+     [
+      "uw1",
+      0
+     ],
+     [
+      "uw1",
+      1
+     ],
+     [
+      "uw1",
+      1
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.777,
+     "('cl', 1)": 0.043,
+     "('cl', 0)": 0.028,
+     "('co', 1)": 0.005,
+     "('co', 0)": 0.003,
+     "('uw0', 1)": 0.011,
+     "('uw0', 0)": 0.007,
+     "('uw1', 1)": 0.077,
+     "('uw1', 0)": 0.049
+    },
+    "return": 42.05,
+    "heuristic_ops_same_allocation": 42.65
+   },
+   {
+    "seed": 5,
+    "allocations": {
+     "(('cl', 1), ('cl', 1), ('co', 0))": 20
+    },
+    "main_allocation": [
+     [
+      "cl",
+      1
+     ],
+     [
+      "cl",
+      1
+     ],
+     [
+      "co",
+      0
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.598,
+     "('cl', 1)": 0.068,
+     "('cl', 0)": 0.036,
+     "('co', 1)": 0.066,
+     "('co', 0)": 0.037,
+     "('uw0', 1)": 0.062,
+     "('uw0', 0)": 0.035,
+     "('uw1', 1)": 0.063,
+     "('uw1', 0)": 0.034
+    },
+    "return": 49.7,
+    "heuristic_ops_same_allocation": 47.6
+   },
+   {
+    "seed": 6,
+    "allocations": {
+     "(('cl', 1), ('cl', 1), ('uw1', 0))": 20
+    },
+    "main_allocation": [
+     [
+      "cl",
+      1
+     ],
+     [
+      "cl",
+      1
+     ],
+     [
+      "uw1",
+      0
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.54,
+     "('cl', 1)": 0.134,
+     "('cl', 0)": 0.054,
+     "('co', 1)": 0.049,
+     "('co', 0)": 0.024,
+     "('uw0', 1)": 0.019,
+     "('uw0', 0)": 0.008,
+     "('uw1', 1)": 0.114,
+     "('uw1', 0)": 0.058
+    },
+    "return": 51.1,
+    "heuristic_ops_same_allocation": 51.25
+   },
+   {
+    "seed": 7,
+    "allocations": {
+     "(('co', 0), ('uw1', 1), ('uw1', 1))": 20
+    },
+    "main_allocation": [
+     [
+      "co",
+      0
+     ],
+     [
+      "uw1",
+      1
+     ],
+     [
+      "uw1",
+      1
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.478,
+     "('cl', 1)": 0.083,
+     "('cl', 0)": 0.053,
+     "('co', 1)": 0.094,
+     "('co', 0)": 0.055,
+     "('uw0', 1)": 0.047,
+     "('uw0', 0)": 0.033,
+     "('uw1', 1)": 0.104,
+     "('uw1', 0)": 0.052
+    },
+    "return": 45.55,
+    "heuristic_ops_same_allocation": 46.65
+   },
+   {
+    "seed": 8,
+    "allocations": {
+     "(('uw1', 0), ('uw1', 1), ('uw1', 1))": 20
+    },
+    "main_allocation": [
+     [
+      "uw1",
+      0
+     ],
+     [
+      "uw1",
+      1
+     ],
+     [
+      "uw1",
+      1
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.913,
+     "('cl', 1)": 0.026,
+     "('cl', 0)": 0.014,
+     "('co', 1)": 0.001,
+     "('co', 0)": 0.001,
+     "('uw0', 1)": 0.0,
+     "('uw0', 0)": 0.0,
+     "('uw1', 1)": 0.03,
+     "('uw1', 0)": 0.016
+    },
+    "return": 42.75,
+    "heuristic_ops_same_allocation": 42.65
+   },
+   {
+    "seed": 9,
+    "allocations": {
+     "(('cl', 1), ('cl', 1), ('uw0', 0))": 20
+    },
+    "main_allocation": [
+     [
+      "cl",
+      1
+     ],
+     [
+      "cl",
+      1
+     ],
+     [
+      "uw0",
+      0
+     ]
+    ],
+    "first_decision_probs": {
+     "('ops', None)": 0.643,
+     "('cl', 1)": 0.074,
+     "('cl', 0)": 0.041,
+     "('co', 1)": 0.027,
+     "('co', 0)": 0.017,
+     "('uw0', 1)": 0.071,
+     "('uw0', 0)": 0.048,
+     "('uw1', 1)": 0.048,
+     "('uw1', 0)": 0.031
+    },
+    "return": 49.0,
+    "heuristic_ops_same_allocation": 48.65
+   }
+  ]
+ }
+}
