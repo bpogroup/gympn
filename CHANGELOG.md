@@ -20,6 +20,16 @@ All notable changes to gympn are recorded here. The format follows
 
 ### Changed
 
+- The AEPN encoder and observation building are faster: a training cell runs in
+  about half the time with about half the peak memory. Observations are
+  unchanged bit for bit; the encoder computes the same function in a cheaper
+  order (equal up to float rounding).
+
+- The SMDP discount rate `beta` now defaults to 0.05 (was 0.0, no discount):
+  a reward `tau` time units after a decision is weighted `exp(-0.05 tau)`, so
+  credit spans about 20 time units. It applies only with `--smdp_discount` or
+  `--nfgae`.
+
 - Every action is now scored from the whole visible net by default.
   `GymProblem.global_view` defaults to `'edges'`, which adds the reverse of
   every edge type to the observation. `AEPNStack` adds per-layer global

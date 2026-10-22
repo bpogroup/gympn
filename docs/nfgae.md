@@ -109,7 +109,7 @@ problem.training_run(length=20, args_dict={
     "algorithm": "ppo-clip",
     "nfgae": True,
     "smdp_discount": True,   # time-aware discount; False gives the undiscounted objective
-    "beta": 0.5,             # discount rate per unit of simulator time
+    "beta": 0.05,             # discount rate per unit of simulator time
     "lam": 0.99,
 })
 ```
@@ -118,12 +118,12 @@ problem.training_run(length=20, args_dict={
 | --- | --- | --- |
 | `nfgae` | `False` | Per-component advantages and critic. |
 | `smdp_discount` | `False` | Discount by `exp(-beta * tau)` per sojourn instead of a constant `gam`. |
-| `beta` | `0.0` | SMDP discount rate. Ignored when `smdp_discount` is off. |
+| `beta` | `0.05` | SMDP discount rate. Ignored when `smdp_discount` is off. |
 | `lam` | `0.99` | GAE lambda, as in PPO. |
 | `local_obs` | `False` | Component turns: each decision observes and encodes only its own component (see below). |
 
 The same flags work on the command line of a training script:
-`--nfgae true --smdp_discount true --beta 0.5`.
+`--nfgae true --smdp_discount true --beta 0.05`.
 
 ### Local observations
 

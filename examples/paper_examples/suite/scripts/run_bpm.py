@@ -12,7 +12,7 @@ component turns, credited with its component's return; gympn.component_agents).
 Run:  python scripts/run_bpm.py env=insurer N=2 [workers] [seeds=20] [methods=ppo,nfgae]
                         [epochs=40] [threads=k] [episodes=8] [plr=x] [bs=k] [cert=static|marking]
                         [net=aepn|hgt|temb|tembf] [bases=K] [flat=1] [local=1]
-                        [beta=0.5]   (SMDP discount; routes to *_beta<val>)
+                        [beta=0.5]   (SMDP discount, default 0.05; any value but the legacy 0.5 routes to *_beta<val>)
                         [view=full]  (default for aepn: reverse edges + per-layer global attention +
                                       count-aware aggregation, the lossless whole-net view; *_fv)
                         [view=local]  (forward edges only, the pre-2026-10-17 default and the
@@ -38,7 +38,7 @@ sys.path.insert(0, os.path.join(SUITE, "envs"))
 
 import numpy as np  # noqa: E402
 
-from common import Hyper, set_seed, extract_metrics, threads_per_worker  # noqa: E402
+from common import Hyper, set_seed, extract_metrics, threads_per_worker, beta_tag  # noqa: E402
 from bpm_envs import BPM_BUILDERS, BPM_HEURISTICS  # noqa: E402
 from insurer_env import INSURER_BUILDERS, INSURER_HEURISTICS  # noqa: E402
 from bpic15_env import BPIC15_BUILDERS, BPIC15_HEURISTICS  # noqa: E402
@@ -138,7 +138,7 @@ BUILD = BPM_BUILDERS[ENV]
 HEUR = BPM_HEURISTICS[ENV]
 RESULTS = Path(SUITE) / "results"
 OUTDIR = RESULTS / (f"bpm_{ENV}_n{N}_ep{EPOCHS}" + ("" if EPOCHS == 40 else f"_smoke{EPOCHS}")
-              + ("" if BETA is None else f"_beta{BETA:g}")
+              + beta_tag(Hyper.beta if BETA is None else BETA)
               + ("" if POSTPONE else "_nopp")
               + ("_ppc" if POSTPONE and POSTPONE_SCOPE == "component" else "")
               + {"hgt": "", "type_embed": "_temb", "type_embed_film": "_tembf", "aepn": "_aepn"}[NET]

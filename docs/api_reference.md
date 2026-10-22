@@ -415,7 +415,7 @@ args = parser.parse_args()
 | `--agent_seed` | int | 0 | Random seed for agent initialization |
 | `--nfgae` | bool | False | Net-factored GAE: per-component credit and critic |
 | `--smdp_discount` | bool | False | Discount by exp(-beta * tau) instead of a constant γ |
-| `--beta` | float | 0.0 | SMDP discount rate β |
+| `--beta` | float | 0.05 | SMDP discount rate β |
 | `--local_obs` | bool | False | NF-GAE only: component turns, each decision observes only its own component |
 
 ### Policy Network Arguments
@@ -491,7 +491,7 @@ python examples/example_simple_postpone.py \
 
 # Net-factored credit
 python examples/example_simple_postpone.py \
-  --nfgae true --smdp_discount true --beta 0.5 \
+  --nfgae true --smdp_discount true --beta 0.05 \
   --num_workers 4 \
   --wandb_mode online
 

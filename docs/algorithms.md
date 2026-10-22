@@ -219,7 +219,7 @@ config = {
     "eps": 0.15,
     "ent_bonus": 0.005,
     "smdp_discount": True,
-    "beta": 0.5,
+    "beta": 0.05,
     "nfgae": True,
 }
 ```

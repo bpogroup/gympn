@@ -148,7 +148,7 @@ class Agent:
                  gam=0.99, lam=0.97, normalize_advantages=True, eps=0.2,
                  kld_limit=None, ent_bonus=0.0, test_in_train=True, vf_coeff=0.05,
                  normalize_returns=False, lr_schedule=False,
-                 beta=0.0, smdp_discount=False, nfgae=False):
+                 beta=0.05, smdp_discount=False, nfgae=False):
         self.policy_model = policy_network
         self.policy_loss = NotImplementedError
         self.policy_optimizer = torch.optim.Adam(params=list(policy_network.parameters()),

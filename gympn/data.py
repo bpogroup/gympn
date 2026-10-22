@@ -147,7 +147,7 @@ class TrajectoryBuffer:
         ``_nf_comp``/``_nf_rew`` set by the agent before ``finish()``.
     """
 
-    def __init__(self, gam=1.0, lam=1.0, beta=0.0, smdp_discount=False, nfgae=False):
+    def __init__(self, gam=1.0, lam=1.0, beta=0.05, smdp_discount=False, nfgae=False):
         self.gam = float(gam)
         self.lam = float(lam)
         # SMDP discount rate: e^{-beta * tau} per sojourn tau. Used by the

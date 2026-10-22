@@ -79,7 +79,7 @@ def make_parser():
                           'component it is exactly SMDP-GAE PPO.')
     alg.add_argument('--beta',
                      type=float,
-                     default=0.0,
+                     default=0.05,
                      help='SMDP time-discount rate: the continuation after a decision is '
                           'discounted by exp(-beta * tau), tau = elapsed time to the next '
                           'decision. Used with --smdp_discount and --nfgae.')

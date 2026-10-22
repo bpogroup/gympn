@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.join(SUITE, "envs"))
 
 import numpy as np  # noqa: E402
 
-from common import Hyper, set_seed, extract_metrics, threads_per_worker  # noqa: E402
+from common import Hyper, set_seed, extract_metrics, threads_per_worker, beta_tag  # noqa: E402
 from multisite_env import make_multisite  # noqa: E402
 
 N_SITES, N_LOCAL, N_FLEX = 4, 1, 0
@@ -83,6 +83,7 @@ if VIEW == "full":
     if NET != "aepn":
         raise SystemExit("view=full needs net=aepn (global attention is built into AEPNStack)")
     OUTDIR = Path(f"{OUTDIR}_fv")
+OUTDIR = Path(f"{OUTDIR}{beta_tag(Hyper.beta)}")
 if TAG:
     OUTDIR = Path(f"{OUTDIR}_{TAG}")
 if set(METHODS) - {"ppo", "nfgae"}:

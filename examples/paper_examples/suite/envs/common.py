@@ -21,7 +21,16 @@ class Hyper:
     policy_kld_limit: Optional[float] = 0.15
     gam: float = 0.99                # unused on the SMDP paths (ppo, nfgae)
     lam: float = 0.95
-    beta: float = 0.5                # SMDP discount: e^{-beta * tau}
+    beta: float = 0.05               # SMDP discount: e^{-beta * tau} (0.5 before 2026-10-22)
+
+
+LEGACY_BETA = 0.5   # results directories without a _beta<x> tag were run at this beta
+
+
+def beta_tag(beta):
+    """Directory tag for an SMDP discount: none for the legacy 0.5 (so the
+    old results directories keep their names), _beta<x> otherwise."""
+    return "" if beta == LEGACY_BETA else f"_beta{beta:g}"
 
 
 def set_seed(seed: int):

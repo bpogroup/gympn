@@ -41,7 +41,7 @@ import numpy as np  # noqa: E402
 from gympn.agents import Agent  # noqa: E402
 
 TAG = (f"{METHOD}{'_mc' if CERT == 'marking' and METHOD in ('nfgae', 'agents') else ''}_s{SEED}_ep{EPOCHS}"
-       + ("" if BETA is None else f"_beta{BETA:g}") + {"local": "", "full": "_fv"}[VIEW] + ("_cm" if CRITIC_MASK else "")
+       + run_bpm.beta_tag(run_bpm.Hyper.beta if BETA is None else BETA) + {"local": "", "full": "_fv"}[VIEW] + ("_cm" if CRITIC_MASK else "")
        + ("_abfull" if AGENT_BATCH == "full" else ""))
 OUT = os.path.join(SUITE, "results", "alloc_long_probe", TAG)
 TRAIN = os.path.join(OUT, "train")

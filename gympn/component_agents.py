@@ -94,7 +94,7 @@ class ComponentAgents:
         every agent uses batch_size.
     """
 
-    def __init__(self, make_agent, beta=0.0, lam=1.0, marking_certificate=False, equal_steps=True):
+    def __init__(self, make_agent, beta=0.05, lam=1.0, marking_certificate=False, equal_steps=True):
         self.make_agent = make_agent
         self.beta = float(beta)
         self.lam = float(lam)
