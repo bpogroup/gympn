@@ -682,14 +682,24 @@ class GymProblem(SimProblem):
             node_types = [n for n in node_types
                           if n in ('a_transition', 'e_transition') or ppart.get(n) == keep_comp]
 
+        # Expanded places by original place, in expanded order; original places
+        # and actions by id (first occurrence, as the list scans returned).
+        expanded_by_original = {}
+        for p in self.expanded_pn.places:
+            expanded_by_original.setdefault(GymProblem._get_string_before_last_dot(p._id), []).append(p)
+        place_by_id, action_by_id = {}, {}
+        for p in self.places:
+            place_by_id.setdefault(p._id, p)
+        for a in self.actions:
+            action_by_id.setdefault(a._id, a)
+
         # Update the HeteroData object with the places attributes and the transition nodes
         for n_t in node_types:
             if n_t != 'a_transition' and n_t != 'e_transition':
                 p_nodes = []
-                # Check if n_t is already a key in ret_graph
-                for p in self.expanded_pn.places:
-                    p_name_original = GymProblem._get_string_before_last_dot(p._id)
-                    if p_name_original == n_t:
+                for p in expanded_by_original.get(n_t, ()):
+                    p_name_original = n_t
+                    if True:
 
                         if p.marking:
 
@@ -743,9 +753,9 @@ class GymProblem(SimProblem):
                         t_values = [] #otherwise they do not need to carry information
 
                     b_list = [el.marking[0] for el in t.incoming]
-                    binds = [([place for place in self.places if place._id == GymProblem._get_string_before_last_dot(el._id)][0], el.marking[0]) for el in t.incoming]
+                    binds = [(place_by_id[GymProblem._get_string_before_last_dot(el._id)], el.marking[0]) for el in t.incoming]
                     b_time = max([t.time for t in b_list]) #changed min to max, it was an error!
-                    original_transition = [action for action in self.actions if action._id == GymProblem._get_string_before_last_dot(t._id)][0]
+                    original_transition = action_by_id[t_name]
 
                     if b_time <= self.clock:
 
@@ -808,7 +818,11 @@ class GymProblem(SimProblem):
                             [el for el in self.var_attributes[n_t] if el not in self.unobservable_token_attrs[n_t]]))  # create empty placeholder of the right size
 
 
-        # Update the HeteroData object with the arcs
+        # Update the HeteroData object with the arcs: the (source, target)
+        # pairs of every edge type are collected in arc order and turned into
+        # one tensor per type (types in order of first appearance; an arc whose
+        # place is unmarked adds the type but no edge).
+        edge_pairs = {}
         for a in self.expanded_pn.arcs:
             #a[0] is the source
             source_name = GymProblem._get_string_before_last_dot(a[0]._id)
@@ -822,53 +836,29 @@ class GymProblem(SimProblem):
                         tr_id not in a_transition_dict and tr_id not in e_transition_dict):
                     continue
 
-            if type(a[0]) is SimVar and source_name not in self.unobservable_simvars:# and source_name in ret_graph: #if the place has tokens inside of it
+            if type(a[0]) is SimVar and source_name not in self.unobservable_simvars:
                 if type(a[1]) is SimAction:
-                    #key = (source_name, 'edge', 'a_transition')
-                    #different edge type for each place to transition connection
                     key = (source_name, 'edge_to_a_transition', 'a_transition')
-                    if a[0].marking:
-                        new_values = torch.tensor(
-                            [[int(a[0]._id.split('.')[-1])],
-                             [a_transition_dict[a[1]._id]]]).type(torch.int64)
-                    else:
-                        new_values = torch.empty([2, 0], dtype=torch.int64)
+                    pair = (int(a[0]._id.split('.')[-1]), a_transition_dict[a[1]._id]) if a[0].marking else None
                 else:
-                    #key = (source_name, 'edge', 'e_transition')
                     key = (source_name, 'edge_to_e_transition', 'e_transition')
-                    if a[0].marking:
-                        new_values = torch.tensor(
-                            [[int(a[0]._id.split('.')[-1])],
-                             [e_transition_dict[a[1]._id]]]).type(torch.int64)
-                    else:
-                        new_values = torch.empty([2, 0], dtype=torch.int64)
-
-            elif type(a[1]) is SimVar and dest_name not in self.unobservable_simvars:# and ret_graph[dest_name]: #if the place has tokens inside of it
+                    pair = (int(a[0]._id.split('.')[-1]), e_transition_dict[a[1]._id]) if a[0].marking else None
+            elif type(a[1]) is SimVar and dest_name not in self.unobservable_simvars:
                 if type(a[0]) is SimAction:
-                    #key = ('a_transition', 'edge', dest_name)
                     key = ('a_transition', 'edge_to_' + dest_name, dest_name)
-                    if a[1].marking:
-                        new_values = torch.tensor(
-                            [[a_transition_dict[a[0]._id]],
-                             [int(a[1]._id.split('.')[-1])]]).type(torch.int64)
-                    else:
-                        new_values = torch.empty([2, 0], dtype=torch.int64)
+                    pair = (a_transition_dict[a[0]._id], int(a[1]._id.split('.')[-1])) if a[1].marking else None
                 else:
-                    #key = ('e_transition', 'edge', a[1]._id.split('.')[0])
                     key = ('e_transition', 'edge_to_' + dest_name, dest_name)
-                    if a[1].marking:
-                        new_values = torch.tensor(
-                            [[e_transition_dict[a[0]._id]],
-                             [int(a[1]._id.split('.')[-1])]]).type(torch.int64)
-                    else:
-                        new_values = torch.empty([2, 0], dtype=torch.int64)
-
+                    pair = (e_transition_dict[a[0]._id], int(a[1]._id.split('.')[-1])) if a[1].marking else None
 
             if key is not None:
-                if key not in ret_graph.edge_types:
-                    ret_graph[key].edge_index = new_values
-                else:
-                    ret_graph[key].edge_index = torch.cat((ret_graph[key].edge_index, new_values), dim=1)
+                pairs = edge_pairs.setdefault(key, [])
+                if pair is not None:
+                    pairs.append(pair)
+
+        for key, pairs in edge_pairs.items():
+            ret_graph[key].edge_index = (torch.tensor(pairs, dtype=torch.int64).t().contiguous() if pairs
+                                         else torch.empty([2, 0], dtype=torch.int64))
 
         if add_self_loops:
             #create self loops on 'a_transition' nodes
@@ -888,7 +878,7 @@ class GymProblem(SimProblem):
 
         if remove_empty_nodes:
             #remove empty nodes connects all the incoming edges to the outgoing edges
-            ret_graph = self.remove_empty_nodes(ret_graph)
+            self._remove_empty_nodes_inplace(ret_graph)   # ret_graph is fresh: no copy needed
 
         if minimal_obs:
             ret_graph = self.minimal_graph(ret_graph)
@@ -1033,25 +1023,19 @@ class GymProblem(SimProblem):
         :param ret_graph: The graph observation as a `HeteroData` object.
         :return: The updated `HeteroData` object with empty nodes removed.
         """
-        # Create a copy of the graph to avoid modifying it while iterating
         updated_graph = ret_graph.clone()
-
-        # Iterate over all node types in the graph
-        for node_type in updated_graph.node_types:
-            # Get the nodes of the current type
-            nodes = updated_graph[node_type].x
-
-            # Check if the nodes are empty (numel() == 0)
-            if nodes.numel() == 0:
-                # If empty, remove the edges connected to this node type
-                for edge_type in updated_graph.edge_types:
-                    if edge_type[0] == node_type or edge_type[2] == node_type:
-                        updated_graph[edge_type].edge_index = torch.tensor([], dtype=torch.int64).reshape(2, 0)
-
-                # Remove the empty node type from the graph
-                #del updated_graph.node_types[node_type]
-
+        self._remove_empty_nodes_inplace(updated_graph)
         return updated_graph
+
+    @staticmethod
+    def _remove_empty_nodes_inplace(graph):
+        """remove_empty_nodes on graph itself: every edge type touching a node
+        type with no nodes (x.numel() == 0) loses its edges."""
+        empty = {nt for nt in graph.node_types if graph[nt].x.numel() == 0}
+        if empty:
+            for edge_type in graph.edge_types:
+                if edge_type[0] in empty or edge_type[2] in empty:
+                    graph[edge_type].edge_index = torch.tensor([], dtype=torch.int64).reshape(2, 0)
 
     def expand_no_future_tokens(self, actions_only=False):
         """
@@ -1610,6 +1594,11 @@ class GymProblem(SimProblem):
             if cache is not None and sig == getattr(self, '_net_partition_sig', None):
                 return cache
             self._net_partition_sig = sig
+            # The partition is a function of the set of marked places only.
+            memo = self.__dict__.setdefault('_net_partition_memo', {})
+            if sig in memo:
+                self._net_partition_cache, self._net_place_partition = memo[sig]
+                return self._net_partition_cache
         elif cache is not None:
             return cache
         parent = {}
@@ -1653,6 +1642,8 @@ class GymProblem(SimProblem):
             p._id: (roots.get(find(('p', p._id))) if ('p', p._id) in parent else None)
             for p in self.places}
         self._net_partition_cache = comp
+        if getattr(self, 'marking_certificate', False):
+            self.__dict__.setdefault('_net_partition_memo', {})[self._net_partition_sig] = (comp, self._net_place_partition)
         return comp
 
     def net_place_partition(self):

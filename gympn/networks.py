@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import HGTConv, TransformerConv, global_max_pool
-from torch_geometric.utils import softmax as pyg_softmax, to_dense_batch
+from torch_geometric.utils import softmax as pyg_softmax
 
 from gympn.flat_graph import cat_flat, feature_width, flatten_hetero, is_flat
 
@@ -299,6 +299,33 @@ def _project_in(x, t, in_weight, in_bias):
     return torch.einsum('nf,nfh->nh', x, in_weight[:, :w][t]) + in_bias[t]
 
 
+def _type_groups(idx):
+    """Sort order of idx and its runs: (perm, type ids, run lengths)."""
+    perm = torch.argsort(idx, stable=True)
+    ids, counts = torch.unique_consecutive(idx[perm], return_counts=True)
+    return perm, ids.tolist(), counts.tolist()
+
+
+def _attention_plan(group):
+    """Dense layout of the attention groups, one entry per size class (the
+    next power of two of the group size): (node ids, their group within the
+    class, their slot within the group, number of groups, padded length)."""
+    dev = group.device
+    perm = torch.argsort(group, stable=True)
+    _, counts = torch.unique_consecutive(group[perm], return_counts=True)
+    starts = torch.cumsum(counts, 0) - counts
+    slot = torch.arange(group.numel(), device=dev) - torch.repeat_interleave(starts, counts)
+    cap = torch.pow(2, torch.ceil(torch.log2(counts.double())).long())
+    node_cap = torch.repeat_interleave(cap, counts)
+    node_grp = torch.repeat_interleave(torch.arange(counts.numel(), device=dev), counts)
+    plan = []
+    for c in torch.unique(cap).tolist():
+        sel = node_cap == c
+        _, grp = torch.unique_consecutive(node_grp[sel], return_inverse=True)
+        plan.append((perm[sel], grp, slot[sel], int(grp.max()) + 1, int(counts[cap == c].max())))
+    return plan
+
+
 def _encode_hetero(enc, x_dict, edge_index_dict, graph=None):
     """HeteroData dicts -> dict of node embeddings by type, via enc.encode_flat.
     An encoder with global attention also gets each node's graph index, read
@@ -549,34 +576,79 @@ class AEPNStack(nn.Module):
             self.act = nn.GELU()
         self.drop = nn.Dropout(float(dropout))
 
-    def _global(self, li, h, batch):
-        """Self-attention of every node over the nodes of its own group:
-        its graph, and within it its net component when the observation
-        carries components (networks._attention_groups)."""
-        if batch is None:
-            batch = torch.zeros(h.size(0), dtype=torch.long, device=h.device)
-        perm = torch.argsort(batch, stable=True)          # to_dense_batch needs sorted graphs
-        hd, mask = to_dense_batch(h[perm], batch[perm])   # [G, Nmax, H]
-        out, _ = self.g_attn[li](hd, hd, hd, key_padding_mask=~mask, need_weights=False)
-        res = torch.empty_like(h)
-        res[perm] = out[mask]
+    # The arithmetic below is the same function as the textbook form
+    #   per-item transform  sum_b coef[i, b] * (h @ V_b)
+    #   global attention    nn.MultiheadAttention over each group, padded to
+    #                       the largest group
+    # computed in a cheaper order (equal up to float rounding):
+    #   * per-item transforms take whichever of two orders is cheaper for the
+    #     input: through all num_bases bases and then mixed (one big matmul, no
+    #     per-type work: a single small graph in a rollout), or with the
+    #     per-type matrices W_i = sum_b coef[i, b] V_b composed first and every
+    #     row multiplied by its own type's matrix only (num_bases times fewer
+    #     FLOPs, one small matmul per type present: a training batch);
+    #   * attention projects the real nodes only, and pads each group to the
+    #     largest group of its size class (powers of two), not of the batch:
+    #     a batch of nets has many small components next to a few large ones.
+    TYPED_MIN_ROWS = 24     # typed order when rows >= TYPED_MIN_ROWS * types present
+
+    def _transform(self, h, bases, coef, idx, groups, rows=None):
+        """Row m: sum_b coef[idx[m], b] * (h[rows[m]] @ V_b), rows=None
+        meaning h's own rows; groups = _type_groups(idx)."""
+        if idx.numel() >= self.TYPED_MIN_ROWS * len(groups[1]):
+            return self._typed_matmul(h if rows is None else h[rows], self._compose(bases, coef), groups)
+        H, B = self.hidden_channels, self.num_bases
+        P = (h @ bases).view(h.size(0), B, H)
+        return torch.einsum('mb,mbh->mh', coef[idx], P if rows is None else P[rows])
+
+    def _compose(self, bases, coef):
+        """Per-type matrices W[i] = sum_b coef[i, b] * V_b, as [n, H, H]."""
+        H, B = self.hidden_channels, self.num_bases
+        return (coef @ bases.view(H, B, H).transpose(0, 1).reshape(B, H * H)).view(-1, H, H)
+
+    @staticmethod
+    def _typed_matmul(h, W, groups):
+        """out[m] = h[m] @ W[idx[m]], with groups = _type_groups(idx)."""
+        perm, ids, counts = groups
+        if not ids:
+            return h.new_empty((0, W.size(-1)))
+        Ws = W.unbind(0)          # one UnbindBackward instead of a dense zero gradient per type
+        out = torch.cat([part @ Ws[i] for part, i in zip(torch.split(h[perm], counts), ids)])
+        res = torch.empty_like(out)
+        res[perm] = out
         return res
 
-    def _mix(self, h, bases, coef, idx):
-        """Per-item transform sum_b coef[idx, b] * (h @ V_b), for h [M, H]."""
-        P = (h @ bases).view(h.size(0), self.num_bases, self.hidden_channels)
-        return torch.einsum('mb,mbh->mh', coef[idx], P)
+    def _global(self, li, h, plan):
+        """Self-attention of every node over the nodes of its own group (its
+        graph, and within it its net component when the observation carries
+        components; networks._attention_groups), with the parameters of
+        g_attn[li]."""
+        mha = self.g_attn[li]
+        N, H = h.shape
+        nh = mha.num_heads
+        d = H // nh
+        qkv = F.linear(h, mha.in_proj_weight, mha.in_proj_bias)
+        out = h.new_empty(N, H)
+        p = mha.dropout if self.training else 0.0
+        for nodes, grp, slot, G, L in plan:
+            dense = qkv.new_zeros(G, L, 3 * H)
+            dense[grp, slot] = qkv[nodes]
+            valid = torch.zeros(G, L, dtype=torch.bool, device=h.device)
+            valid[grp, slot] = True
+            q, k, v = dense.view(G, L, 3, nh, d).permute(2, 0, 3, 1, 4)        # [G, nh, L, d]
+            o = F.scaled_dot_product_attention(q, k, v, attn_mask=valid[:, None, None, :], dropout_p=p)
+            out[nodes] = o.permute(0, 2, 1, 3).reshape(G, L, H)[grp, slot]
+        return F.linear(out, mha.out_proj.weight, mha.out_proj.bias)
 
-    def _layer(self, li, h, t, src, dst, e_t, batch=None):
+    def _layer(self, li, h, t, src, dst, e_t, ctx):
         N, H, nh = h.size(0), self.hidden_channels, self.heads
         d = H // nh
+        tg = ctx['types']
         if src.numel() > 0:
-            # Project nodes through the bases once, then mix per edge.
-            Pk = (h @ self.k_bases[li]).view(N, self.num_bases, H)
-            Pv = (h @ self.v_bases[li]).view(N, self.num_bases, H)
-            k = torch.einsum('eb,ebh->eh', self.k_coef[li][e_t], Pk[src])
-            v = torch.einsum('eb,ebh->eh', self.v_coef[li][e_t], Pv[src])
-            q = self._mix(h, self.q_bases[li], self.q_coef[li], t)[dst]
+            eg = ctx['etypes']
+            k = self._transform(h, self.k_bases[li], self.k_coef[li], e_t, eg, rows=src)
+            v = self._transform(h, self.v_bases[li], self.v_coef[li], e_t, eg, rows=src)
+            q = self._transform(h, self.q_bases[li], self.q_coef[li], t, tg)[dst]
             score = (q.view(-1, nh, d) * k.view(-1, nh, d)).sum(-1) * self.p_rel[li][e_t] / d ** 0.5
             alpha = pyg_softmax(score, dst, num_nodes=N)                    # [E, heads]
             msg = (v.view(-1, nh, d) * alpha.unsqueeze(-1)).view(-1, H)
@@ -587,14 +659,14 @@ class AEPNStack(nn.Module):
                 agg = agg + self.cnt_lin[li](mean_v * torch.log1p(deg).unsqueeze(-1))
         else:
             agg = h.new_zeros(N, H)
-        out = self._mix(F.gelu(agg), self.o_bases[li], self.o_coef[li], t)
+        out = self._transform(F.gelu(agg), self.o_bases[li], self.o_coef[li], t, tg)
         if getattr(self, 'global_attn', False):
-            out = out + self._global(li, h, batch)
+            out = out + self._global(li, h, ctx['attn'])
         if li > 0:
             g = torch.sigmoid(self.skip[li][t]).unsqueeze(-1)
             out = g * out + (1 - g) * h
         if self.residual:
-            out = out + self._mix(h, self.r_bases[li], self.r_coef[li], t)
+            out = out + self._transform(h, self.r_bases[li], self.r_coef[li], t, tg)
         return self.drop(self.act(out))
 
     def encode_flat(self, x, t, edge_index, e_t, batch=None):
@@ -602,8 +674,13 @@ class AEPNStack(nn.Module):
         index (global_attn only; None = one graph)."""
         h = _project_in(x, t, self.in_weight, self.in_bias)
         src, dst = edge_index[0], edge_index[1]
+        ctx = {'types': _type_groups(t), 'etypes': _type_groups(e_t)}
+        if getattr(self, 'global_attn', False):
+            if batch is None:
+                batch = torch.zeros(h.size(0), dtype=torch.long, device=h.device)
+            ctx['attn'] = _attention_plan(batch)
         for li in range(self.num_layers):
-            h = self._layer(li, h, t, src, dst, e_t, batch)
+            h = self._layer(li, h, t, src, dst, e_t, ctx)
         return h
 
     def forward(self, x_dict, edge_index_dict, input_size=None, graph=None, params_iter=None):
