@@ -21,7 +21,7 @@ Run:  python scripts/run_bpm.py env=insurer N=2 [workers] [seeds=20] [methods=pp
                                           each component, as the actor's does; *_cm)
                         [postpone=0|1|component]  (no / global / per-component
                                      postpone; *_nopp, unsuffixed, *_ppc)
-The insurer envs default to postpone=0. nfgae needs postpone=0 or component.
+The insurer and bpic15 envs default to postpone=0. nfgae needs postpone=0 or component.
 Output: results/bpm_<env>_n<N>_ep<epochs>.../cells/N<N>__<method>__s<seed>.json
 (epochs != 40 routes to a *_smoke<epochs> dir), relative to the suite directory
 whatever the working directory is. Resumable by cell file. See ../REPRODUCE.md
@@ -41,9 +41,10 @@ import numpy as np  # noqa: E402
 from common import Hyper, set_seed, extract_metrics, threads_per_worker  # noqa: E402
 from bpm_envs import BPM_BUILDERS, BPM_HEURISTICS  # noqa: E402
 from insurer_env import INSURER_BUILDERS, INSURER_HEURISTICS  # noqa: E402
+from bpic15_env import BPIC15_BUILDERS, BPIC15_HEURISTICS  # noqa: E402
 
-BPM_BUILDERS = {**BPM_BUILDERS, **INSURER_BUILDERS}
-BPM_HEURISTICS = {**BPM_HEURISTICS, **INSURER_HEURISTICS}
+BPM_BUILDERS = {**BPM_BUILDERS, **INSURER_BUILDERS, **BPIC15_BUILDERS}
+BPM_HEURISTICS = {**BPM_HEURISTICS, **INSURER_HEURISTICS, **BPIC15_HEURISTICS}
 
 ENV = "insurer"
 N = 8
@@ -123,8 +124,8 @@ for _a in sys.argv[1:]:
         if _v == "component":
             POSTPONE_SCOPE = "component"
 
-# The insurer is work-conserving by design (insurer_env.py): no postpone unless asked.
-if ENV.startswith("insurer") and not _POSTPONE_SET:
+# The insurer and BPIC 2015 envs are work-conserving by design: no postpone unless asked.
+if ENV.startswith(("insurer", "bpic15")) and not _POSTPONE_SET:
     POSTPONE = False
 if VIEW is None:
     VIEW = "full" if NET == "aepn" else "local"
