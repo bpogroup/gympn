@@ -20,6 +20,11 @@ All notable changes to gympn are recorded here. The format follows
 
 ### Changed
 
+- `--use_gpu true` (`run_bpm gpu=1`) now runs the PPO updates on a CUDA GPU:
+  the policy and value nets, their optimizer state and the batches move to the
+  GPU for each update and back to the CPU for rollouts. It used to have no
+  effect. Same results up to float rounding (GPU runs are not bit-reproducible).
+
 - The AEPN encoder and observation building are faster: a training cell runs in
   about half the time with about half the peak memory. Observations are
   unchanged bit for bit; the encoder computes the same function in a cheaper

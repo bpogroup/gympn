@@ -205,7 +205,8 @@ def make_parser():
     train.add_argument('--use_gpu',
                        type=lambda x: str(x).lower() == 'true',
                        default=False,
-                       help='whether to use a GPU if available')
+                       help='run the PPO updates on a CUDA GPU if one is available (rollouts '
+                            'stay on the CPU, where one small graph per decision is faster)')
     train.add_argument('--load_policy_network',
                        type=bool,
                        default=False,
@@ -453,6 +454,7 @@ def make_agent(args, metadata=None):
     agent : PGAgent (experimental) or PPOAgent
         The agent.
     """
+    update_device = 'cuda' if getattr(args, 'use_gpu', False) and torch.cuda.is_available() else None
     if getattr(args, 'component_agents', False):
         from gympn.component_agents import ComponentAgents
         sub = copy.copy(args)
@@ -488,6 +490,7 @@ def make_agent(args, metadata=None):
     # consumed before the lazy parameters materialise varies by method and by
     # run, so two arms of one experiment do not share an initial policy.
     agent.agent_seed = getattr(args, 'agent_seed', None)
+    agent.update_device = update_device
 
     return agent
 

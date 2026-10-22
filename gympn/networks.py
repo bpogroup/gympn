@@ -586,7 +586,8 @@ class AEPNStack(nn.Module):
     #     per-type work: a single small graph in a rollout), or with the
     #     per-type matrices W_i = sum_b coef[i, b] V_b composed first and every
     #     row multiplied by its own type's matrix only (num_bases times fewer
-    #     FLOPs, one small matmul per type present: a training batch);
+    #     FLOPs, one small matmul per type present: a training batch on the
+    #     CPU; on a GPU the per-type launches cost more than the FLOPs saved);
     #   * attention projects the real nodes only, and pads each group to the
     #     largest group of its size class (powers of two), not of the batch:
     #     a batch of nets has many small components next to a few large ones.
@@ -595,7 +596,7 @@ class AEPNStack(nn.Module):
     def _transform(self, h, bases, coef, idx, groups, rows=None):
         """Row m: sum_b coef[idx[m], b] * (h[rows[m]] @ V_b), rows=None
         meaning h's own rows; groups = _type_groups(idx)."""
-        if idx.numel() >= self.TYPED_MIN_ROWS * len(groups[1]):
+        if not h.is_cuda and idx.numel() >= self.TYPED_MIN_ROWS * len(groups[1]):
             return self._typed_matmul(h if rows is None else h[rows], self._compose(bases, coef), groups)
         H, B = self.hidden_channels, self.num_bases
         P = (h @ bases).view(h.size(0), B, H)

@@ -17,6 +17,8 @@ Run:  python scripts/run_bpm.py env=insurer N=2 [workers] [seeds=20] [methods=pp
                                       count-aware aggregation, the lossless whole-net view; *_fv)
                         [view=local]  (forward edges only, the pre-2026-10-17 default and the
                                        unsuffixed result dirs; default for non-aepn nets)
+                        [gpu=1]      (PPO updates on the CUDA GPU, rollouts on the CPU; same
+                                      results up to float rounding, so no directory suffix)
                         [critic_mask=1]  (view=full: the critic's attention also stays inside
                                           each component, as the actor's does; *_cm)
                         [postpone=0|1|component]  (no / global / per-component
@@ -70,6 +72,7 @@ BS = None                      # bs=k: minibatch size override (default Hyper.ba
 MARKING = False                # cert=marking: nfgae recomputes the certificate at the current marking (routes to *_mc)
 VIEW = None                    # view=local|full (*'' / *_fv); default full for aepn (the library default), local otherwise
 AGENT_BATCH = "share"          # abatch=full: component agents each get the full batch size (*_abfull)
+GPU = False                    # gpu=1: PPO updates on the CUDA GPU (Agent.update_device)
 CRITIC_MASK = False            # critic_mask=1: view=full critic attention also stays inside components (*_cm)
 
 for _a in sys.argv[1:]:
@@ -109,6 +112,8 @@ for _a in sys.argv[1:]:
         if _v not in ("local", "full"):
             raise SystemExit(f"view must be local or full, got {_v!r}")
         VIEW = _v
+    elif _a.startswith("gpu="):
+        GPU = _a.split("=", 1)[1] in ("1", "true", "True")
     elif _a.startswith("critic_mask="):
         CRITIC_MASK = _a.split("=", 1)[1] in ("1", "true", "True")
     elif _a.startswith("bs="):
@@ -183,7 +188,7 @@ def _args(method, seed, cfg, logdir):
         "eps": cfg.ppo_eps, "gam": cfg.gam, "lam": cfg.lam, "ent_bonus": cfg.ent_bonus,
         "policy_kld_limit": getattr(cfg, "policy_kld_limit", None),
         "beta": cfg.beta,
-        "verbose": 0, "use_gpu": False, "agent_seed": int(seed),
+        "verbose": 0, "use_gpu": GPU, "agent_seed": int(seed),
         "use_wandb": False, "open_tensorboard": False,
         "test_in_train": True, "test_freq": TEST_FREQ, "test_episodes": TEST_EPISODES,
         "eval_seed": EVAL_SEED,
@@ -232,7 +237,8 @@ def train_cell(method, seed, cfg, logdir, baselines):
     m = extract_metrics(getattr(env, "training_history", {}) or {}, EPOCHS, TEST_FREQ)
     m.update({"env": ENV, "N": N, "method": method, "seed": seed,
               "epochs": EPOCHS, "episodes": EPISODES, "eval_seed": EVAL_SEED,
-              "baselines": baselines, "minutes": (time.time() - t0) / 60.0})
+              "baselines": baselines, "minutes": (time.time() - t0) / 60.0,
+              "update_device": "cuda" if GPU else "cpu"})
     return m
 
 

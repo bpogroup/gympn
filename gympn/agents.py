@@ -1107,7 +1107,37 @@ class Agent:
         """
         self.policy_model = torch.load(torch.load(filename))
 
+    # Device of the PPO updates (None = where the models live, the CPU).
+    # Rollouts score one small graph per decision, which a GPU does not speed
+    # up, so the models stay on the CPU and only move for the update: the
+    # policy and value nets, their optimizer state and the collated batches go
+    # to update_device and back. Set by train.make_agent from --use_gpu.
+    update_device = None
+
+    def _models_to(self, device):
+        """Move the policy and value nets and their Adam state to device."""
+        for model, opt in ((self.policy_model, getattr(self, 'policy_optimizer', None)),
+                           (self.value_model, getattr(self, 'value_optimizer', None))):
+            if model is None or isinstance(model, str):
+                continue
+            model.to(device)
+            if opt is not None:
+                for state in opt.state.values():
+                    for k, v in state.items():
+                        if torch.is_tensor(v) and k != 'step':   # Adam keeps 'step' on the CPU
+                            state[k] = v.to(device)
+
     def _fit_policy_and_value_models(self, dataloader, epochs=1):
+        dev = self.update_device
+        if dev is None:
+            return self._fit_policy_and_value_models_here(dataloader, epochs)
+        self._models_to(dev)
+        try:
+            return self._fit_policy_and_value_models_here([b.to(dev) for b in dataloader], epochs)
+        finally:
+            self._models_to('cpu')
+
+    def _fit_policy_and_value_models_here(self, dataloader, epochs=1):
         """Fit both policy and value models simultaneously using data from dataset.
 
         Parameters
