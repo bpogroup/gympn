@@ -28,7 +28,19 @@ All notable changes to gympn are recorded here. The format follows
   73 to 27 s. Same distribution of episodes, not the same episodes (the
   environments interleave their random draws); default 1 is unchanged.
 
+- Training saves the last epoch's policy as `final_policy.pth` before
+  restoring the best checkpoint (`best_policy.pth`, which is selected on the
+  evaluation episodes), so the policy training ended with can be tested on
+  held-out episodes.
+
 ### Changed
+
+- With `--rollout_batch k` and an `eval_seed`, in-training evaluation also
+  plays its episodes side by side with batched forward passes (on the CPU,
+  which is deterministic). Each environment carries its own random state,
+  seeded `eval_seed + i`, so every evaluation episode is exactly the one the
+  sequential evaluation plays (`tests/test_eval_lockstep.py`); bpic15's 20
+  evaluation days go from 28 to 17 s.
 
 - `--use_gpu true` (`run_bpm gpu=1`) now runs the PPO updates on a CUDA GPU:
   the policy and value nets, their optimizer state and the batches move to the

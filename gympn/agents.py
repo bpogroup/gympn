@@ -501,6 +501,14 @@ class Agent:
         # deterministic eval ran during training and saved a best policy, reload it
         # so the returned agent holds the best policy found, not the last (possibly
         # degraded) one. No-op when no eval/checkpoint was produced.
+        # The last epoch's policy is saved first (final_policy.pth): the best one
+        # is selected on the evaluation days, so a held-out test of the policy
+        # training ended with needs it.
+        if logdir is not None:
+            try:
+                self.save_policy_network(os.path.join(logdir, "final_policy.pth"))
+            except Exception as e:
+                get_logger().warning(f"Could not save the final policy: {e}")
         if test_env is not None and logdir is not None and self.best_test_metric > float('-inf'):
             best_path = os.path.join(logdir, "best_policy.pth")
             if os.path.exists(best_path):
@@ -750,6 +758,63 @@ class Agent:
                     buffer._nf_comp = s['nf_comp']
                     buffer._nf_rew = s['nf_rew']
                 buffer.finish()
+        return returns, lengths
+
+    def _test_lockstep(self, env, episodes, eval_seed, deterministic=True):
+        """test_in_train's common-random-numbers evaluation with the episodes
+        side by side (rollout_batch at a time) and one batched forward pass per
+        step. Each environment carries its own random state, seeded
+        eval_seed + i like the sequential evaluation and swapped in around
+        each of its steps, so scenario i is exactly the one the sequential
+        evaluation plays. The forward pass runs on the CPU, which is
+        deterministic (a GPU's atomic adds can break exact ties between
+        equivalent actions differently from run to run).
+
+        Returns per-episode (returns, lengths)."""
+        import copy
+        from torch_geometric.data import Batch
+        K = max(1, min(int(self.rollout_batch), episodes))
+        envs = [copy.deepcopy(env) for _ in range(K)]
+        returns, lengths = np.zeros(episodes), np.zeros(episodes)
+
+        def start(k, i):
+            random.seed(eval_seed + i)
+            np.random.seed((eval_seed + i) % (2 ** 32))
+            state = envs[k].reset()
+            return {'k': k, 'i': i, 'state': state, 'len': 0, 'info': {'pn_reward': 0},
+                    'rng': (random.getstate(), np.random.get_state())}
+
+        slots = [start(k, k) for k in range(K)]
+        nxt = K
+        self.policy_model.eval()
+        while slots:
+            graphs = [s['state']['graph'] for s in slots]
+            with torch.no_grad():
+                pi = self.policy_model({'graph': Batch.from_data_list(graphs)})
+            na = [int(g.a_idx.numel()) for g in graphs]
+            npp = [int(g.p_idx.numel()) for g in graphs]
+            oa, op = 0, sum(na)
+            live = []
+            for s, a_n, p_n in zip(slots, na, npp):
+                p_s = torch.cat((pi[oa:oa + a_n], pi[op:op + p_n]), dim=0)
+                oa += a_n; op += p_n
+                if deterministic:
+                    action = torch.argmax(p_s).item()
+                else:
+                    action = torch.multinomial(p_s.reshape(-1), 1)[0].item()
+                random.setstate(s['rng'][0]); np.random.set_state(s['rng'][1])
+                s['state'], _, done, _, s['info'] = envs[s['k']].step(action)
+                s['rng'] = (random.getstate(), np.random.get_state())
+                s['len'] += 1
+                if done:
+                    returns[s['i']] = s['info']['pn_reward']
+                    lengths[s['i']] = s['len']
+                    if nxt < episodes:
+                        live.append(start(s['k'], nxt))
+                        nxt += 1
+                else:
+                    live.append(s)
+            slots = live
         return returns, lengths
 
     def _compute_batch_values(self, states_list, env):
@@ -1196,26 +1261,30 @@ class Agent:
             saved_np = np.random.get_state()
             saved_torch = torch.get_rng_state()
         try:
-            for i in range(episodes):
-                if crn:
-                    # Same scenario i for every arm and every epoch.
-                    random.seed(eval_seed + i)
-                    np.random.seed((eval_seed + i) % (2 ** 32))
-                state = env.reset()
-                done = False
-                episode_length = 0
-                total_reward = 0
-                info = {'pn_reward': 0}
-                while not done:
-                    action = self.act(state, deterministic=deterministic)
-                    next_state, reward, done, truncated, info = env.step(action)
-                    episode_length += 1
-                    state = next_state
+            if crn and self.rollout_batch > 1 and episodes > 1:
+                history['returns'], history['lengths'] = self._test_lockstep(
+                    env, episodes, eval_seed, deterministic)
+            else:
+                for i in range(episodes):
+                    if crn:
+                        # Same scenario i for every arm and every epoch.
+                        random.seed(eval_seed + i)
+                        np.random.seed((eval_seed + i) % (2 ** 32))
+                    state = env.reset()
+                    done = False
+                    episode_length = 0
+                    total_reward = 0
+                    info = {'pn_reward': 0}
+                    while not done:
+                        action = self.act(state, deterministic=deterministic)
+                        next_state, reward, done, truncated, info = env.step(action)
+                        episode_length += 1
+                        state = next_state
 
-                if episode_length == 0:
-                    get_logger().warning("Episode length is zero - no valid action produced")
-                history['returns'][i] = info['pn_reward']
-                history['lengths'][i] = episode_length
+                    if episode_length == 0:
+                        get_logger().warning("Episode length is zero - no valid action produced")
+                    history['returns'][i] = info['pn_reward']
+                    history['lengths'][i] = episode_length
         finally:
             if crn:
                 random.setstate(saved_random)
