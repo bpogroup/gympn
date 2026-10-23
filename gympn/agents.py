@@ -35,7 +35,8 @@ def _normalized_entropy(probs, logpis, batch_index):
 
     For each decision (identified by ``batch_index``), the raw entropy
     ``H = -sum(p * log(p))`` is divided by ``log(num_actions)`` so that the
-    result lies in [0, 1] regardless of how many actions are available.
+    result lies in [0, 1] regardless of how many actions are available
+    (decisions with one action count as 0).
 
     Parameters
     ----------
@@ -47,21 +48,65 @@ def _normalized_entropy(probs, logpis, batch_index):
     -------
     Tensor (scalar) – mean normalized entropy in [0, 1].
     """
-    ent_sum = torch.tensor(0.0, device=probs.device)
-    count = 0
-    for s in batch_index.unique():
-        mask = (batch_index == s)
-        p = probs[mask]
-        lp = logpis[mask]
-        n_actions = int(mask.sum().item())
-        raw_ent = -(p * lp).sum()
-        if n_actions > 1:
-            ent_sum = ent_sum + raw_ent / torch.log(
-                torch.tensor(float(n_actions), device=probs.device))
-        count += 1
-    if count == 0:
+    if batch_index is None or batch_index.numel() == 0:
         return torch.tensor(0.0, device=probs.device)
-    return ent_sum / count
+    G = int(batch_index.max().item()) + 1
+    raw = torch.zeros(G, device=probs.device, dtype=probs.dtype).index_add(0, batch_index, -(probs * logpis))
+    n = torch.bincount(batch_index, minlength=G)
+    present = n > 0
+    norm = torch.where(n > 1, raw / torch.log(n.clamp_min(2).to(probs.dtype)), torch.zeros_like(raw))
+    return norm[present].sum() / present.sum()
+
+
+def _policy_step_terms(new_lp_a, new_lp_p, old_lp_a, old_lp_p, idx_a, idx_p, actions,
+                       old_logprob, advantages, num_graphs):
+    """Per-decision terms of a PPO policy step on a batch, with tensor ops.
+
+    A decision's actions are its action nodes then its postpone nodes, in node
+    order (nodes of a decision are contiguous, decisions in batch order).
+    Decisions are those with an action node (or, if the batch has none, with a
+    postpone node). Returns, over those decisions in order: the new and old
+    log-probability of the chosen action, the advantage, and the mean per-state
+    KL(old || new) over each decision's own actions (0 * log 0 = 0; postpone
+    nodes without stored old log-probs contribute 0)."""
+    dev = (new_lp_a if new_lp_a is not None else new_lp_p).device
+    G = num_graphs
+    nA = 0 if new_lp_a is None else new_lp_a.numel()
+    nP = 0 if new_lp_p is None else new_lp_p.numel()
+    zero = torch.zeros(G, dtype=torch.long, device=dev)
+    cnt_a = torch.bincount(idx_a, minlength=G) if nA else zero
+    cnt_p = torch.bincount(idx_p, minlength=G) if nP else zero
+    start_a, start_p = torch.cumsum(cnt_a, 0) - cnt_a, torch.cumsum(cnt_p, 0) - cnt_p
+    sel = torch.nonzero(cnt_a > 0 if nA else cnt_p > 0).flatten()
+    act = actions.to(dev).long().reshape(-1)[sel]
+    in_a = act < cnt_a[sel]
+    if nA:
+        ia = (start_a[sel] + act).clamp(max=nA - 1)
+    if nP:
+        ip = (start_p[sel] + act - cnt_a[sel]).clamp(min=0, max=nP - 1)
+    if nA and nP:
+        new_sel = torch.where(in_a, new_lp_a[ia], new_lp_p[ip])
+    elif nA:
+        new_sel = new_lp_a[ia]
+    else:
+        new_sel = new_lp_p[ip]
+    with torch.no_grad():
+        news, olds, idx = [], [], []
+        if nA:
+            news.append(new_lp_a); olds.append(old_lp_a); idx.append(idx_a)
+        if nP:
+            news.append(new_lp_p)
+            olds.append(old_lp_p if old_lp_p is not None else new_lp_p.detach())
+            idx.append(idx_p)
+        new_c, old_c, idx_c = torch.cat(news), torch.cat(olds), torch.cat(idx)
+        p_un = torch.exp(old_c)
+        tot = torch.zeros(G, dtype=p_un.dtype, device=dev).index_add(0, idx_c, p_un).clamp_min(1e-8)
+        p_old = p_un / tot[idx_c]
+        terms = torch.where(p_old > 0, p_old * (old_c - new_c), torch.zeros_like(p_old))
+        kl = torch.zeros(G, dtype=terms.dtype, device=dev).index_add(0, idx_c, terms)[sel]
+        kld = kl.mean() if kl.numel() else torch.tensor(0.0, device=dev)
+    return new_sel, old_logprob[sel], advantages[sel], kld
+
 
 # ============================================================================
 # MULTIPROCESSING WORKER FUNCTION
@@ -1395,90 +1440,17 @@ class Agent:
         new_logpis_a = new_logpis[:nA] if nA else None
         new_logpis_p = new_logpis[nA:nA + nP] if nP else None
 
-        unique_samples = (idx_a.unique() if has_a else idx_p.unique())
-
-        sel_new, sel_old, sel_adv = [], [], []
-        kld_terms = []
-
-        for s in unique_samples:
-            parts_new = []
-            parts_old = []
-
-            if has_a:
-                mask_a = (idx_a == s)
-                ns_a = new_logpis_a[mask_a]  # 1-D slice
-                os_a = old_logpis_a[mask_a]  # 1-D slice
-                # Flatten defensively (handles accidental (k,1))
-                ns_a = ns_a.reshape(-1)
-                os_a = os_a.reshape(-1)
-                if ns_a.numel():
-                    parts_new.append(ns_a)
-                    parts_old.append(os_a)
-
-            if has_p and new_logpis_p is not None:
-                mask_p = (idx_p == s)
-                ns_p = new_logpis_p[mask_p].reshape(-1)  # 1-D slice
-                if old_logpis_p is not None:
-                    os_p = old_logpis_p[mask_p].reshape(-1)  # 1-D slice
-                else:
-                    # Old logpis not stored for postpone: use the new values so
-                    # this part contributes 0 to the KL (zeros_like would mean
-                    # log p_old = 0, i.e. p_old = 1 — corrupting the KL).
-                    os_p = ns_p.detach()
-                if ns_p.numel():
-                    parts_new.append(ns_p)
-                    parts_old.append(os_p)
-
-            if len(parts_new) == 0:
-                # No action nodes for this sample -> skip policy update; still train value below
-                continue
-
-            # Concatenate 1-D slices safely
-            ns_cat = torch.cat(parts_new, dim=0)  # (A_s + P_s,)
-            os_cat = torch.cat(parts_old, dim=0)  # same length
-
-            a_idx = int(actions[s])
-            # if a_idx < 0 or a_idx >= ns_cat.shape[0]:
-            #    # out-of-range chosen index -> skip this sample
-            #    continue
-
-            sel_new.append(ns_cat[a_idx].reshape(()))
-            sel_old.append(old_logprob[s].reshape(()))
-            sel_adv.append(advantages[s].reshape(()))
-
-            # TRUE per-state KL(old || new) over this state's OWN action set:
-            #   KL_s = sum_a p_old(a|s) * (log p_old(a|s) - log p_new(a|s)).
-            # Non-negative and well-defined for variable-size action sets (old
-            # and new share the state's support), unlike the previous
-            # chosen-action log-ratio, which was signed (batch mean cancels),
-            # single-sample (huge variance) and |A(s)|-dependent.
-            with torch.no_grad():
-                p_old = torch.exp(os_cat)
-                p_old = p_old / p_old.sum().clamp_min(1e-8)
-                # 0 * log 0 = 0: a sharp policy (e.g. loaded from behaviour
-                # cloning) has actions of probability exactly 0, where the
-                # product would be 0 * (-inf + inf) = nan.
-                terms = torch.where(p_old > 0, p_old * (os_cat - ns_cat), torch.zeros_like(p_old))
-                kld_terms.append(float(terms.sum().item()))
-
-        # ----- Policy-only update (fix #1/#2) -----
-        # The value net is trained separately for `value_updates` passes in
-        # _fit_policy_and_value_models. Because policy and value are fully decoupled
-        # (separate optimizers/backward), `vf_coeff` never affected the gradient and
-        # is therefore dropped from this path.
-        self.policy_optimizer.zero_grad()
-
-        new_sel = torch.stack(sel_new)
-        old_sel = torch.stack(sel_old)
-        adv_sel = torch.stack(sel_adv)
+        # Per-decision chosen-action log-probs and KL(old || new), vectorised
+        # over the batch (the per-state Python loop it replaces cost ~4 GPU
+        # syncs per decision; tests/test_policy_step.py keeps it as reference).
+        if not (has_a or has_p):
+            raise ValueError("batch has no action nodes")
+        new_sel, old_sel, adv_sel, kld = _policy_step_terms(
+            new_logpis_a, new_logpis_p, old_logpis_a.reshape(-1) if old_logpis_a is not None else None,
+            old_logpis_p.reshape(-1) if old_logpis_p is not None else None,
+            idx_a, idx_p, actions, old_logprob, advantages, int(batch.num_graphs))
 
         loss_policy_core = torch.mean(self.policy_loss(new_sel, old_sel, adv_sel))
-        # Compute KLD as mean difference in log probabilities
-        if len(kld_terms) > 0:
-            kld = torch.tensor(kld_terms, device=new_probs.device).mean()
-        else:
-            kld = torch.tensor(0.0, device=new_probs.device)
-
         # Normalized entropy over the combined batch index
         _ent_parts = []
         if has_a and idx_a is not None:

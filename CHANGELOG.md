@@ -48,6 +48,12 @@ All notable changes to gympn are recorded here. The format follows
   Other configurations, and each episode's first observation, still take the
   HeteroData path; `GymProblem.DIRECT_FLAT_OBS = False` forces it everywhere.
 
+- The PPO policy step computes its per-decision terms (chosen-action
+  log-probabilities, per-state KL, normalised entropy) with tensor operations
+  over the batch instead of a Python loop with GPU syncs per decision: the
+  bpic15 update goes from 48 to 27 s per epoch on the GPU. Same values up to
+  float summation order (`tests/test_policy_step.py`).
+
 - The SMDP discount rate `beta` now defaults to 0.05 (was 0.0, no discount):
   a reward `tau` time units after a decision is weighted `exp(-0.05 tau)`, so
   credit spans about 20 time units. It applies only with `--smdp_discount` or
