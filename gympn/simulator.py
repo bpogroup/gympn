@@ -658,6 +658,9 @@ class GymProblem(SimProblem):
 
         #graph observation expects places to contain their color sets types (only the types of variables for each token)
 
+        if self._use_direct_flat(minimal_obs, normalize, remove_empty_nodes, add_self_loops):
+            return self._direct_flat_observation()
+
         ret_graph = HeteroData()
         token_value = None  # used to store the token value of the current place
         new_values = None  # used to store the new values of the current place
@@ -942,6 +945,267 @@ class GymProblem(SimProblem):
             obs['component'] = self.net_component_members(keep_comp)
         return obs
 
+
+    # Build flat observations directly (see _direct_flat_observation). False
+    # forces the HeteroData path everywhere (equivalence testing).
+    DIRECT_FLAT_OBS = True
+
+    def _use_direct_flat(self, minimal_obs, normalize, remove_empty_nodes, add_self_loops):
+        """The direct builder covers the flat observation with default options,
+        on nets of plain SimVar places, once the first observation (HeteroData
+        path) has fixed the flat metadata and feature width."""
+        if not (self.DIRECT_FLAT_OBS and getattr(self, 'flat_obs', False)
+                and not minimal_obs and not normalize and remove_empty_nodes and add_self_loops
+                and not self.plot_observations and not getattr(self, 'component_turns', False)
+                and getattr(self, '_flat_meta', None) is not None and self.metadata is not None):
+            return False
+        ok = self.__dict__.get('_direct_flat_supported')
+        if ok is None:
+            places = set(map(id, self.places))
+            ok = (all(type(p) is SimVar for p in self.places)
+                  and all(id(p) in places for t in list(self.events) + list(self.actions)
+                          for p in list(t.incoming) + list(t.outgoing))
+                  and all(len(a.outgoing) > 0 for a in self.actions))
+            self._direct_flat_supported = ok
+        return ok
+
+    def _token_feature_list(self, p_name, token):
+        """A token's node features as a list of floats: the HeteroData path's
+        token_value, value for value."""
+        v = token.value
+        if isinstance(v, dict):
+            hidden = self.unobservable_token_attrs.get(p_name, [])
+            cat = self.categorical_token_attrs.get(p_name, {})
+            row = [float(val) for key, val in v.items() if key not in hidden and key not in cat]
+            if p_name in self.categorical_token_attrs:
+                for key, val in v.items():
+                    if key in cat:
+                        one_hot = [0.0] * len(cat[key])
+                        one_hot[val] = 1.0
+                        row += one_hot
+            return row
+        if isinstance(v, (tuple, list)):
+            if all(isinstance(item, dict) for item in v):
+                return [float(val) for d in v for val in d.values()]
+            return [float(val) for val in v]
+        raise TypeError("Unsupported token value type.")
+
+    def _direct_flat_observation(self):
+        """get_graph_observation for flat_obs, built straight from the marking.
+
+        The HeteroData path expands the net into 1-bounded places and one
+        action per token combination (expand_no_future_tokens), builds a
+        HeteroData with one tensor per token, adds reverse edges and component
+        ids type by type, and then flattens it: thousands of small Python and
+        torch operations per step. This builds the same FlatGraph, and the same
+        pn_actions, from plain lists and creates each tensor once. It follows
+        the HeteroData path rule for rule, including its quirks: an action gets
+        a node for EVERY combination of its input places' present tokens (guards
+        decide only whether the action has nodes at all), its outgoing edges go
+        to its FIRST output place only, edge types are ordered by first
+        appearance, and a place type with no nodes or zero-width features loses
+        its edges (remove_empty_nodes); a place whose tokens have no features
+        gets no nodes at all.
+        tests/test_direct_obs.py checks the two paths for equality."""
+        from gympn.flat_graph import FlatGraph, vocab
+        clock = self.clock
+        unobs = set(self.unobservable_simvars)
+        cache = self.__dict__.get('_direct_flat_cache')
+        if cache is None:
+            obs_places = [p._id for p in self.places if p._id not in unobs]
+            place_by_id = {}
+            for p in self.places:
+                place_by_id.setdefault(p._id, p)
+            a_onehot = {a._id: [1.0 if b._id == a._id else 0.0 for b in self.actions] for a in self.actions}
+            e_rows = [[1.0 if f._id == e._id else 0.0 for f in self.events] for e in self.events]
+            empty_w = {}
+            for nt in obs_places:
+                if nt in self.unobservable_token_attrs:
+                    empty_w[nt] = len([el for el in self.var_attributes[nt]
+                                       if el not in self.unobservable_token_attrs[nt]])
+                else:
+                    empty_w[nt] = len(self.var_attributes[nt])
+            cache = self._direct_flat_cache = (obs_places, place_by_id, a_onehot, e_rows, empty_w,
+                                               vocab(self._flat_meta))
+        obs_places, place_by_id, a_onehot, e_rows, empty_w, (ntype_idx, etype_idx) = cache
+        width = self._flat_width
+
+        # present tokens (time <= clock) per place, in marking order
+        valid = {p._id: [t for t in p.marking if t.time <= clock] for p in self.places}
+
+        # ---- node types, in HeteroData insertion order: places, a_transition, e_transition
+        types = []          # [name, n, feature width, rows or None]
+        for nt in obs_places:
+            toks = valid[nt]
+            if toks:
+                rows = [self._token_feature_list(nt, tok) for tok in toks]
+                w = len(rows[0])
+                if any(len(r) != w for r in rows):
+                    raise RuntimeError(f"tokens of place {nt!r} have different feature widths")
+                if w == 0:      # featureless tokens: the HeteroData path keeps no nodes for them
+                    types.append([nt, 0, empty_w[nt], None])
+                else:
+                    types.append([nt, len(rows), w, rows])
+            else:
+                types.append([nt, 0, empty_w[nt], None])
+
+        # ---- action nodes and arcs (events' arcs come first in arc order)
+        edge_pairs = {}     # edge type -> [(src, dst)], in order of first appearance
+
+        def arc(key, pair):
+            pairs = edge_pairs.setdefault(key, [])
+            if pair is not None:
+                pairs.append(pair)
+
+        def copies(pid):
+            n = len(valid[pid])
+            return list(range(n)) if n else [None]       # None: the empty copy "<pid>.0"
+
+        for j, e in enumerate(self.events):
+            for p in e.incoming:
+                if p._id not in unobs:
+                    for ci in copies(p._id):
+                        arc((p._id, 'edge_to_e_transition', 'e_transition'), None if ci is None else (ci, j))
+            for p in e.outgoing:
+                if p._id not in unobs:
+                    for ci in copies(p._id):
+                        arc(('e_transition', 'edge_to_' + p._id, p._id), None if ci is None else (j, ci))
+
+        binding_map, a_rows = [], []
+        for t in self.actions:
+            if self._postponed_action(t):
+                continue
+            vb = [b for (b, tm) in self.event_bindings(t) if tm <= clock]
+            if not vb:
+                continue
+            in_places = {}
+            for place, _tok in vb[-1]:
+                in_places.setdefault(place._id, []).extend(copies(place._id))
+            pids = list(in_places)
+            out = t.outgoing[0]._id
+            # (the HeteroData path lists a marked output place's copies once per arc to it)
+            out_copies = copies(out) * (sum(p._id == out for p in t.outgoing) if valid[out] else 1)
+            for combo in itertools.product(*in_places.values()):
+                k = len(a_rows)
+                toks = [valid[pid][ci] for pid, ci in zip(pids, combo)]
+                binding_map.append(([(place_by_id[pid], SimToken(tok.value, tok.time))
+                                     for pid, tok in zip(pids, toks)],
+                                    max(tok.time for tok in toks), t))
+                a_rows.append(a_onehot[t._id])
+                for pid, ci in zip(pids, combo):
+                    if pid not in unobs:
+                        arc((pid, 'edge_to_a_transition', 'a_transition'), (ci, k))
+                if out not in unobs:
+                    for ci in out_copies:
+                        arc(('a_transition', 'edge_to_' + out, out), None if ci is None else (k, ci))
+
+        if a_rows:
+            types.append(['a_transition', len(a_rows), len(self.actions), a_rows])
+        if self.events:
+            types.append(['e_transition', len(e_rows), len(self.events), e_rows])
+        if a_rows:
+            edge_pairs[('a_transition', 'self_loop', 'a_transition')] = [(i, i) for i in range(len(a_rows))]
+
+        # remove_empty_nodes: edge types touching a type with no features lose their edges
+        empty = {nt for nt, n, w, _ in types if n * w == 0}
+        if empty:
+            for key in edge_pairs:
+                if key[0] in empty or key[2] in empty:
+                    edge_pairs[key] = []
+
+        self.pn_actions = binding_map
+        self.expanded_pn = None
+        sizes = {nt: n for nt, n, _, _ in types}
+        need_comp = bool(getattr(self, 'global_view', False))
+        if need_comp or self._component_postpone():
+            part, place_part = self.net_partition(), self.net_place_partition()
+            a_comp = [part.get(b[2]._id) for b in binding_map]
+            e_comp = [part.get(GymProblem._get_string_before_last_dot(e._id) if '.' in e._id else e._id)
+                      for e in self.events]
+
+            def node_comps(nt, n):
+                if nt == 'a_transition':
+                    return a_comp[:n]
+                if nt == 'e_transition':
+                    return e_comp[:n]
+                return [place_part.get(nt)] * n
+
+        # ---- postpone node(s)
+        if self._component_postpone():
+            entries = self._postpone_entries(binding_map)
+            slot = {e[2].comp: i for i, e in enumerate(entries)}
+            for nt, n, _, _ in list(types):
+                cs = node_comps(nt, n)
+                edge_pairs[(nt, 'to_postpone', 'postpone')] = [(i, slot[c]) for i, c in enumerate(cs) if c in slot]
+            types.append(['postpone', len(entries), 1, [[0.0] for _ in entries]])
+            binding_map.extend(entries)
+        elif self.allow_postpone:
+            for nt, n, _, _ in list(types):
+                edge_pairs[(nt, 'to_postpone', 'postpone')] = [(i, 0) for i in range(n)]
+            types.append(['postpone', 1, 1, [[0.0]]])
+            binding_map.append((['postpone'], self.clock, None))
+        sizes = {nt: n for nt, n, _, _ in types}
+
+        # ---- whole-net view: reverse edges, component of every node
+        comp = None
+        if need_comp:
+            for (src, rel, dst) in list(edge_pairs):
+                if rel != 'self_loop':
+                    edge_pairs[(dst, rel + '_rev', src)] = [(b, a) for (a, b) in edge_pairs[(src, rel, dst)]]
+            real = [b for b in binding_map if b[0] != ['postpone']]
+            pp = self._postpone_entries(real) if self._component_postpone() else []
+            comp = []
+            for nt, n, _, _ in types:
+                if n == 0:
+                    continue
+                if nt == 'postpone':
+                    cs = [e[2].comp for e in pp][:n] if pp else [None] * n
+                else:
+                    cs = node_comps(nt, n)
+                comp += [-1 if c is None else int(c) for c in cs]
+
+        # ---- flatten (hetero_to_flat, same order)
+        w_max = max((w for _, _, w, _ in types), default=0)
+        if w_max > width:
+            raise ValueError(f"observation feature width {w_max} > fixed flat width {width}")
+        x_rows, ntype, offset = [], [], {}
+        for nt, n, w, rows in types:
+            offset[nt] = len(x_rows)
+            if n == 0:
+                continue
+            if nt not in ntype_idx:
+                raise KeyError(f"node type {nt!r} not in the network's metadata")
+            pad = [0.0] * (width - w)
+            x_rows += [r + pad for r in rows]
+            ntype += [ntype_idx[nt]] * n
+        src_all, dst_all, etype = [], [], []
+        for key, pairs in edge_pairs.items():
+            if not pairs:
+                continue
+            if key not in etype_idx:
+                raise KeyError(f"edge type {key!r} not in the network's metadata")
+            s, _, d = key
+            if sizes.get(s, 0) == 0 or sizes.get(d, 0) == 0:
+                continue
+            so, do = offset[s], offset[d]
+            src_all += [a + so for a, _ in pairs]
+            dst_all += [b + do for _, b in pairs]
+            etype += [etype_idx[key]] * len(pairs)
+
+        def positions(nt):
+            if sizes.get(nt, 0) == 0:
+                return torch.arange(0, dtype=torch.long)
+            return torch.arange(offset[nt], offset[nt] + sizes[nt], dtype=torch.long)
+
+        x = (torch.tensor(x_rows, dtype=torch.float32) if x_rows
+             else torch.zeros((0, width), dtype=torch.float32))
+        kw = {'comp': torch.tensor(comp, dtype=torch.long)} if comp is not None and x_rows else {}
+        graph = FlatGraph(x=x, ntype=torch.tensor(ntype, dtype=torch.long),
+                          edge_index=torch.tensor([src_all, dst_all], dtype=torch.long),
+                          etype=torch.tensor(etype, dtype=torch.long),
+                          a_idx=positions('a_transition'), p_idx=positions('postpone'),
+                          num_nodes=len(x_rows), **kw)
+        return {'graph': graph, 'actions_dict': binding_map}
 
     def match_policy_view(self, model):
         """Set global_view to the one a trained policy was built for

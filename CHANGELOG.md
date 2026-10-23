@@ -30,6 +30,14 @@ All notable changes to gympn are recorded here. The format follows
   unchanged bit for bit; the encoder computes the same function in a cheaper
   order (equal up to float rounding).
 
+- Flat observations (`flat_obs`) are built directly from the marking
+  (`GymProblem._direct_flat_observation`) instead of through the expanded net
+  and a HeteroData graph: an environment step is about 5x faster (bpic15:
+  6.5 -> 1.3 ms), a rollout with a policy about 1.65x. The observation and
+  `pn_actions` are unchanged bit for bit (`tests/test_direct_obs.py`).
+  Other configurations, and each episode's first observation, still take the
+  HeteroData path; `GymProblem.DIRECT_FLAT_OBS = False` forces it everywhere.
+
 - The SMDP discount rate `beta` now defaults to 0.05 (was 0.0, no discount):
   a reward `tau` time units after a decision is weighted `exp(-0.05 tau)`, so
   credit spans about 20 time units. It applies only with `--smdp_discount` or
