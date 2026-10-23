@@ -18,6 +18,10 @@ All notable changes to gympn are recorded here. The format follows
   is recomputed whenever the set of marked places changes, so transitions that
   can no longer fire stop coupling components.
 
+- `--critic_warmup k`: for the first k epochs only the critic learns (the
+  policy's learning rate is held at 0), so a policy loaded with
+  `--load_policy_network` is not pushed around by a fresh critic's advantages.
+
 ### Changed
 
 - `--use_gpu true` (`run_bpm gpu=1`) now runs the PPO updates on a CUDA GPU:
@@ -59,6 +63,17 @@ All notable changes to gympn are recorded here. The format follows
 - `GymProblem.testing_run` with a trained policy uses the view the policy
   was trained on (`GymProblem.match_policy_view`,
   `networks.policy_global_view`), so policies saved by 0.1.0 still run.
+
+### Fixed
+
+- GPU updates no longer grow host memory over a run: the CUDA cache is
+  released after each update (on Windows it spilled into host memory, 7 ->
+  12 GB over a bpic15 run).
+- The logged policy KL (and the `--policy_kld_limit` brake) were NaN for a
+  policy with zero-probability actions, e.g. one loaded from behaviour
+  cloning; such actions now contribute 0.
+- `--load_policy_network` works with torch >= 2.6 (whole-module checkpoints
+  need `weights_only=False`) and accepts an absolute `--policy_network` path.
 
 ## 0.1.0 - 2026-10-09
 

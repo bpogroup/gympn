@@ -335,6 +335,11 @@ class Agent:
                                          batch_size=batch_size,
                                          sort=sort_states, drop_remainder=True)
 
+            if self.critic_warmup:
+                if i == 0:
+                    self._policy_lrs = [g['lr'] for g in self.policy_optimizer.param_groups]
+                for g, lr in zip(self.policy_optimizer.param_groups, self._policy_lrs):
+                    g['lr'] = 0.0 if i < self.critic_warmup else lr
             policy_history = self._fit_policy_and_value_models(dataloader, epochs=self.policy_updates)
 
             # Update training history
@@ -840,7 +845,8 @@ class Agent:
 
         # Compute normalized KLD
         logpis = torch.cat(logpis, dim=0)
-        kld = torch.sum(new_probs * (new_logpis - logpis)) / batch_size
+        kld = torch.sum(torch.where(new_probs > 0, new_probs * (new_logpis - logpis),
+                                    torch.zeros_like(new_probs))) / batch_size
         loss = torch.mean(self.policy_loss(new_logprobs, logprobs, advantages)) - self.ent_bonus * ent
 
         try:
@@ -1114,6 +1120,13 @@ class Agent:
     # to update_device and back. Set by train.make_agent from --use_gpu.
     update_device = None
 
+    # Epochs at the start of training in which only the critic learns (the
+    # policy's learning rate is held at 0). For a policy loaded from elsewhere
+    # (e.g. behaviour cloning): a fresh critic's first advantages are noise and
+    # would push the loaded policy around before the critic knows its values.
+    # Set by train.make_agent from --critic_warmup.
+    critic_warmup = 0
+
     def _models_to(self, device):
         """Move the policy and value nets and their Adam state to device."""
         for model, opt in ((self.policy_model, getattr(self, 'policy_optimizer', None)),
@@ -1136,6 +1149,12 @@ class Agent:
             return self._fit_policy_and_value_models_here([b.to(dev) for b in dataloader], epochs)
         finally:
             self._models_to('cpu')
+            # Batches differ in size every epoch, so the caching allocator keeps
+            # reserving new blocks; on Windows they spill into host memory
+            # (sysmem fallback) and a long run grows by GBs. Nothing lives on
+            # the GPU between updates, so hand the cache back each time.
+            if str(dev).startswith('cuda'):
+                torch.cuda.empty_cache()
 
     def _fit_policy_and_value_models_here(self, dataloader, epochs=1):
         """Fit both policy and value models simultaneously using data from dataset.
@@ -1312,7 +1331,11 @@ class Agent:
             with torch.no_grad():
                 p_old = torch.exp(os_cat)
                 p_old = p_old / p_old.sum().clamp_min(1e-8)
-                kld_terms.append(float((p_old * (os_cat - ns_cat)).sum().item()))
+                # 0 * log 0 = 0: a sharp policy (e.g. loaded from behaviour
+                # cloning) has actions of probability exactly 0, where the
+                # product would be 0 * (-inf + inf) = nan.
+                terms = torch.where(p_old > 0, p_old * (os_cat - ns_cat), torch.zeros_like(p_old))
+                kld_terms.append(float(terms.sum().item()))
 
         # ----- Policy-only update (fix #1/#2) -----
         # The value net is trained separately for `value_updates` passes in

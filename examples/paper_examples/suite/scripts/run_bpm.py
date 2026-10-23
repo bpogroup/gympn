@@ -10,7 +10,7 @@ Arms: ppo (SMDP-GAE PPO, one agent), nfgae (net-factored GAE, one agent,
 component turns, credited with its component's return; gympn.component_agents).
 
 Run:  python scripts/run_bpm.py env=insurer N=2 [workers] [seeds=20] [methods=ppo,nfgae]
-                        [epochs=40] [threads=k] [episodes=8] [plr=x] [bs=k] [cert=static|marking]
+                        [epochs=40] [threads=k] [episodes=8] [plr=x] [lam=x] [bs=k] [init=<policy.pth>] [cwarm=k] [cert=static|marking]
                         [net=aepn|hgt|temb|tembf] [bases=K] [flat=1] [local=1]
                         [beta=0.5]   (SMDP discount, default 0.05; any value but the legacy 0.5 routes to *_beta<val>)
                         [view=full]  (default for aepn: reverse edges + per-layer global attention +
@@ -65,6 +65,9 @@ _POSTPONE_SET = False
 POSTPONE_SCOPE = "global"
 LOCAL = False                  # local=1: nfgae component turns, local observations (routes to *_local)
 PLR = None                     # plr=x: policy learning rate override (routes to *_plr<x>)
+LAM = None                     # lam=x: GAE lambda override (default Hyper.lam = 0.95; routes to *_lam<x>)
+INIT = None                    # init=<path>: start the policy from a saved (torch.save) policy (routes to *_init<stem>)
+CWARM = 0                      # cwarm=k: first k epochs train only the critic (routes to *_cw<k>)
 FLAT = False                   # flat=1: flat graph observations (needs net=temb|tembf|aepn; routes to *_flat)
 NET = "aepn"                   # net=hgt|temb|tembf|aepn: actor+critic encoder (default aepn; *_aepn dirs, hgt = the old unsuffixed dirs)
 BASES = None                   # bases=K: AEPNStack basis count (default 8; routes to *_b<K>)
@@ -96,6 +99,12 @@ for _a in sys.argv[1:]:
         LOCAL = _a.split("=", 1)[1] not in ("0", "false", "False")
     elif _a.startswith("plr="):
         PLR = float(_a.split("=", 1)[1])
+    elif _a.startswith("lam="):
+        LAM = float(_a.split("=", 1)[1])
+    elif _a.startswith("init="):
+        INIT = os.path.abspath(_a.split("=", 1)[1])
+    elif _a.startswith("cwarm="):
+        CWARM = int(_a.split("=", 1)[1])
     elif _a.startswith("flat="):
         FLAT = _a.split("=", 1)[1] not in ("0", "false", "False")
     elif _a.startswith("abatch="):
@@ -150,6 +159,9 @@ OUTDIR = RESULTS / (f"bpm_{ENV}_n{N}_ep{EPOCHS}" + ("" if EPOCHS == 40 else f"_s
               + ("" if BASES is None else f"_b{BASES}")
               + ("" if EPISODES == 8 else f"_eps{EPISODES}")
               + ("" if PLR is None else f"_plr{PLR:g}")
+              + ("" if LAM is None else f"_lam{LAM:g}")
+              + ("" if INIT is None else f"_init{os.path.splitext(os.path.basename(INIT))[0]}")
+              + ("" if not CWARM else f"_cw{CWARM}")
               + ("" if BS is None else f"_bs{BS}")
               + ("_flat" if FLAT else "")
               + ("_local" if LOCAL else "")
@@ -185,7 +197,7 @@ def _args(method, seed, cfg, logdir):
         "episodes": EPISODES, "epochs": EPOCHS, "batch_size": cfg.batch_size if BS is None else BS,
         "policy_lr": cfg.policy_lr if PLR is None else PLR, "policy_updates": cfg.policy_updates,
         "value_lr": cfg.value_lr, "value_updates": cfg.value_updates,
-        "eps": cfg.ppo_eps, "gam": cfg.gam, "lam": cfg.lam, "ent_bonus": cfg.ent_bonus,
+        "eps": cfg.ppo_eps, "gam": cfg.gam, "lam": cfg.lam if LAM is None else LAM, "ent_bonus": cfg.ent_bonus,
         "policy_kld_limit": getattr(cfg, "policy_kld_limit", None),
         "beta": cfg.beta,
         "verbose": 0, "use_gpu": GPU, "agent_seed": int(seed),
@@ -211,6 +223,11 @@ def _args(method, seed, cfg, logdir):
         a["value_kwargs"]["encoder_kwargs"] = {**net_kw.get("encoder_kwargs", {}), "component_mask": True}
     if FLAT:
         a["flat_obs"] = True
+    if INIT is not None:
+        a["load_policy_network"] = True
+        a["policy_network"] = INIT
+    if CWARM:
+        a["critic_warmup"] = CWARM
     if LOCAL and method == "nfgae":
         a["local_obs"] = True
     if MARKING and method in ("nfgae", "agents"):

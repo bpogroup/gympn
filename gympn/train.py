@@ -123,6 +123,11 @@ def make_parser():
                         type=int,
                         default=10, #10
                         help='policy model updates per epoch')
+    policy.add_argument('--critic_warmup',
+                        type=int,
+                        default=0,
+                        help='epochs at the start in which only the critic learns (policy lr held at 0); '
+                             'for a policy loaded with --load_policy_network')
     policy.add_argument('--policy_kld_limit',
                         type=float,
                         default=None,
@@ -360,7 +365,11 @@ def make_policy_network(args, metadata=None):
     """
     if args.environment == 'ActionEvolutionPetriNetEnv':
         if args.load_policy_network:
-            policy_network = torch.load(os.path.join(os.getcwd(), args.logdir, args.name, args.policy_network))
+            path = args.policy_network
+            if not os.path.isabs(path):
+                path = os.path.join(os.getcwd(), args.logdir, args.name, path)
+            # a whole pickled module (torch.save(model)), so not weights_only
+            policy_network = torch.load(path, weights_only=False)
         elif args.environment == 'ActionEvolutionPetriNetEnv':
             policy_network = HeteroActor(
                 input_size=args.policy_kwargs.get("input_size", -1),
@@ -491,6 +500,7 @@ def make_agent(args, metadata=None):
     # run, so two arms of one experiment do not share an initial policy.
     agent.agent_seed = getattr(args, 'agent_seed', None)
     agent.update_device = update_device
+    agent.critic_warmup = getattr(args, 'critic_warmup', 0)
 
     return agent
 
