@@ -620,6 +620,13 @@ class GymProblem(SimProblem):
         filter, same trailing postpone entry — so action indices stay identical
         to those the graph path produces (the network prior/eval alignment).
         """
+        if self.DIRECT_FLAT_OBS and not getattr(self, 'component_turns', False) and self._direct_supported():
+            transition_binding_map = self._direct_pn_actions()
+            if self.allow_postpone:
+                transition_binding_map.extend(self._postpone_entries(transition_binding_map))
+            self.expanded_pn = None
+            self.pn_actions = transition_binding_map
+            return transition_binding_map
         self.expanded_pn, _ = self.expand_no_future_tokens(actions_only=True)
         keep_comp = self._turn_component(self.expanded_pn) if getattr(self, 'component_turns', False) else None
         part = self.net_partition() if keep_comp is not None else None
@@ -959,6 +966,11 @@ class GymProblem(SimProblem):
                 and not self.plot_observations and not getattr(self, 'component_turns', False)
                 and getattr(self, '_flat_meta', None) is not None and self.metadata is not None):
             return False
+        return self._direct_supported()
+
+    def _direct_supported(self):
+        """The direct builders cover nets of plain SimVar places whose
+        transitions all have an output place."""
         ok = self.__dict__.get('_direct_flat_supported')
         if ok is None:
             places = set(map(id, self.places))
@@ -968,6 +980,49 @@ class GymProblem(SimProblem):
                   and all(len(a.outgoing) > 0 for a in self.actions))
             self._direct_flat_supported = ok
         return ok
+
+    def _direct_action_combos(self, valid):
+        """The expanded actions of the HeteroData path, in its order, from the
+        present tokens `valid` (place id -> tokens with time <= clock): for each
+        action with a firable binding (guards and component postpone
+        respected), every combination of its input places' present tokens.
+        Yields (transition, input place ids, token index per place)."""
+        clock = self.clock
+        for t in self.actions:
+            if self._postponed_action(t):
+                continue
+            vb = [b for (b, tm) in self.event_bindings(t) if tm <= clock]
+            if not vb:
+                continue
+            in_places = {}
+            for place, _tok in vb[-1]:
+                n = len(valid[place._id])
+                in_places.setdefault(place._id, []).extend(range(n) if n else [None])
+            pids = list(in_places)
+            for combo in itertools.product(*in_places.values()):
+                yield t, pids, combo
+
+    def _direct_place_by_id(self):
+        d = self.__dict__.get('_direct_place_by_id_cache')
+        if d is None:
+            d = {}
+            for p in self.places:
+                d.setdefault(p._id, p)
+            self._direct_place_by_id_cache = d
+        return d
+
+    def _direct_pn_actions(self):
+        """compute_pn_actions without the net expansion: the bindings of
+        _direct_action_combos, as the HeteroData path builds them."""
+        clock = self.clock
+        valid = {p._id: [tk for tk in p.marking if tk.time <= clock] for p in self.places}
+        place_by_id = self._direct_place_by_id()
+        out = []
+        for t, pids, combo in self._direct_action_combos(valid):
+            toks = [valid[pid][ci] for pid, ci in zip(pids, combo)]
+            out.append(([(place_by_id[pid], SimToken(tok.value, tok.time)) for pid, tok in zip(pids, toks)],
+                        max(tok.time for tok in toks), t))
+        return out
 
     def _token_feature_list(self, p_name, token):
         """A token's node features as a list of floats: the HeteroData path's
@@ -1072,32 +1127,25 @@ class GymProblem(SimProblem):
                         arc(('e_transition', 'edge_to_' + p._id, p._id), None if ci is None else (j, ci))
 
         binding_map, a_rows = [], []
-        for t in self.actions:
-            if self._postponed_action(t):
-                continue
-            vb = [b for (b, tm) in self.event_bindings(t) if tm <= clock]
-            if not vb:
-                continue
-            in_places = {}
-            for place, _tok in vb[-1]:
-                in_places.setdefault(place._id, []).extend(copies(place._id))
-            pids = list(in_places)
-            out = t.outgoing[0]._id
-            # (the HeteroData path lists a marked output place's copies once per arc to it)
-            out_copies = copies(out) * (sum(p._id == out for p in t.outgoing) if valid[out] else 1)
-            for combo in itertools.product(*in_places.values()):
-                k = len(a_rows)
-                toks = [valid[pid][ci] for pid, ci in zip(pids, combo)]
-                binding_map.append(([(place_by_id[pid], SimToken(tok.value, tok.time))
-                                     for pid, tok in zip(pids, toks)],
-                                    max(tok.time for tok in toks), t))
-                a_rows.append(a_onehot[t._id])
-                for pid, ci in zip(pids, combo):
-                    if pid not in unobs:
-                        arc((pid, 'edge_to_a_transition', 'a_transition'), (ci, k))
-                if out not in unobs:
-                    for ci in out_copies:
-                        arc(('a_transition', 'edge_to_' + out, out), None if ci is None else (k, ci))
+        last_t = None
+        for t, pids, combo in self._direct_action_combos(valid):
+            if t is not last_t:
+                last_t = t
+                out = t.outgoing[0]._id
+                # (the HeteroData path lists a marked output place's copies once per arc to it)
+                out_copies = copies(out) * (sum(p._id == out for p in t.outgoing) if valid[out] else 1)
+            k = len(a_rows)
+            toks = [valid[pid][ci] for pid, ci in zip(pids, combo)]
+            binding_map.append(([(place_by_id[pid], SimToken(tok.value, tok.time))
+                                 for pid, tok in zip(pids, toks)],
+                                max(tok.time for tok in toks), t))
+            a_rows.append(a_onehot[t._id])
+            for pid, ci in zip(pids, combo):
+                if pid not in unobs:
+                    arc((pid, 'edge_to_a_transition', 'a_transition'), (ci, k))
+            if out not in unobs:
+                for ci in out_copies:
+                    arc(('a_transition', 'edge_to_' + out, out), None if ci is None else (k, ci))
 
         if a_rows:
             types.append(['a_transition', len(a_rows), len(self.actions), a_rows])

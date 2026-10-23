@@ -139,3 +139,27 @@ def test_direct_flat_observation_is_the_heterodata_one(name, seed):
         if d1:
             break
     assert used, "the direct builder was never used"
+
+
+@pytest.mark.parametrize("name", list(SCEN))
+def test_direct_pn_actions_are_the_expanded_ones(name):
+    """compute_pn_actions (steps without observations, as planners take them)
+    gives the bindings of the net expansion, in its order."""
+    build, attrs = SCEN[name]
+    ref, _ = _env(build, attrs, False, 5)
+    new, _ = _env(build, attrs, True, 5)
+    rng = random.Random(5)
+    for _ in range(80):
+        assert _actions(ref.pn.pn_actions) == _actions(new.pn.pn_actions)
+        B = ref.pn.pn_actions
+        if not B:
+            break
+        a = rng.randrange(len(B))
+        state, np_state = random.getstate(), np.random.get_state()
+        _, _, d1, _, _ = ref.step(a, build_obs=False)
+        random.setstate(state); np.random.set_state(np_state)
+        _, _, d2, _, _ = new.step(a, build_obs=False)
+        assert new.pn.expanded_pn is None
+        assert d1 == d2
+        if d1:
+            break
