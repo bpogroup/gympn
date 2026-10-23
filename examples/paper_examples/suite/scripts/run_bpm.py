@@ -258,11 +258,44 @@ def train_cell(method, seed, cfg, logdir, baselines):
     finally:
         sys.argv = saved
     m = extract_metrics(getattr(env, "training_history", {}) or {}, EPOCHS, TEST_FREQ)
+    m["heldout"] = _heldout_scores(method, logdir, f"{method}__s{seed}")
     m.update({"env": ENV, "N": N, "method": method, "seed": seed,
               "epochs": EPOCHS, "episodes": EPISODES, "eval_seed": EVAL_SEED,
               "baselines": baselines, "minutes": (time.time() - t0) / 60.0,
               "update_device": "cuda" if GPU else "cpu"})
     return m
+
+
+def _heldout_scores(method, logdir, name):
+    """Greedy returns of the cell's final and best checkpoints on the held-out
+    days (envs/heldout.py), or None for component agents / local turns."""
+    import torch
+    from heldout import make_env, score_policy, HELDOUT_SEED, HELDOUT_DAYS
+    if method == "agents" or (LOCAL and method == "nfgae"):
+        return None
+    env = make_env(BUILD, N, LENGTH, POSTPONE, POSTPONE_SCOPE, FLAT,
+                   {"local": False, "full": "edges"}[VIEW], MARKING and method in ("nfgae", "agents"))
+    out = {}
+    for which in ("final", "best"):
+        path = os.path.join(logdir, name, f"{which}_policy.pth")
+        if os.path.exists(path):
+            pol = torch.load(path, weights_only=False).eval()
+            out[which] = score_policy(env, pol, HELDOUT_SEED, HELDOUT_DAYS)
+    return out
+
+
+def _paired_anchors():
+    """Random and heuristic on the evaluation days and on the held-out days
+    (envs/heldout.py), cached in <OUTDIR>/eval_anchors.json."""
+    from heldout import make_env, anchors, EVAL_SEED, EVAL_DAYS, HELDOUT_SEED, HELDOUT_DAYS
+    f = OUTDIR / "eval_anchors.json"
+    if f.exists():
+        return json.loads(f.read_text())
+    env = make_env(BUILD, N, LENGTH, POSTPONE, POSTPONE_SCOPE)
+    a = {"eval": anchors(env, HEUR, EVAL_SEED, EVAL_DAYS),
+         "heldout": anchors(env, HEUR, HELDOUT_SEED, HELDOUT_DAYS)}
+    f.write_text(json.dumps(a, indent=1))
+    return a
 
 
 def _worker(payload):
@@ -276,31 +309,49 @@ def _worker(payload):
         return (method, seed, None, traceback.format_exc())
 
 
-def summary(out, baselines):
-    r, h = baselines["random_mean"], baselines["heuristic_mean"]
-    norm = lambda v: (v - r) / (h - r)
-    print(f"\n[{TAG}] anchors random={r:.2f} heuristic={h:.2f} (gap {h-r:.2f})", flush=True)
-    print(f"  {'method':<11} {'n':>3} {'final':>7} {'(SD)':>7} {'best':>7} {'collapsed':>9} {'ent':>6}", flush=True)
+def summary(out, baselines, paired):
+    """final: greedy_final on the 20 evaluation days, normalised with random
+    and heuristic on THOSE days. heldout final/best: the final and best
+    checkpoints on 100 held-out days, normalised on the same days. (The best
+    checkpoint is selected on the evaluation days; never quote its score
+    there.)"""
+    ev, ho = paired["eval"], paired["heldout"]
+    nrm = lambda v, a: (v - a["random_mean"]) / (a["heuristic_mean"] - a["random_mean"])
+    print(f"\n[{TAG}] anchors random/heuristic: eval days {ev['random_mean']:.2f}/{ev['heuristic_mean']:.2f}, "
+          f"held-out days {ho['random_mean']:.2f}/{ho['heuristic_mean']:.2f}", flush=True)
+    print(f"  {'method':<11} {'n':>3} {'final':>7} {'(SD)':>7} {'heldout final':>13} {'heldout best':>12} "
+          f"{'collapsed':>9} {'ent':>6}", flush=True)
     rows = {}
     for m in METHODS:
-        fin, best, ent = [], [], []
+        fin, hf, hb, ent = [], [], [], []
         for s in range(SEEDS):
             f = out / "cells" / f"N{N}__{m}__s{s}.json"
             if f.exists():
                 j = json.loads(f.read_text())
                 if j.get("greedy_final") is not None:
-                    fin.append(norm(j["greedy_final"])); best.append(norm(j["greedy_best"]))
+                    fin.append(nrm(j["greedy_final"], ev))
                     ent.append(j.get("entropy_final") or float("nan"))
+                    h = j.get("heldout") or {}
+                    if "final" in h:
+                        hf.append(nrm(np.mean(h["final"]), ho))
+                    if "best" in h:
+                        hb.append(nrm(np.mean(h["best"]), ho))
         if fin:
             fin = np.array(fin)
+            fmt = lambda xs: f"{np.mean(xs):.3f}" if xs else "-"
             rows[m] = {"n": len(fin), "final_mean": float(fin.mean()),
                        "final_sd": float(fin.std(ddof=1)) if len(fin) > 1 else 0.0,
-                       "best_mean": float(np.mean(best)), "collapsed": int((fin <= 0.25).sum()),
-                       "entropy_final": float(np.nanmean(ent)), "finals": fin.tolist()}
-            print(f"  {m:<11} {len(fin):>3} {fin.mean():>7.3f} {rows[m]['final_sd']:>7.3f} "
-                  f"{np.mean(best):>7.3f} {rows[m]['collapsed']:>9d} {np.nanmean(ent):>6.2f}", flush=True)
+                       "heldout_final_mean": float(np.mean(hf)) if hf else None,
+                       "heldout_best_mean": float(np.mean(hb)) if hb else None,
+                       "collapsed": int((fin <= 0.25).sum()),
+                       "entropy_final": float(np.nanmean(ent)), "finals": fin.tolist(),
+                       "heldout_finals": hf, "heldout_bests": hb}
+            print(f"  {m:<11} {len(fin):>3} {fin.mean():>7.3f} {rows[m]['final_sd']:>7.3f} {fmt(hf):>13} "
+                  f"{fmt(hb):>12} {rows[m]['collapsed']:>9d} {np.nanmean(ent):>6.2f}", flush=True)
+    means = {k: {kk: v for kk, v in a.items() if kk.endswith("mean") or kk in ("seed", "days")}
+             for k, a in paired.items()}
     (out / "summary.json").write_text(json.dumps({"env": ENV, "N": N, "baselines": baselines,
-                                                  "rows": rows}, indent=2))
+                                                  "paired_anchors": means, "rows": rows}, indent=2))
 
 
 def _keep_awake():
@@ -329,8 +380,9 @@ def main(workers):
     baselines = json.loads(bp.read_text()) if bp.exists() else _baselines()
     if not bp.exists():
         bp.write_text(json.dumps(baselines, indent=2))
-    print(f"[{TAG}] anchors: random={baselines['random_mean']:.2f} "
-          f"heuristic={baselines['heuristic_mean']:.2f}", flush=True)
+    paired = _paired_anchors()
+    print(f"[{TAG}] anchors on the evaluation days: random={paired['eval']['random_mean']:.2f} "
+          f"heuristic={paired['eval']['heuristic_mean']:.2f}", flush=True)
 
     pending = [(m, s) for s in range(SEEDS) for m in METHODS
                if not (OUTDIR / "cells" / f"N{N}__{m}__s{s}.json").exists()]
@@ -343,7 +395,7 @@ def main(workers):
         ctx = mp.get_context("spawn")
         tpw = THREADS if THREADS else threads_per_worker(workers)
         print(f"[{TAG}] torch threads per worker: {tpw}", flush=True)
-        r, h = baselines["random_mean"], baselines["heuristic_mean"]
+        r, h = paired["eval"]["random_mean"], paired["eval"]["heuristic_mean"]
         t0 = time.time()
         with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as ex:
             futs = [ex.submit(_worker, (m, s, cfg, logdir, baselines, tpw)) for (m, s) in pending]
@@ -358,7 +410,7 @@ def main(workers):
                 print(f"[{TAG}] <<< {m:<11} s{s:<2} final={nrm:+.3f} "
                       f"({res['minutes']:.1f} min; {(time.time()-t0)/60:.1f} total)", flush=True)
 
-    summary(OUTDIR, baselines)
+    summary(OUTDIR, baselines, paired)
 
 
 if __name__ == "__main__":
