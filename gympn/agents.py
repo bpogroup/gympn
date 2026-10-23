@@ -528,25 +528,7 @@ class Agent:
             decision_time = float(getattr(pn, 'clock', 0.0)) if pn is not None else 0.0
 
             if nf_on:
-                part = pn.net_partition()
-                is_pp = [isinstance(b[0], list) and b[0] == ['postpone'] for b in pn.pn_actions]
-                node_comp = [b[2].comp if pp else part[b[2]._id]
-                             for b, pp in zip(pn.pn_actions, is_pp)]
-                c_dec = node_comp[action]
-                g_ = state['graph']
-                mask_a = torch.tensor([c == c_dec for c, pp in zip(node_comp, is_pp) if not pp], dtype=torch.bool)
-                mask_p = torch.tensor([c == c_dec for c, pp in zip(node_comp, is_pp) if pp], dtype=torch.bool)
-                if is_flat(g_):
-                    # always set both, so every sample in a batch has the same keys
-                    g_.a_pool_mask, g_.p_pool_mask = mask_a, mask_p
-                else:
-                    g_['a_transition'].pool_mask = mask_a
-                    if any(is_pp):                     # postpone nodes, in the same order
-                        g_['postpone'].pool_mask = mask_p
-                # Marking-based certificate: name the component by its member
-                # transitions (ids are renumbered as the partition refines).
-                nf_comp_ep.append(pn.net_component_members(c_dec)
-                                  if getattr(pn, 'marking_certificate', False) else c_dec)
+                nf_comp_ep.append(self._nf_decision(pn, state, action))
 
             # Collect for batch processing
             states_batch.append(state)
@@ -591,6 +573,139 @@ class Agent:
             buffer.finish()
 
         return info.get('pn_reward', total_reward), episode_length
+
+    @staticmethod
+    def _nf_decision(pn, state, action):
+        """nfgae bookkeeping of one decision: mark the deciding component's
+        action (and postpone) nodes in the observation, which the critic pools
+        over (graph pool_mask), and return the component's name for the
+        buffer."""
+        part = pn.net_partition()
+        is_pp = [isinstance(b[0], list) and b[0] == ['postpone'] for b in pn.pn_actions]
+        node_comp = [b[2].comp if pp else part[b[2]._id]
+                     for b, pp in zip(pn.pn_actions, is_pp)]
+        c_dec = node_comp[action]
+        g_ = state['graph']
+        mask_a = torch.tensor([c == c_dec for c, pp in zip(node_comp, is_pp) if not pp], dtype=torch.bool)
+        mask_p = torch.tensor([c == c_dec for c, pp in zip(node_comp, is_pp) if pp], dtype=torch.bool)
+        if is_flat(g_):
+            # always set both, so every sample in a batch has the same keys
+            g_.a_pool_mask, g_.p_pool_mask = mask_a, mask_p
+        else:
+            g_['a_transition'].pool_mask = mask_a
+            if any(is_pp):                     # postpone nodes, in the same order
+                g_['postpone'].pool_mask = mask_p
+        # Marking-based certificate: name the component by its member
+        # transitions (ids are renumbered as the partition refines).
+        return (pn.net_component_members(c_dec)
+                if getattr(pn, 'marking_certificate', False) else c_dec)
+
+    def _run_episodes_lockstep(self, env, episodes, max_episode_length=None, buffer=None):
+        """run_episodes with rollout_batch > 1: up to rollout_batch copies of env
+        step side by side, and each step scores all their observations in one
+        batched forward pass of the policy and one of the critic (on
+        update_device when set; a GPU scores 32 bpic15 graphs in about the time
+        it scores one). The episodes have the same distribution as run_episode's
+        but are not the same episodes: the environments draw from the global
+        random streams in interleaved order. Each episode reaches the buffer
+        whole, in episode order, exactly as run_episode stores it.
+
+        Returns per-episode (returns, lengths) arrays, as run_episodes."""
+        import copy
+        from torch_geometric.data import Batch
+        K = max(1, min(int(self.rollout_batch), episodes))
+        dev = self.update_device
+        nf_on = self.nfgae
+        if nf_on:
+            if (getattr(env.pn, 'allow_postpone', False)
+                    and getattr(env.pn, 'postpone_scope', 'global') != 'component'):
+                raise ValueError("nfgae needs allow_postpone=False or postpone_scope="
+                                 "'component': a global postpone couples components "
+                                 "(Theorem 1, C3).")
+        envs = [copy.deepcopy(env) for _ in range(K)]
+        returns, lengths = np.zeros(episodes), np.zeros(episodes)
+        done_eps = {}                     # episode -> its steps and nfgae lists
+
+        def start(k, ep):
+            return {'k': k, 'ep': ep, 'state': envs[k].reset(), 'steps': [], 'nf_comp': [], 'nf_rew': [],
+                    'total': 0.0, 'info': {'pn_reward': 0}}
+
+        slots = [start(k, k) for k in range(K)]
+        next_ep = K
+        if dev is not None:
+            self._models_to(dev)
+        self.policy_model.eval()
+        if self.value_model is not None and not isinstance(self.value_model, str):
+            self.value_model.eval()
+        try:
+            while slots:
+                graphs = [s['state']['graph'] for s in slots]
+                with torch.no_grad():
+                    batch = Batch.from_data_list(graphs)
+                    pi = self.policy_model({'graph': batch.to(dev) if dev is not None else batch}).cpu()
+                # split [all action nodes ; all postpone nodes] back per graph
+                na = [int(g.a_idx.numel()) for g in graphs]
+                npp = [int(g.p_idx.numel()) for g in graphs]
+                oa, op = 0, sum(na)
+                for s, a_n, p_n in zip(slots, na, npp):
+                    p_s = torch.cat((pi[oa:oa + a_n], pi[op:op + p_n]), dim=0)
+                    oa += a_n; op += p_n
+                    logpi = p_s.log()
+                    action = torch.multinomial(torch.exp(logpi.squeeze(1)), 1)[0]
+                    pn = envs[s['k']].pn
+                    decision_time = float(getattr(pn, 'clock', 0.0))
+                    if nf_on:
+                        s['nf_comp'].append(self._nf_decision(pn, s['state'], action.item()))
+                    next_state, reward, done, _, info = envs[s['k']].step(action.item())
+                    if nf_on:
+                        s['nf_rew'].append(dict(info.get('comp_reward', {})))
+                    s['total'] += reward
+                    s['info'] = info
+                    s['steps'].append([s['state'], action.item(), reward, logpi[action].item(), None,
+                                       logpi, decision_time])
+                    s['done'] = done or (max_episode_length is not None
+                                         and len(s['steps']) > max_episode_length)
+                    s['next'] = next_state
+                # values of the states just decided (after the nfgae pool masks are set)
+                if self.value_model is None:
+                    vals = [0.0] * len(slots)
+                elif isinstance(self.value_model, str):
+                    vals = [envs[s['k']].value(strategy=self.value_model, gamma=self.gam) for s in slots]
+                else:
+                    with torch.no_grad():
+                        vb = Batch.from_data_list(graphs)
+                        v = self.value_model(vb.to(dev) if dev is not None else vb).cpu()
+                    v = v[:, 0] if v.dim() > 1 and v.size(1) == 1 else v
+                    vals = v.tolist()
+                live = []
+                for s, val in zip(slots, vals):
+                    s['steps'][-1][4] = val
+                    if s['done']:
+                        done_eps[s['ep']] = s
+                        returns[s['ep']] = s['info'].get('pn_reward', s['total'])
+                        lengths[s['ep']] = len(s['steps'])
+                        if next_ep < episodes:
+                            live.append(start(s['k'], next_ep))
+                            next_ep += 1
+                    else:
+                        s['state'] = s['next']
+                        live.append(s)
+                slots = live
+        finally:
+            if dev is not None:
+                self._models_to('cpu')
+                if str(dev).startswith('cuda'):
+                    torch.cuda.empty_cache()
+        if buffer is not None:
+            for ep in range(episodes):
+                s = done_eps[ep]
+                for st, a, r, lp, val, lpis, tm in s['steps']:
+                    buffer.store(st, a, r, lp, val, lpis, time=tm)
+                if nf_on:
+                    buffer._nf_comp = s['nf_comp']
+                    buffer._nf_rew = s['nf_rew']
+                buffer.finish()
+        return returns, lengths
 
     def _compute_batch_values(self, states_list, env):
         """Compute values for a batch of states efficiently.
@@ -708,7 +823,11 @@ class Agent:
         else:
             num_workers = min(num_workers, episodes, os.cpu_count() or 1)
 
-        if num_workers <= 1 or episodes < 2:
+        if self.rollout_batch > 1 and episodes > 1 and num_workers <= 1:
+            history['returns'], history['lengths'] = self._run_episodes_lockstep(
+                env, episodes, max_episode_length=max_episode_length,
+                buffer=self.buffer if store else None)
+        elif num_workers <= 1 or episodes < 2:
             # Fall back to sequential for small episode counts or num_workers=1
             for i in range(episodes):
                 R, L = self.run_episode(env, max_episode_length=max_episode_length,
@@ -1126,6 +1245,11 @@ class Agent:
     # would push the loaded policy around before the critic knows its values.
     # Set by train.make_agent from --critic_warmup.
     critic_warmup = 0
+
+    # Episodes stepped side by side by run_episodes, their observations scored
+    # in one batched forward pass (_run_episodes_lockstep). 1 = one episode at
+    # a time. Set by train.make_agent from --rollout_batch.
+    rollout_batch = 1
 
     def _models_to(self, device):
         """Move the policy and value nets and their Adam state to device."""

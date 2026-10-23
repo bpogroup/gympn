@@ -22,6 +22,12 @@ All notable changes to gympn are recorded here. The format follows
   policy's learning rate is held at 0), so a policy loaded with
   `--load_policy_network` is not pushed around by a fresh critic's advantages.
 
+- `--rollout_batch k`: collect k episodes side by side and score their
+  observations in one batched forward pass of the policy and of the critic
+  (on the GPU with `--use_gpu`). On bpic15 collecting 32 episodes goes from
+  73 to 27 s. Same distribution of episodes, not the same episodes (the
+  environments interleave their random draws); default 1 is unchanged.
+
 ### Changed
 
 - `--use_gpu true` (`run_bpm gpu=1`) now runs the PPO updates on a CUDA GPU:

@@ -123,6 +123,12 @@ def make_parser():
                         type=int,
                         default=10, #10
                         help='policy model updates per epoch')
+    policy.add_argument('--rollout_batch',
+                        type=int,
+                        default=1,
+                        help='episodes stepped side by side during collection, their observations '
+                             'scored in one batched forward pass (on the GPU with --use_gpu); '
+                             'same distribution of episodes, not the same episodes. 1 = one at a time')
     policy.add_argument('--critic_warmup',
                         type=int,
                         default=0,
@@ -501,6 +507,7 @@ def make_agent(args, metadata=None):
     agent.agent_seed = getattr(args, 'agent_seed', None)
     agent.update_device = update_device
     agent.critic_warmup = getattr(args, 'critic_warmup', 0)
+    agent.rollout_batch = getattr(args, 'rollout_batch', 1)
 
     return agent
 

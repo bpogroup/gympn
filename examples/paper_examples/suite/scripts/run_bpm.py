@@ -10,7 +10,7 @@ Arms: ppo (SMDP-GAE PPO, one agent), nfgae (net-factored GAE, one agent,
 component turns, credited with its component's return; gympn.component_agents).
 
 Run:  python scripts/run_bpm.py env=insurer N=2 [workers] [seeds=20] [methods=ppo,nfgae]
-                        [epochs=40] [threads=k] [episodes=8] [plr=x] [lam=x] [bs=k] [init=<policy.pth>] [cwarm=k] [cert=static|marking]
+                        [epochs=40] [threads=k] [episodes=8] [plr=x] [lam=x] [bs=k] [init=<policy.pth>] [cwarm=k] [rb=k] [cert=static|marking]
                         [net=aepn|hgt|temb|tembf] [bases=K] [flat=1] [local=1]
                         [beta=0.5]   (SMDP discount, default 0.05; any value but the legacy 0.5 routes to *_beta<val>)
                         [view=full]  (default for aepn: reverse edges + per-layer global attention +
@@ -68,6 +68,7 @@ PLR = None                     # plr=x: policy learning rate override (routes to
 LAM = None                     # lam=x: GAE lambda override (default Hyper.lam = 0.95; routes to *_lam<x>)
 INIT = None                    # init=<path>: start the policy from a saved (torch.save) policy (routes to *_init<stem>)
 CWARM = 0                      # cwarm=k: first k epochs train only the critic (routes to *_cw<k>)
+RB = 1                         # rb=k: collect k episodes side by side, batched forward passes (routes to *_rb<k>)
 FLAT = False                   # flat=1: flat graph observations (needs net=temb|tembf|aepn; routes to *_flat)
 NET = "aepn"                   # net=hgt|temb|tembf|aepn: actor+critic encoder (default aepn; *_aepn dirs, hgt = the old unsuffixed dirs)
 BASES = None                   # bases=K: AEPNStack basis count (default 8; routes to *_b<K>)
@@ -105,6 +106,8 @@ for _a in sys.argv[1:]:
         INIT = os.path.abspath(_a.split("=", 1)[1])
     elif _a.startswith("cwarm="):
         CWARM = int(_a.split("=", 1)[1])
+    elif _a.startswith("rb="):
+        RB = int(_a.split("=", 1)[1])
     elif _a.startswith("flat="):
         FLAT = _a.split("=", 1)[1] not in ("0", "false", "False")
     elif _a.startswith("abatch="):
@@ -162,6 +165,7 @@ OUTDIR = RESULTS / (f"bpm_{ENV}_n{N}_ep{EPOCHS}" + ("" if EPOCHS == 40 else f"_s
               + ("" if LAM is None else f"_lam{LAM:g}")
               + ("" if INIT is None else f"_init{os.path.splitext(os.path.basename(INIT))[0]}")
               + ("" if not CWARM else f"_cw{CWARM}")
+              + ("" if RB == 1 else f"_rb{RB}")
               + ("" if BS is None else f"_bs{BS}")
               + ("_flat" if FLAT else "")
               + ("_local" if LOCAL else "")
@@ -228,6 +232,8 @@ def _args(method, seed, cfg, logdir):
         a["policy_network"] = INIT
     if CWARM:
         a["critic_warmup"] = CWARM
+    if RB != 1:
+        a["rollout_batch"] = RB
     if LOCAL and method == "nfgae":
         a["local_obs"] = True
     if MARKING and method in ("nfgae", "agents"):
