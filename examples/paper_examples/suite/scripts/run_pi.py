@@ -7,17 +7,22 @@ heuristic into the policy network (gympn.policy_iteration).
    evaluation, the held-out nor the anchor days). Every decision is recorded
    with the observation PPO's actor sees (flat, whole-net view, components).
 2. PPO's actor (gympn.train.make_policy_network, same settings as run_bpm's
-   AEPN runs) is trained on the planner's choices (class_nll).
-3. The distilled policy is scored greedily on the 20 evaluation days and on
-   the 100 held-out days, normalised with random and heuristic on the same
+   AEPN runs) is trained on the planner's choices: soft targets
+   softmax(option scores / tau) over the compared options (tau=0: the
+   planner's choice only).
+3. The network is scored greedily on the 20 evaluation days after every
+   epoch; the epoch with the best score is selected (so its score there is
+   optimistic), and the selected and the final networks are scored on the
+   100 held-out days. All normalised with random and heuristic on the same
    days (envs/heldout.py).
 
-Output: results/pi_<env>_n<N>_R<R>_d<days>/ with decisions.pt (the recorded
-decisions, reused if present), policy.pth (loadable as run_bpm init=),
-eval_anchors.json and summary.json.
+Output: results/pi_<env>_n<N>_R<R>_d<days>_mc/ with decisions.pt (the
+recorded decisions and option scores, reused if present), and per tau
+policy_tau<tau>.pth (the selected network, loadable as run_bpm init=),
+policy_tau<tau>_final.pth and summary_tau<tau>.json; eval_anchors.json.
 
 usage: python scripts/run_pi.py env=bpic15 [N=1] [days=40] [R=8] [workers=8]
-                                [epochs=15] [gpu=1] [seed=0]
+                                [epochs=15] [tau=0.25] [gpu=1] [seed=0]
 """
 import json
 import os
@@ -38,6 +43,7 @@ opts = dict(a.split("=", 1) for a in sys.argv[1:] if "=" in a)
 ENV, N = opts.get("env", "bpic15"), int(opts.get("N", 1))
 DAYS, R, WORKERS = int(opts.get("days", 40)), int(opts.get("R", 8)), int(opts.get("workers", 8))
 EPOCHS, GPU, SEED = int(opts.get("epochs", 15)), opts.get("gpu", "0") == "1", int(opts.get("seed", 0))
+TAU = float(opts.get("tau", 0.25))
 LENGTH, TRAIN_SEED = 20, 2_000_000
 OUTDIR = SUITE / "results" / f"pi_{ENV}_n{N}_R{R}_d{DAYS}_mc"
 
@@ -94,8 +100,11 @@ def main():
 
     fd = OUTDIR / "decisions.pt"
     t0 = time.time()
-    if fd.exists():
-        graphs = torch.load(fd, weights_only=False)
+    graphs = torch.load(fd, weights_only=False) if fd.exists() else None
+    if graphs is not None and not hasattr(graphs[0], "t_scores"):
+        log("recorded decisions have no option scores: collecting again")
+        graphs = None
+    if graphs is not None:
         log(f"loaded {len(graphs)} recorded decisions")
     else:
         log(f"planner (R={R}) on {DAYS} training days, {WORKERS} workers")
@@ -111,17 +120,30 @@ def main():
         return {"eval_norm": float(nrm(np.mean(r), anc["eval"]))}
 
     hist = distill(policy, graphs, epochs=EPOCHS, device="cuda" if GPU and torch.cuda.is_available() else None,
-                   seed=SEED, log=log, evaluate=evaluate)
-    torch.save(policy, OUTDIR / "policy.pth")
-    ho = score_policy(make_env(), policy, HELDOUT_SEED, HELDOUT_DAYS)
-    res = {"env": ENV, "N": N, "days": DAYS, "R": R, "epochs": EPOCHS, "seed": SEED,
-           "decisions": len(graphs), "history": hist,
-           "eval_norm": hist["evals"][-1]["eval_norm"] if hist["evals"] else None,
-           "heldout_norm": float(nrm(np.mean(ho), anc["heldout"])), "heldout": ho,
-           "minutes": (time.time() - t0) / 60}
-    (OUTDIR / "summary.json").write_text(json.dumps(res, indent=1))
-    log(f"distilled policy: eval days {res['eval_norm']:.3f}, held-out days {res['heldout_norm']:.3f} "
-        f"(random 0, heuristic 1 on the same days)")
+                   seed=SEED, log=log, evaluate=evaluate, eval_every=1, tau=TAU, select="eval_norm")
+    ckpts = hist.pop("checkpoints")
+    tag = f"tau{TAU:g}"
+    final = make_policy(env)
+    with torch.no_grad():
+        final({'graph': graphs[0]})
+    final.load_state_dict(ckpts[max(ckpts)])
+    final.eval()
+    torch.save(policy, OUTDIR / f"policy_{tag}.pth")
+    torch.save(final, OUTDIR / f"policy_{tag}_final.pth")
+    ho_sel = score_policy(make_env(), policy, HELDOUT_SEED, HELDOUT_DAYS)
+    ho_fin = score_policy(make_env(), final, HELDOUT_SEED, HELDOUT_DAYS)
+    sel = hist["selected_epoch"]
+    res = {"env": ENV, "N": N, "days": DAYS, "R": R, "epochs": EPOCHS, "tau": TAU, "seed": SEED,
+           "decisions": len(graphs), "history": hist, "selected_epoch": sel,
+           "eval_norm_selected": next(e["eval_norm"] for e in hist["evals"] if e["epoch"] == sel),
+           "eval_norm_final": hist["evals"][-1]["eval_norm"],
+           "heldout_norm_selected": float(nrm(np.mean(ho_sel), anc["heldout"])),
+           "heldout_norm_final": float(nrm(np.mean(ho_fin), anc["heldout"])),
+           "heldout_selected": ho_sel, "heldout_final": ho_fin, "minutes": (time.time() - t0) / 60}
+    (OUTDIR / f"summary_{tag}.json").write_text(json.dumps(res, indent=1))
+    log(f"tau={TAU:g}: selected epoch {sel} (eval days {res['eval_norm_selected']:.3f}, selected on them) "
+        f"-> held-out {res['heldout_norm_selected']:.3f}; final epoch: eval {res['eval_norm_final']:.3f}, "
+        f"held-out {res['heldout_norm_final']:.3f} (random 0, heuristic 1 on the same days)")
 
 
 if __name__ == "__main__":

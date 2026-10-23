@@ -37,7 +37,7 @@ import numpy as np
 import torch
 
 __all__ = ["HeuristicBase", "NetworkBase", "RolloutPlanner", "option_key", "collect_decisions",
-           "distill", "class_nll"]
+           "soft_targets", "distill", "class_nll", "soft_class_nll"]
 
 
 # --------------------------------------------------------------------------- base policies
@@ -158,7 +158,7 @@ class RolloutPlanner:
                 seen[k] = i
                 reps.append(i)
         h_rep = seen[option_key(B[h])]
-        self.last = {"options": len(reps), "base": h, "scores": None, "chosen": h}
+        self.last = {"options": len(reps), "base": h, "scores": None, "reps": reps, "chosen": h}
         if len(reps) < 2:
             return h
         if self.component:
@@ -189,15 +189,49 @@ class RolloutPlanner:
 
 
 # --------------------------------------------------------------------------- distillation data
-def _target_masks(graph, B, chosen):
-    """Boolean masks over the graph's action and postpone nodes: the class of
-    bindings equivalent to the chosen one."""
-    k = option_key(B[chosen])
-    member = [option_key(b) == k for b in B]
+def _record(graph, B, chosen, last):
+    """Attach the planner's decision to the observation graph:
+    t_mask_a / t_mask_p: the action / postpone nodes of the chosen class of
+        equivalent bindings;
+    t_cls_a / t_cls_p: each node's option class among the classes the planner
+        compared (its component), -1 for nodes outside them;
+    t_scores: the classes' mean rollout returns (NaN when there was a single
+        option, so no rollouts), t_chosen: the chosen class, t_ncls: their
+        number. soft_targets() turns them into training targets."""
+    keys = [option_key(b) for b in B]
+    reps = last.get("reps") or [chosen]
+    rep_keys = [keys[i] for i in reps]
+    kc = keys[chosen]
+    if kc not in rep_keys:                  # (the base's choice outside the compared classes)
+        rep_keys, scores = [kc], None
+    else:
+        scores = last.get("scores")
+    cls = [rep_keys.index(k) if k in rep_keys else -1 for k in keys]
     is_pp = [_is_postpone(b) for b in B]
-    graph.t_mask_a = torch.tensor([m for m, p in zip(member, is_pp) if not p], dtype=torch.bool)
-    graph.t_mask_p = torch.tensor([m for m, p in zip(member, is_pp) if p], dtype=torch.bool)
+    graph.t_mask_a = torch.tensor([k == kc for k, p in zip(keys, is_pp) if not p], dtype=torch.bool)
+    graph.t_mask_p = torch.tensor([k == kc for k, p in zip(keys, is_pp) if p], dtype=torch.bool)
+    graph.t_cls_a = torch.tensor([c for c, p in zip(cls, is_pp) if not p], dtype=torch.long)
+    graph.t_cls_p = torch.tensor([c for c, p in zip(cls, is_pp) if p], dtype=torch.long)
+    graph.t_scores = (torch.tensor(scores, dtype=torch.float32) if scores is not None
+                      else torch.full((len(rep_keys),), float('nan')))
+    graph.t_chosen = torch.tensor([rep_keys.index(kc)], dtype=torch.long)
+    graph.t_ncls = torch.tensor([len(rep_keys)], dtype=torch.long)
     return graph
+
+
+def soft_targets(graphs, tau: float = 0.0):
+    """Set each graph's t_q, the target distribution over its option classes:
+    softmax(scores / tau) when the planner compared several options and
+    tau > 0, else all mass on the chosen class."""
+    for g in graphs:
+        n = int(g.t_ncls)
+        q = torch.zeros(n)
+        if tau > 0 and n > 1 and not torch.isnan(g.t_scores).any():
+            q = torch.softmax(g.t_scores / tau, dim=0)
+        else:
+            q[int(g.t_chosen)] = 1.0
+        g.t_q = q
+    return graphs
 
 
 def collect_decisions(make_env: Callable, planner_fn: Callable, seeds: Sequence[int], workers: int = 1,
@@ -234,7 +268,7 @@ def _collect_one(task):
         B = env.pn.pn_actions
         a = planner.choose(env, tag=(seed, step))
         changed += a != planner.last["base"]
-        graphs.append(_target_masks(obs['graph'], B, a))
+        graphs.append(_record(obs['graph'], B, a, planner.last))
         obs, r, done, _, _ = env.step(a)
         total += r
         step += 1
@@ -256,12 +290,38 @@ def class_nll(policy, batch):
     return -(p_cls.clamp_min(1e-8)).log().mean()
 
 
+def soft_class_nll(policy, batch):
+    """Mean over the batch's decisions of the cross-entropy between the
+    target t_q over option classes (soft_targets) and the network's class
+    probabilities (summed over each class's equivalent bindings)."""
+    probs = policy({'graph': batch}).reshape(-1)
+    dev = probs.device
+    G = int(batch.num_graphs)
+    gidx = torch.cat([batch.batch[batch.a_idx], batch.batch[batch.p_idx]]).to(dev)
+    cls = torch.cat([batch.t_cls_a.reshape(-1), batch.t_cls_p.reshape(-1)]).to(dev)
+    ncls = batch.t_ncls.reshape(-1).to(dev)
+    off = torch.cumsum(ncls, 0) - ncls
+    keep = cls >= 0
+    gcls = cls[keep] + off[gidx[keep]]
+    P = torch.zeros(int(ncls.sum()), device=dev).index_add(0, gcls, probs[keep])
+    q = batch.t_q.reshape(-1).to(dev)
+    return -(q * P.clamp_min(1e-8).log()).sum() / G
+
+
 def distill(policy, graphs: List, epochs: int = 15, lr: float = 1e-3, batch_size: int = 32,
             device: Optional[str] = None, seed: int = 0, log: Optional[Callable] = None,
-            evaluate: Optional[Callable] = None, eval_every: int = 5):
-    """Train `policy` to choose the planner's option classes (class_nll),
-    with Adam. evaluate(policy) -> dict is called every eval_every epochs and
-    at the end (on the CPU, the policy in eval mode). Returns a history."""
+            evaluate: Optional[Callable] = None, eval_every: int = 5, tau: float = 0.0,
+            select: Optional[str] = None):
+    """Train `policy` on the planner's choices with Adam: the cross-entropy
+    with soft_targets(graphs, tau) (tau = 0: the chosen class only).
+    evaluate(policy) -> dict is called every eval_every epochs and at the end
+    (on the CPU, the policy in eval mode), and a copy of the weights is kept
+    at each evaluation (history["checkpoints"]). With select = a key of
+    evaluate's dict, the policy ends with the weights of the evaluation that
+    maximised it (history["selected_epoch"]); else with the last ones.
+    Returns the history."""
+    import copy
+    soft_targets(graphs, tau)
     from torch_geometric.data import Batch
     dev = torch.device(device) if device else torch.device('cpu')
     rng = random.Random(seed)
@@ -269,7 +329,7 @@ def distill(policy, graphs: List, epochs: int = 15, lr: float = 1e-3, batch_size
         policy({'graph': Batch.from_data_list(graphs[:2])})     # materialise lazy layers
     policy.to(dev)
     opt = torch.optim.Adam(policy.parameters(), lr=lr)
-    hist = {"loss": [], "evals": []}
+    hist = {"loss": [], "evals": [], "checkpoints": {}, "tau": tau}
     for ep in range(1, epochs + 1):
         policy.train()
         order = list(range(len(graphs)))
@@ -277,7 +337,7 @@ def distill(policy, graphs: List, epochs: int = 15, lr: float = 1e-3, batch_size
         losses = []
         for i in range(0, len(order), batch_size):
             b = Batch.from_data_list([graphs[j] for j in order[i:i + batch_size]]).to(dev)
-            loss = class_nll(policy, b)
+            loss = soft_class_nll(policy, b)
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -288,9 +348,14 @@ def distill(policy, graphs: List, epochs: int = 15, lr: float = 1e-3, batch_size
             policy.to('cpu').eval()
             ev = evaluate(policy)
             hist["evals"].append({"epoch": ep, **ev})
+            hist["checkpoints"][ep] = copy.deepcopy(policy.state_dict())
             msg += " | " + ", ".join(f"{k} {v:.3f}" for k, v in ev.items() if isinstance(v, float))
             policy.to(dev)
         if log:
             log(msg)
     policy.to('cpu').eval()
+    if select is not None and hist["evals"]:
+        best = max(hist["evals"], key=lambda e: e[select])
+        hist["selected_epoch"] = best["epoch"]
+        policy.load_state_dict(hist["checkpoints"][best["epoch"]])
     return hist

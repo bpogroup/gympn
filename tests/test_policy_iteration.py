@@ -119,3 +119,52 @@ def test_distill_fits_the_planner():
     _reset(env)
     a = NetworkBase(pol)(env)
     assert 0 <= a < len(env.pn.pn_actions)
+
+
+def test_soft_targets_and_loss():
+    """t_q is softmax(scores/tau) over the compared classes (one-hot without
+    scores or with tau=0), and soft_class_nll is its cross-entropy with the
+    network's class probabilities, decision by decision."""
+    from gympn.policy_iteration import soft_targets, soft_class_nll
+    graphs = collect_decisions(_make_env, _make_planner2, [16], workers=1)[:8]
+    assert any(not torch.isnan(g.t_scores).any() for g in graphs)
+    soft_targets(graphs, 0.5)
+    for g in graphs:
+        assert torch.isclose(g.t_q.sum(), torch.tensor(1.0))
+        if torch.isnan(g.t_scores).any():
+            assert g.t_q[int(g.t_chosen)] == 1.0
+        else:
+            assert torch.allclose(g.t_q, torch.softmax(g.t_scores / 0.5, 0))
+    env = _make_env()
+    pol = _policy(env)
+    b = Batch.from_data_list(graphs)
+    with torch.no_grad():
+        pol({'graph': b})
+        got = float(soft_class_nll(pol, b))
+        ref = []
+        for g in graphs:
+            p = pol({'graph': g}).reshape(-1)
+            cls = torch.cat([g.t_cls_a, g.t_cls_p])
+            P = torch.stack([p[cls == c].sum() for c in range(int(g.t_ncls))])
+            ref.append(-float((g.t_q * P.clamp_min(1e-8).log()).sum()))
+    assert got == pytest.approx(float(np.mean(ref)), abs=1e-5)
+    soft_targets(graphs, 0.0)                 # hard targets: the class NLL
+    b = Batch.from_data_list(graphs)          # (collate again: the batch holds copies of the targets)
+    with torch.no_grad():
+        assert float(soft_class_nll(pol, b)) == pytest.approx(float(class_nll(pol, b)), abs=1e-5)
+
+
+def _make_planner2(env):
+    return _planner(env, rollouts=2)
+
+
+def test_distill_selects_the_best_evaluation():
+    graphs = collect_decisions(_make_env, _make_planner, [17], workers=1)
+    env = _make_env()
+    pol = _policy(env)
+    scores = iter([0.1, 0.9, 0.3])
+    hist = distill(pol, graphs, epochs=3, batch_size=16, evaluate=lambda p: {"s": next(scores)},
+                   eval_every=1, select="s")
+    assert hist["selected_epoch"] == 2
+    sd = pol.state_dict()
+    assert all(torch.equal(sd[k], hist["checkpoints"][2][k]) for k in sd)
