@@ -43,6 +43,14 @@ class PostponeRef:
         return f"PostponeRef({self.comp})"
 
 
+def _stream_seed(base, transition_id, k):
+    """The seed of the k-th firing of a transition under stream seed `base`
+    (GymProblem.stream_seed): a stable hash, the same in every process."""
+    import hashlib
+    h = hashlib.blake2b(f"{base}|{transition_id}|{k}".encode(), digest_size=4).digest()
+    return int.from_bytes(h, 'little')
+
+
 class GymProblem(SimProblem):
     """
         A decision problem GymProblem, which consists of a collection of simulation variables SimVar, a collection of simulation events SimEvent, and a collection of actions SimAction.
@@ -355,11 +363,12 @@ class GymProblem(SimProblem):
         timed_bindings_evo = []
         timed_bindings_act = []
 
-        # Collect bindings from events and actions
-        for t in self.events:
+        # Collect bindings from events and actions (restricted simulation: its transitions only)
+        sub = self._sim_sets()
+        for t in (self.events if sub is None else sub[0]):
             for (binding, time) in self.event_bindings(t):
                 timed_bindings_evo.append((binding, time, t))
-        for a in self.actions:
+        for a in (self.actions if sub is None else sub[1]):
             for (binding, time) in self.event_bindings(a):
                 timed_bindings_act.append((binding, time, a))
 
@@ -494,10 +503,23 @@ class GymProblem(SimProblem):
             variable_assignment.append(token.value)
 
         # calculate the result of the behavior of the event
+        fires = self.__dict__.setdefault('_fires', {})
+        k = fires.get(event._id, 0)
+        fires[event._id] = k + 1
+        keyed = self.stream_seed is not None
+        if keyed:
+            saved = (random.getstate(), np.random.get_state())
+            sd = _stream_seed(self.stream_seed, event._id, k)
+            random.seed(sd)
+            np.random.seed(sd)
         try:
             result = event.behavior(*variable_assignment)
         except Exception as e:
+            if keyed:
+                random.setstate(saved[0]); np.random.set_state(saved[1])
             raise TypeError("Event " + str(event) + ": behavior function generates exception for values " + str(variable_assignment) + ".") from e
+        if keyed:
+            random.setstate(saved[0]); np.random.set_state(saved[1])
         if self._debugging:
             if type(result) != list:
                 raise TypeError("Event " + str(event) + ": behavior function does not generate a list for values " + str(variable_assignment) + ".")
@@ -957,6 +979,51 @@ class GymProblem(SimProblem):
     # forces the HeteroData path everywhere (equivalence testing).
     DIRECT_FLAT_OBS = True
 
+    # Restricted simulation (a set of transition ids, or None): only these
+    # transitions fire, and the direct observation holds only them and their
+    # places. With a certificate component's member set this simulates that
+    # component alone, which is exact for the component's own future: no other
+    # component can affect it (NF-GAE Theorem 1). Used by rollout planners
+    # (gympn.policy_iteration) on their rollout copies, never on an episode.
+    sim_only = None
+
+    # Keyed random streams (an int seed, or None for the global streams): the
+    # behaviour of the k-th firing of transition t draws from Python's and
+    # NumPy's random streams seeded by (stream_seed, t, k), and the global
+    # streams are left as they were. The draws then belong to firings of the
+    # net, not to positions in one shared stream: two runs from the same
+    # state with the same stream_seed give the k-th firing of t the same
+    # random numbers whatever happened in between (e.g. after two different
+    # actions), which is what common random numbers need. Firing counts are
+    # part of the state (save_state / restore_state).
+    stream_seed = None
+
+    def state_fingerprint(self):
+        """A hashable summary of the simulation state that, with keyed random
+        streams (stream_seed), determines the whole future of a run under a
+        deterministic policy: clock, phase, the markings (token values and
+        times, in marking order; restricted simulation: its places only), the
+        firing counts and the stream seed. Two runs with equal fingerprints
+        continue identically."""
+        sub = self._sim_sets()
+        places = self.places if sub is None else [q for q in self.places if q._id in sub[2]]
+        marks = tuple((q._id, tuple((repr(t.value), t.time) for t in q.marking)) for q in places)
+        return (self.clock, self.network_tag.tag, self.just_postponed,
+                tuple(sorted(getattr(self, 'postponed_comps', ()) or (), key=repr)), marks,
+                tuple(sorted(self.__dict__.get('_fires', {}).items())), self.stream_seed)
+
+    def _sim_sets(self):
+        """(events, actions, place ids) of the restricted simulation, or None."""
+        if self.sim_only is None:
+            return None
+        c = self.__dict__.get('_sim_cache')
+        if c is None or c[0] is not self.sim_only:
+            ev = [t for t in self.events if t._id in self.sim_only]
+            ac = [t for t in self.actions if t._id in self.sim_only]
+            pl = {q._id for t in ev + ac for q in list(t.incoming) + list(t.outgoing)}
+            c = self._sim_cache = (self.sim_only, ev, ac, pl)
+        return c[1], c[2], c[3]
+
     def _use_direct_flat(self, minimal_obs, normalize, remove_empty_nodes, add_self_loops):
         """The direct builder covers the flat observation with default options,
         on nets of plain SimVar places, once the first observation (HeteroData
@@ -988,7 +1055,8 @@ class GymProblem(SimProblem):
         respected), every combination of its input places' present tokens.
         Yields (transition, input place ids, token index per place)."""
         clock = self.clock
-        for t in self.actions:
+        sub = self._sim_sets()
+        for t in (self.actions if sub is None else sub[1]):
             if self._postponed_action(t):
                 continue
             vb = [b for (b, tm) in self.event_bindings(t) if tm <= clock]
@@ -1084,6 +1152,13 @@ class GymProblem(SimProblem):
                                                vocab(self._flat_meta))
         obs_places, place_by_id, a_onehot, e_rows, empty_w, (ntype_idx, etype_idx) = cache
         width = self._flat_width
+        events = self.events
+        sub = self._sim_sets()
+        if sub is not None:             # restricted simulation: its transitions and places only
+            obs_places = [nt for nt in obs_places if nt in sub[2]]
+            keep = {id(e) for e in sub[0]}
+            e_rows = [r for e, r in zip(self.events, e_rows) if id(e) in keep]
+            events = sub[0]
 
         # present tokens (time <= clock) per place, in marking order
         valid = {p._id: [t for t in p.marking if t.time <= clock] for p in self.places}
@@ -1116,7 +1191,7 @@ class GymProblem(SimProblem):
             n = len(valid[pid])
             return list(range(n)) if n else [None]       # None: the empty copy "<pid>.0"
 
-        for j, e in enumerate(self.events):
+        for j, e in enumerate(events):
             for p in e.incoming:
                 if p._id not in unobs:
                     for ci in copies(p._id):
@@ -1149,7 +1224,7 @@ class GymProblem(SimProblem):
 
         if a_rows:
             types.append(['a_transition', len(a_rows), len(self.actions), a_rows])
-        if self.events:
+        if events:
             types.append(['e_transition', len(e_rows), len(self.events), e_rows])
         if a_rows:
             edge_pairs[('a_transition', 'self_loop', 'a_transition')] = [(i, i) for i in range(len(a_rows))]
@@ -1169,7 +1244,7 @@ class GymProblem(SimProblem):
             part, place_part = self.net_partition(), self.net_place_partition()
             a_comp = [part.get(b[2]._id) for b in binding_map]
             e_comp = [part.get(GymProblem._get_string_before_last_dot(e._id) if '.' in e._id else e._id)
-                      for e in self.events]
+                      for e in events]
 
             def node_comps(nt, n):
                 if nt == 'a_transition':
@@ -1431,6 +1506,8 @@ class GymProblem(SimProblem):
         for t in self.actions:
             if self._postponed_action(t):
                 continue        # its component is waiting (component postpone)
+            if self.sim_only is not None and t._id not in self.sim_only:
+                continue        # restricted simulation
             transition_bindings = self.event_bindings(t)
             valid_transition_bindings = [(binding, time) for (binding, time) in transition_bindings if time <= self.clock]
             if len(valid_transition_bindings) == 0:
@@ -1499,6 +1576,8 @@ class GymProblem(SimProblem):
             "postponed_comps": set(getattr(self, "postponed_comps", set())),
             "tag": self.network_tag.tag,
             "just_postponed": self.just_postponed,
+            "fires": dict(self.__dict__.get('_fires', {})),
+            "stream_seed": self.stream_seed,
         }
         return state
 
@@ -1522,6 +1601,8 @@ class GymProblem(SimProblem):
         self.postponed_comps = set(state.get("postponed_comps", set()))
         self.network_tag.tag = state["tag"]
         self.just_postponed = state["just_postponed"]
+        self._fires = dict(state.get("fires", {}))
+        self.stream_seed = state.get("stream_seed", None)
         # pn_actions references tokens; the restored tokens are fresh copies, so
         # rebuild the binding list to point at them (cheap path, no tensor graph).
         self.compute_pn_actions()
@@ -1849,7 +1930,13 @@ class GymProblem(SimProblem):
 
             if len(bindings) > 0 and self.network_tag.is_evolution():
                 self.just_postponed = False
-                binding = random.choice(bindings)
+                if self.stream_seed is None:
+                    binding = random.choice(bindings)
+                else:       # keyed streams: the n-th choice among simultaneous events is keyed too
+                    fires = self.__dict__.setdefault('_fires', {})
+                    n = fires.get('#choice', 0)
+                    fires['#choice'] = n + 1
+                    binding = bindings[random.Random(_stream_seed(self.stream_seed, '#choice', n)).randrange(len(bindings))]
                 run.append(binding)
                 result_tokens = self.fire(binding)
                 self.update_reward(binding, result_tokens)

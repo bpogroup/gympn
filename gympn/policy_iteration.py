@@ -49,6 +49,7 @@ class HeuristicBase:
     def __init__(self, heuristic):
         from gympn.solvers import HeuristicSolver
         self.solver = HeuristicSolver(heuristic)
+        self.deterministic = True
 
     def __call__(self, env) -> int:
         pn = env.pn
@@ -65,6 +66,7 @@ class NetworkBase:
 
     def __init__(self, policy, greedy: bool = True):
         self.policy, self.greedy = policy.eval(), greedy
+        self.deterministic = greedy
 
     def __call__(self, env) -> int:
         with torch.no_grad():
@@ -116,30 +118,173 @@ class RolloutPlanner:
         by the whole net's return (False).
     beta : SMDP discount of the return-to-go, exp(-beta * (t - now)); 0 = the
         undiscounted return (what evaluation measures).
+    lockstep : with a network base policy, play all rollouts of a decision
+        side by side with batched forward passes (same returns as one at a
+        time, much faster).
+    restrict : with component=True, simulate only the component in the
+        rollouts (GymProblem.sim_only = its member transitions): no other
+        component can affect its future (the certificate), so this is exact
+        for the score and removes the other components' cost and noise; the
+        network base then reads the component's subgraph only (its logits do
+        not depend on anything else: no edges leave a component, and the
+        actor's attention is masked to it).
+    keyed : common random numbers through keyed streams
+        (GymProblem.stream_seed): in rollout j of every option, the k-th
+        firing of each transition draws the same random numbers, however the
+        options' trajectories differ. With keyed=False the options only share
+        the start of one global stream, which shifts as soon as they fire
+        different transitions.
+    coalesce : with keyed streams, the base choice's rollouts are played
+        first and record the state fingerprint (GymProblem.state_fingerprint)
+        at each step; rollout j of another option that reaches a state rollout
+        j of the base choice has visited stops there and takes the base
+        rollout's remaining return, which it would have collected identically.
+        Exact; saves the steps after the trajectories re-merge.
     """
 
     def __init__(self, base: Callable, rollouts: int = 8, component: bool = True, beta: float = 0.0,
-                 seed: int = 0):
+                 seed: int = 0, lockstep: bool = True, restrict: bool = True, keyed: bool = True,
+                 coalesce: bool = True):
         self.base, self.rollouts, self.component, self.beta, self.seed = base, rollouts, component, beta, seed
+        self.lockstep, self.restrict, self.keyed = lockstep, restrict, keyed
+        self.coalesce = coalesce and keyed
+        self.steps = [0, 0]           # rollout steps simulated, and saved by coalescing
+        self._only = None             # member transitions of the rollouts' component (restrict)
         self.last = None            # details of the last decision (options, scores, chosen)
 
     def _comp(self, pn, b, part):
         return b[2].comp if _is_postpone(b) else part.get(b[2]._id)
 
-    def _play_out(self, env, first, scored):
+    def _play_out(self, env, first, scored, record=None, lookup=None):
         """Fire `first`, then the base policy to the end; the (discounted)
-        reward that `scored(info)` counts."""
+        reward that `scored(info)` counts. record: a dict filled with
+        fingerprint -> reward collected so far, at every state visited;
+        lookup: such a dict of a finished run turned into fingerprint ->
+        remaining reward, to stop at a state it visited."""
         t0 = env.pn.clock
         total, a = 0.0, first
+        self._k = 0
         build = getattr(self.base, 'needs_obs', False)
         while True:
             t = env.pn.clock
             _, r, done, _, info = env.step(a, build_obs=build)
+            self.steps[0] += 1
+            self._k += 1
             w = math.exp(-self.beta * max(0.0, t - t0)) if self.beta else 1.0
             total += w * scored(r, info)
             if done or not env.pn.pn_actions:
                 return total
+            if record is not None or lookup is not None:
+                fp = env.pn.state_fingerprint()
+                if record is not None:
+                    record.setdefault(fp, (total, self._k))
+                elif fp in lookup:
+                    self.steps[1] += lookup[fp][1]
+                    return total + lookup[fp][0]
             a = self.base(env)
+
+    def _coalescing(self):
+        """Coalescing is exact when the future is a function of the state:
+        keyed streams and a deterministic base policy."""
+        return self.coalesce and getattr(self.base, 'deterministic', False)
+
+    @staticmethod
+    def _remaining(record, total, steps):
+        """record (fingerprint -> (reward so far, step)) -> (remaining reward,
+        remaining steps) for a run that ended with `total` after `steps`."""
+        return {fp: (total - c, steps - k) for fp, (c, k) in record.items()}
+
+    def _first_actions(self, renv, B, reps):
+        """Each option's index in renv's action list (renv at the decision,
+        possibly restricted to the component, so its list is shorter):
+        the first binding of the same equivalence class."""
+        if self._only is None:
+            return {o: o for o in reps}
+        pos = {}
+        for i, b in enumerate(renv.pn.pn_actions):
+            pos.setdefault(option_key(b), i)
+        return {o: pos[option_key(B[o])] for o in reps}
+
+    def _scores_lockstep(self, env, snap, reps, scored, tag, ref=None):
+        """The rollouts of all options side by side, for a network base
+        policy: one batched forward pass per step for all of them. Each
+        rollout runs on its own copy of env with its own random state (seeded
+        as the sequential rollouts are, swapped in around each of its steps),
+        so the returns are those of the sequential rollouts."""
+        import copy
+        from torch_geometric.data import Batch
+        R = self.rollouts
+        pool = self.__dict__.setdefault('_pool', [])
+        while len(pool) < len(reps) * R:
+            pool.append(copy.deepcopy(env))
+        slots = []
+        B = env.pn.pn_actions
+        first = None
+        coal = self._coalescing() and ref is not None
+        ref_oi = reps.index(ref) if ref is not None else 0
+        refs, ref_end, merged = {j: {} for j in range(R)}, {}, []
+        for oi in [ref_oi] + [i for i in range(len(reps)) if i != ref_oi]:   # the base choice first
+            for j in range(R):
+                e = pool[len(slots)]
+                e.pn.sim_only = self._only
+                e.set_state(snap)
+                if first is None:
+                    first = self._first_actions(e, B, reps)
+                o = first[reps[oi]]
+                sd = _seed(self.seed, tag, j)
+                random.seed(sd); np.random.seed(sd)
+                if self.keyed:
+                    e.pn.stream_seed = sd
+                slots.append({'env': e, 'oi': oi, 'j': j, 'k': 0, 'tot': 0.0, 't0': e.pn.clock, 'next': o,
+                              'rng': (random.getstate(), np.random.get_state())})
+        totals = np.zeros(len(reps))
+        policy = self.base.policy
+        active = slots
+        while active:
+            need = []
+            for sl in active:
+                e = sl['env']
+                random.setstate(sl['rng'][0]); np.random.set_state(sl['rng'][1])
+                t = e.pn.clock
+                obs, r, done, _, info = e.step(sl['next'])
+                sl['rng'] = (random.getstate(), np.random.get_state())
+                self.steps[0] += 1
+                sl['k'] += 1
+                w = math.exp(-self.beta * max(0.0, t - sl['t0'])) if self.beta else 1.0
+                sl['tot'] += w * scored(r, info)
+                if done or not e.pn.pn_actions:
+                    totals[sl['oi']] += sl['tot']
+                    if coal and sl['oi'] == ref_oi:
+                        ref_end[sl['j']] = (sl['tot'], sl['k'])
+                    continue
+                if coal:
+                    fp = e.pn.state_fingerprint()
+                    if sl['oi'] == ref_oi:
+                        refs[sl['j']].setdefault(fp, (sl['tot'], sl['k']))
+                    elif fp in refs[sl['j']]:
+                        # re-merged with the base choice's rollout j: it continues identically
+                        merged.append((sl, refs[sl['j']][fp]))
+                        continue
+                sl['graph'] = obs['graph']
+                need.append(sl)
+            if not need:
+                break
+            graphs = [sl['graph'] for sl in need]
+            with torch.no_grad():
+                pi = policy({'graph': Batch.from_data_list(graphs)}).reshape(-1)
+            oa, op = 0, sum(int(g.a_idx.numel()) for g in graphs)
+            for sl, g in zip(need, graphs):
+                a_n, p_n = int(g.a_idx.numel()), int(g.p_idx.numel())
+                p_s = torch.cat((pi[oa:oa + a_n], pi[op:op + p_n]))
+                oa += a_n; op += p_n
+                sl['next'] = (int(torch.argmax(p_s).item()) if self.base.greedy
+                              else int(torch.multinomial(p_s, 1).item()))
+            active = need
+        for sl, (c_ref, k_ref) in merged:
+            tot_ref, k_end = ref_end[sl['j']]
+            totals[sl['oi']] += sl['tot'] + (tot_ref - c_ref)
+            self.steps[1] += k_end - k_ref
+        return list(totals / R)
 
     def choose(self, env, tag=()) -> int:
         """The planner's action at env's current decision. `tag` (e.g. the
@@ -170,17 +315,38 @@ class RolloutPlanner:
         else:
             scored = lambda r, info: r
         snap = env.get_state()
-        scores = []
+        self._only = (frozenset(pn.net_component_members(c)) if self.component and self.restrict
+                      else None)
         try:
-            for o in reps:
-                s = 0.0
-                for j in range(self.rollouts):
-                    env.set_state(snap)
-                    sd = _seed(self.seed, tag, j)
-                    random.seed(sd); np.random.seed(sd)
-                    s += self._play_out(env, o, scored)
-                scores.append(s / self.rollouts)
+            if self.lockstep and getattr(self.base, 'policy', None) is not None:
+                scores = self._scores_lockstep(env, snap, reps, scored, tag, ref=h_rep)
+            else:
+                scores = []
+                env.pn.sim_only = self._only
+                env.set_state(snap)
+                first = self._first_actions(env, B, reps)
+                order = [h_rep] + [o for o in reps if o != h_rep]
+                refs, by_o = {}, {}
+                for o in order:
+                    s = 0.0
+                    for j in range(self.rollouts):
+                        env.set_state(snap)
+                        sd = _seed(self.seed, tag, j)
+                        random.seed(sd); np.random.seed(sd)
+                        if self.keyed:
+                            env.pn.stream_seed = sd
+                        if self._coalescing() and o == h_rep:
+                            rec = {}
+                            g = self._play_out(env, first[o], scored, record=rec)
+                            refs[j] = self._remaining(rec, g, self._k)
+                        else:
+                            g = self._play_out(env, first[o], scored,
+                                               lookup=refs.get(j) if self._coalescing() else None)
+                        s += g
+                    by_o[o] = s / self.rollouts
+                scores = [by_o[o] for o in reps]
         finally:
+            env.pn.sim_only = None
             env.set_state(snap)       # back to the decision, with the episode's own random state
         best = int(np.argmax(scores))
         chosen = reps[best] if scores[best] > scores[reps.index(h_rep)] + 1e-9 else h

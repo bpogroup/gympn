@@ -42,6 +42,17 @@ All notable changes to gympn are recorded here. The format follows
   class of equivalent bindings). On bpic15 the planner over the heuristic
   scores 1.35 of the heuristic (20/20 days better).
 
+- Planner support in `GymProblem`: `sim_only` (a set of transition ids)
+  restricts firing and the direct observation to those transitions and their
+  places, which simulates one certificate component exactly;
+  `stream_seed` makes the k-th firing of each transition (and the n-th choice
+  among simultaneous events) draw from its own keyed random stream, for
+  common random numbers that survive diverging trajectories; and
+  `state_fingerprint()` summarises everything a keyed run's future depends
+  on. `RolloutPlanner` uses them (`restrict`, `keyed`, `coalesce`): rollouts
+  simulate only the acting component, and a rollout that re-merges with the
+  base choice's rollout stops and takes its remaining return (exact).
+
 ### Changed
 
 - `compute_pn_actions` (steps without observations, as planners take them)

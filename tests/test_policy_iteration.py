@@ -168,3 +168,179 @@ def test_distill_selects_the_best_evaluation():
     assert hist["selected_epoch"] == 2
     sd = pol.state_dict()
     assert all(torch.equal(sd[k], hist["checkpoints"][2][k]) for k in sd)
+
+
+def test_lockstep_rollouts_equal_sequential_ones():
+    """With a network base policy the planner plays a decision's rollouts
+    side by side; the option scores must be those of one rollout at a time."""
+    env = _env(length=5)
+    pol = _policy(env)
+    _reset(env, seed=21)
+    with torch.no_grad():
+        pol(env.pn.get_graph_observation())
+    for _ in range(3):
+        env.step(0)
+    out = []
+    for lockstep in (False, True):
+        planner = RolloutPlanner(NetworkBase(pol), rollouts=3, seed=4, lockstep=lockstep)
+        a = planner.choose(env, tag=("x", 0))
+        out.append((a, planner.last["scores"]))
+    assert out[0][1] is not None and len(out[0][1]) > 1     # several options were compared
+    assert out[0][0] == out[1][0]
+    assert out[0][1] == out[1][1]
+
+
+def _two_region_env(seed=8):
+    pn = INSURER_BUILDERS["insurer"](2, allow_postpone=False)
+    pn.length = 8
+    pn.flat_obs, pn.global_view, pn.marking_certificate = True, 'edges', True
+    env = AEPN_Env(pn)
+    _reset(env, seed)
+    for _ in range(4):
+        env.step(0)
+    return env
+
+
+def test_restricted_simulation_fires_and_shows_only_the_component():
+    env = _two_region_env()
+    pn = env.pn
+    part = pn.net_partition()
+    c = part.get(pn.pn_actions[0][2]._id)
+    members = frozenset(pn.net_component_members(c))
+    assert len({v for v in part.values() if v is not None}) > 1          # several components
+    snap = env.get_state()
+    pn.sim_only = members
+    try:
+        env.set_state(snap)
+        for _ in range(20):
+            assert all(b[2]._id in members for b in pn.pn_actions)
+            g = pn.get_graph_observation()['graph']
+            names = pn._flat_meta[0]
+            kept = {names[i] for i in g.ntype.tolist()}
+            places = pn._sim_sets()[2]
+            assert kept <= places | {'a_transition', 'e_transition'}
+            if not pn.pn_actions:
+                break
+            _, _, done, _, info = env.step(0)
+            assert all(k in members for k in info.get('comp_reward', {}))
+            if done:
+                break
+    finally:
+        pn.sim_only = None
+        env.set_state(snap)
+
+
+def test_component_logits_do_not_depend_on_the_rest_of_the_net():
+    """Theorem 1 (C2), used by restricted rollouts: the actor's distribution
+    over a component's actions, renormalised, is the same on the full graph
+    and on the component's subgraph."""
+    env = _two_region_env(seed=9)
+    pn = env.pn
+    pol = _policy(env).eval()
+    full = pn.get_graph_observation()
+    B_full = list(pn.pn_actions)
+    with torch.no_grad():
+        p_full = pol(full).reshape(-1)
+    part = pn.net_partition()
+    checked = 0
+    for c in {part.get(b[2]._id) for b in B_full}:
+        members = frozenset(pn.net_component_members(c))
+        pn.sim_only = members
+        try:
+            sub = pn.get_graph_observation()
+            B_sub = list(pn.pn_actions)
+            with torch.no_grad():
+                p_sub = pol(sub).reshape(-1)
+        finally:
+            pn.sim_only = None
+            pn.get_graph_observation()
+        idx = [i for i, b in enumerate(B_full) if b[2]._id in members]
+        assert [option_key(B_full[i]) for i in idx] == [option_key(b) for b in B_sub]
+        q = p_full[idx] / p_full[idx].sum()
+        assert torch.allclose(q, p_sub, atol=1e-5)
+        checked += 1
+    assert checked > 1
+
+
+def _run(env, actions_fn, steps=40):
+    out = []
+    for _ in range(steps):
+        if not env.pn.pn_actions:
+            break
+        a = actions_fn(env)
+        _, r, done, _, _ = env.step(a, build_obs=False)
+        out.append((round(env.pn.clock, 9), r, len(env.pn.pn_actions)))
+        if done:
+            break
+    return out
+
+
+def test_keyed_streams_do_not_depend_on_the_global_stream():
+    """With stream_seed set, a trajectory is a function of the state, the
+    actions and the stream seed only: perturbing the global random streams
+    changes nothing, firing leaves them as they were, and the firing counts
+    are restored with the state."""
+    env = _env(length=6)
+    _reset(env, 30)
+    snap = env.get_state()
+    runs = []
+    for g in (1, 2):
+        env.set_state(snap)
+        env.pn.stream_seed = 777
+        random.seed(g); np.random.seed(g)
+        before = random.getstate()
+        runs.append(_run(env, lambda e: 0))
+        assert random.getstate() == before            # firings did not touch the global stream
+    assert runs[0] == runs[1]
+    env.set_state(snap)
+    env.pn.stream_seed = 778
+    assert _run(env, lambda e: 0) != runs[0]          # another stream seed, another trajectory
+    env.set_state(snap)
+    assert env.pn.stream_seed is None and env.pn.__dict__.get('_fires', {}) == snap['pn_state']['fires']
+
+
+def test_keyed_planner_matches_sequential_with_network_base():
+    env = _env(length=5)
+    pol = _policy(env)
+    _reset(env, seed=21)
+    with torch.no_grad():
+        pol(env.pn.get_graph_observation())
+    for _ in range(3):
+        env.step(0)
+    out = []
+    for lockstep in (False, True):
+        planner = RolloutPlanner(NetworkBase(pol), rollouts=3, seed=4, lockstep=lockstep, keyed=True)
+        out.append((planner.choose(env, tag=("k", 0)), planner.last["scores"]))
+    assert out[0][1] is not None and out[0] == out[1]
+
+
+@pytest.mark.parametrize("base_kind", ["heuristic", "network"])
+def test_coalescing_is_exact(base_kind):
+    """Stopping a rollout where it re-merges with the base choice's rollout
+    (same state, keyed streams, deterministic base) gives the same scores."""
+    env = _env(length=6, regions=1)
+    _reset(env, seed=40)
+    if base_kind == "network":
+        pol = _policy(env)
+        with torch.no_grad():
+            pol(env.pn.get_graph_observation())
+    for _ in range(3):
+        env.step(0)
+    found = 0
+    for step in range(12):
+        if not env.pn.pn_actions:
+            break
+        out = []
+        for coalesce in (False, True):
+            base = (HeuristicBase(INSURER_HEURISTICS["insurer"]) if base_kind == "heuristic"
+                    else NetworkBase(pol))
+            pl = RolloutPlanner(base, rollouts=3, seed=5, keyed=True, coalesce=coalesce)
+            a = pl.choose(env, tag=("c", step))
+            out.append((a, pl.last["scores"], pl.steps[1]))
+        if out[0][1] is not None:
+            found += 1
+            assert out[0][0] == out[1][0]
+            assert np.allclose(out[0][1], out[1][1], atol=1e-9)
+            assert out[0][2] == 0
+        env.step(out[0][0])
+    assert found > 0
