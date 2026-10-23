@@ -1310,13 +1310,18 @@ class Agent:
                             state[k] = v.to(device)
 
     def _fit_policy_and_value_models(self, dataloader, epochs=1):
+        from gympn.networks import clear_structure_cache
         dev = self.update_device
         if dev is None:
-            return self._fit_policy_and_value_models_here(dataloader, epochs)
+            try:
+                return self._fit_policy_and_value_models_here(dataloader, epochs)
+            finally:
+                clear_structure_cache()
         self._models_to(dev)
         try:
             return self._fit_policy_and_value_models_here([b.to(dev) for b in dataloader], epochs)
         finally:
+            clear_structure_cache()
             self._models_to('cpu')
             # Batches differ in size every epoch, so the caching allocator keeps
             # reserving new blocks; on Windows they spill into host memory

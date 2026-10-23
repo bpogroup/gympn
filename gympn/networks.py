@@ -128,6 +128,42 @@ def _pool_mask(graph, ntype):
     return None
 
 
+class _StructureCache:
+    """A few recent AEPNStack.structure results, keyed by the IDENTITY of the
+    graph tensors they were computed from (ntype, etype, batch, comp): a PPO
+    update reuses each minibatch's tensors for all its passes. Entries hold
+    their key tensors, so an id cannot be reused while cached."""
+
+    def __init__(self, size=96):
+        self.size, self.entries = size, []
+
+    @staticmethod
+    def _same(a, b):
+        if torch.is_tensor(a) or torch.is_tensor(b):
+            return a is b
+        return a == b
+
+    def get(self, key):
+        for k, ctx in self.entries:
+            if len(k) == len(key) and all(self._same(a, b) for a, b in zip(k, key)):
+                return ctx
+        return None
+
+    def put(self, key, ctx):
+        self.entries.append((key, ctx))
+        if len(self.entries) > self.size:
+            self.entries.pop(0)
+
+
+_STRUCTURE_CACHE = _StructureCache()
+
+
+def clear_structure_cache():
+    """Drop the cached structures (and the graph tensors they hold): called
+    at the end of each PPO update."""
+    _STRUCTURE_CACHE.entries.clear()
+
+
 def _attention_groups(batch, comp):
     """Global-attention group of every node: its graph in the batch and, when
     the observation carries net components (GymProblem._add_component_ids),
@@ -153,11 +189,23 @@ def _encode_graph(encoder, graph, input_size, params):
             raise TypeError("flat observations need encoder='type_embed', 'type_embed_film' or 'aepn'")
         dev = encoder.in_weight.device
         kw = {}
-        if getattr(encoder, 'global_attn', False):
-            b = getattr(graph, 'batch', None)
-            b = torch.zeros(graph.x.size(0), dtype=torch.long, device=dev) if b is None else b.to(dev)
-            comp = getattr(graph, 'comp', None) if getattr(encoder, 'component_mask', True) else None
-            kw['batch'] = _attention_groups(b, comp)
+        comp = getattr(graph, 'comp', None) if getattr(encoder, 'component_mask', True) else None
+        # A PPO update passes each minibatch several times (policy and value
+        # epochs) with the same tensors: its structure is computed once.
+        key = ((graph.ntype, graph.etype, getattr(graph, 'batch', None), comp,
+                bool(getattr(encoder, 'global_attn', False)), str(dev))
+               if hasattr(encoder, 'structure') and torch.is_grad_enabled() else None)
+        ctx = _STRUCTURE_CACHE.get(key) if key is not None else None
+        if ctx is None:
+            if getattr(encoder, 'global_attn', False):
+                b = getattr(graph, 'batch', None)
+                b = torch.zeros(graph.x.size(0), dtype=torch.long, device=dev) if b is None else b.to(dev)
+                kw['batch'] = _attention_groups(b, comp)
+            if key is not None:
+                ctx = encoder.structure(graph.ntype.to(dev), graph.etype.to(dev), **kw)
+                _STRUCTURE_CACHE.put(key, ctx)
+        if ctx is not None:
+            kw = {'ctx': ctx}
         h = encoder.encode_flat(graph.x.to(dev), graph.ntype.to(dev),
                                 graph.edge_index.to(dev), graph.etype.to(dev), **kw)
         x_enc = {'a_transition': h[graph.a_idx.to(dev)], 'postpone': h[graph.p_idx.to(dev)]}
@@ -670,16 +718,24 @@ class AEPNStack(nn.Module):
             out = out + self._transform(h, self.r_bases[li], self.r_coef[li], t, tg)
         return self.drop(self.act(out))
 
-    def encode_flat(self, x, t, edge_index, e_t, batch=None):
-        """Flat graph -> node embeddings [N, H]. batch: each node's graph
-        index (global_attn only; None = one graph)."""
-        h = _project_in(x, t, self.in_weight, self.in_bias)
-        src, dst = edge_index[0], edge_index[1]
+    def structure(self, t, e_t, batch=None):
+        """What encode_flat needs from the graph's structure alone (no
+        parameters): the node- and edge-type groups and the attention plan."""
         ctx = {'types': _type_groups(t), 'etypes': _type_groups(e_t)}
         if getattr(self, 'global_attn', False):
             if batch is None:
-                batch = torch.zeros(h.size(0), dtype=torch.long, device=h.device)
+                batch = torch.zeros(t.numel(), dtype=torch.long, device=t.device)
             ctx['attn'] = _attention_plan(batch)
+        return ctx
+
+    def encode_flat(self, x, t, edge_index, e_t, batch=None, ctx=None):
+        """Flat graph -> node embeddings [N, H]. batch: each node's graph
+        index (global_attn only; None = one graph). ctx: structure(t, e_t,
+        batch), when the caller has it already."""
+        h = _project_in(x, t, self.in_weight, self.in_bias)
+        src, dst = edge_index[0], edge_index[1]
+        if ctx is None:
+            ctx = self.structure(t, e_t, batch)
         for li in range(self.num_layers):
             h = self._layer(li, h, t, src, dst, e_t, ctx)
         return h
