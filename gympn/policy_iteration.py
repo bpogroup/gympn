@@ -227,6 +227,7 @@ class RolloutPlanner:
             for j in range(R):
                 e = pool[len(slots)]
                 e.pn.sim_only = self._only
+                e.pn.stream_isolated = False
                 e.set_state(snap)
                 if first is None:
                     first = self._first_actions(e, B, reps)
@@ -235,8 +236,9 @@ class RolloutPlanner:
                 random.seed(sd); np.random.seed(sd)
                 if self.keyed:
                     e.pn.stream_seed = sd
+                # (keyed streams: no behaviour reads the global streams, so they need no swapping)
                 slots.append({'env': e, 'oi': oi, 'j': j, 'k': 0, 'tot': 0.0, 't0': e.pn.clock, 'next': o,
-                              'rng': (random.getstate(), np.random.get_state())})
+                              'rng': None if self.keyed else (random.getstate(), np.random.get_state())})
         totals = np.zeros(len(reps))
         policy = self.base.policy
         active = slots
@@ -244,10 +246,12 @@ class RolloutPlanner:
             need = []
             for sl in active:
                 e = sl['env']
-                random.setstate(sl['rng'][0]); np.random.set_state(sl['rng'][1])
+                if sl['rng'] is not None:
+                    random.setstate(sl['rng'][0]); np.random.set_state(sl['rng'][1])
                 t = e.pn.clock
                 obs, r, done, _, info = e.step(sl['next'])
-                sl['rng'] = (random.getstate(), np.random.get_state())
+                if sl['rng'] is not None:
+                    sl['rng'] = (random.getstate(), np.random.get_state())
                 self.steps[0] += 1
                 sl['k'] += 1
                 w = math.exp(-self.beta * max(0.0, t - sl['t0'])) if self.beta else 1.0
@@ -323,6 +327,7 @@ class RolloutPlanner:
             else:
                 scores = []
                 env.pn.sim_only = self._only
+                env.pn.stream_isolated = False      # the snapshot restores the random state afterwards
                 env.set_state(snap)
                 first = self._first_actions(env, B, reps)
                 order = [h_rep] + [o for o in reps if o != h_rep]
@@ -347,6 +352,7 @@ class RolloutPlanner:
                 scores = [by_o[o] for o in reps]
         finally:
             env.pn.sim_only = None
+            env.pn.stream_isolated = True
             env.set_state(snap)       # back to the decision, with the episode's own random state
         best = int(np.argmax(scores))
         chosen = reps[best] if scores[best] > scores[reps.index(h_rep)] + 1e-9 else h

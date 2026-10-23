@@ -507,18 +507,20 @@ class GymProblem(SimProblem):
         k = fires.get(event._id, 0)
         fires[event._id] = k + 1
         keyed = self.stream_seed is not None
+        isolate = keyed and self.stream_isolated
         if keyed:
-            saved = (random.getstate(), np.random.get_state())
+            if isolate:
+                saved = (random.getstate(), np.random.get_state())
             sd = _stream_seed(self.stream_seed, event._id, k)
             random.seed(sd)
             np.random.seed(sd)
         try:
             result = event.behavior(*variable_assignment)
         except Exception as e:
-            if keyed:
+            if isolate:
                 random.setstate(saved[0]); np.random.set_state(saved[1])
             raise TypeError("Event " + str(event) + ": behavior function generates exception for values " + str(variable_assignment) + ".") from e
-        if keyed:
+        if isolate:
             random.setstate(saved[0]); np.random.set_state(saved[1])
         if self._debugging:
             if type(result) != list:
@@ -997,6 +999,11 @@ class GymProblem(SimProblem):
     # actions), which is what common random numbers need. Firing counts are
     # part of the state (save_state / restore_state).
     stream_seed = None
+    # With keyed streams, leave the global random streams as they were after
+    # each firing (save and restore them; NumPy's state copy is the expensive
+    # part, ~70 us). A rollout planner that restores the whole random state
+    # afterwards anyway switches this off on its rollout environments.
+    stream_isolated = True
 
     def state_fingerprint(self):
         """A hashable summary of the simulation state that, with keyed random
