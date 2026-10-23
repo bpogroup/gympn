@@ -33,7 +33,21 @@ All notable changes to gympn are recorded here. The format follows
   evaluation episodes), so the policy training ended with can be tested on
   held-out episodes.
 
+- `gympn.policy_iteration`: `RolloutPlanner`, a one-step rollout
+  improvement of a base policy (a heuristic, `HeuristicBase`, or a policy
+  network, `NetworkBase`) that compares the options of the acting net
+  component under common random numbers and scores them by that component's
+  return; `collect_decisions` and `distill` record the planner's choices and
+  train PPO's actor on them (loss: -log of the probability of the chosen
+  class of equivalent bindings). On bpic15 the planner over the heuristic
+  scores 1.35 of the heuristic (20/20 days better).
+
 ### Changed
+
+- `compute_pn_actions` (steps without observations, as planners take them)
+  enumerates the bindings directly instead of through the net expansion:
+  0.36 instead of 2.1 ms per bpic15 step, same `pn_actions`
+  (`tests/test_direct_obs.py`).
 
 - With `--rollout_batch k` and an `eval_seed`, in-training evaluation also
   plays its episodes side by side with batched forward passes (on the CPU,
