@@ -74,6 +74,21 @@ SCEN = {
                       dict(global_view='edges', marking_certificate=True)),
     "next_activity_pp": (lambda: BPM_BUILDERS["next_activity"](1, allow_postpone=True),
                          dict(global_view='edges')),
+    "odd_age": (_odd_net, dict(global_view='edges', obs_token_age=True)),
+    "bpic15_wip_age": (lambda: BPIC15_BUILDERS["bpic15_wip"](1, allow_postpone=False),
+                       dict(global_view='edges', marking_certificate=True, obs_token_age=True)),
+    "bpic15_clock": (lambda: BPIC15_BUILDERS["bpic15"](1, allow_postpone=False),
+                     dict(global_view='edges', marking_certificate=True, obs_clock=True)),
+    "odd_age_clock": (_odd_net, dict(global_view='edges', obs_token_age=True, obs_clock=True)),
+    "odd_merge": (_odd_net, dict(global_view='edges', merge_options=True)),
+    "bpic15_merge": (lambda: BPIC15_BUILDERS["bpic15"](1, allow_postpone=False),
+                     dict(global_view='edges', marking_certificate=True, merge_options=True, obs_clock=True)),
+    "insurer2_comp_pp_merge": (lambda: INSURER_BUILDERS["insurer"](2, allow_postpone=True),
+                               dict(global_view='edges', postpone_scope='component', merge_options=True)),
+    "bpic15_clock_node_merge": (lambda: BPIC15_BUILDERS["bpic15"](1, allow_postpone=False),
+                                dict(global_view='edges', marking_certificate=True, merge_options=True,
+                                     clock_node=True)),
+    "odd_clock_node_pp": (lambda: _with_postpone(_odd_net()), dict(global_view='edges', clock_node=True)),
 }
 
 
@@ -162,4 +177,28 @@ def test_direct_pn_actions_are_the_expanded_ones(name):
         assert new.pn.expanded_pn is None
         assert d1 == d2
         if d1:
+            break
+
+
+def test_clock_node_holds_the_time_and_feeds_actions_and_events():
+    build, attrs = SCEN["bpic15_clock_node_merge"]
+    env, obs = _env(build, attrs, True, 3)
+    from gympn.flat_graph import vocab
+    for _ in range(30):
+        g = obs['graph']
+        ntype_idx, etype_idx = vocab(env.pn._flat_meta)
+        clk = (g.ntype == ntype_idx['clock']).nonzero().reshape(-1)
+        assert clk.tolist() == [int(g.num_nodes) - 1]
+        assert abs(float(g.x[clk[0], 0]) - env.pn.clock / env.pn.length) < 1e-6
+        assert int(g.comp[clk[0]]) == -1
+        into = g.edge_index[1] == clk[0]
+        assert not bool(into.any())                     # nothing flows into the clock
+        out = g.edge_index[0] == clk[0]
+        dst = set(g.edge_index[1][out].tolist())
+        e_nodes = set((g.ntype == ntype_idx['e_transition']).nonzero().reshape(-1).tolist())
+        assert dst == set(g.a_idx.tolist()) | e_nodes
+        if not env.pn.pn_actions:
+            break
+        obs, _, done, _, _ = env.step(0)
+        if done:
             break

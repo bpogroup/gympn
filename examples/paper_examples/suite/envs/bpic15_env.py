@@ -111,6 +111,33 @@ def _starter(g):
     return start
 
 
+def _wip_starter(g):
+    """wip=True: the busy token (permit, employee's fit, a job key) is present
+    at once, so the observation shows the work in progress; the service time
+    goes to a timer token in an unobservable place, and the task ends when the
+    timer with the same job key comes due. The key is the employee's fit (in
+    the hidden attribute "job"): busy tokens with the same key are identical
+    tokens, so which of their timers ends which of them does not matter, and
+    the pairing is exact."""
+    def start(p, s):
+        job = 4 * s["fI"] + 2 * s["fA"] + s["fD"]
+        base = BASE[g] * (1 if s[f"f{g}"] else MISFIT)
+        return [SimToken({**p, **s, "job": job}), SimToken({"job": job}, delay=base + random.randint(0, 1))]
+    return start
+
+
+def _wip_handover(b, _timer):
+    return [SimToken({f"f{x}": b[f"f{x}"] for x in GROUPS}), SimToken({"permit": 1})]
+
+
+def _wip_decided(b, _timer):
+    return [SimToken({f"f{x}": b[f"f{x}"] for x in GROUPS})]
+
+
+def _same_job(b, timer):
+    return b["job"] == timer["job"]
+
+
 def _handover(b):
     return [SimToken(b[1]), SimToken(b[0])]       # employee back, permit to the next task group
 
@@ -124,10 +151,15 @@ def _move(s):
 
 
 def make_bpic15(roster="2014", municipalities=(1, 2, 3, 4, 5), allocate=True,
-                allow_postpone=False):
+                allow_postpone=False, wip=False):
     """The municipalities of `roster`. With allocate=False the shared employees
     are left out (each municipality has only its own staff), which gives the
-    fully independent control."""
+    fully independent control. With wip=True a task in progress is a busy
+    token that is present (observed) from its start, paired with a timer
+    token in an unobservable place that ends it (_wip_starter): the same
+    dynamics, but the observation shows who works on what (and, with
+    GymProblem.obs_token_age, for how long), never when it will end."""
+    hidden_places, hidden_attrs = [], {}
     spec = ROSTERS[roster]
     municipalities = tuple(municipalities)
     ag = GymProblem(allow_postpone=allow_postpone)
@@ -141,6 +173,7 @@ def make_bpic15(roster="2014", municipalities=(1, 2, 3, 4, 5), allocate=True,
         teams[m] = team
         heads = len(spec["staff"][m]) + 0.5 * sum(m in pair for _e, _f, pair in spec["shared"])
         rate = RHO * spec["load"][m] * heads / WORK
+        ag.__dict__.setdefault("arrival_rates", {})[f"arrival_{tag}"] = rate
         arrival = ag.add_var(f"arrival_{tag}", var_attributes=["permit"])
         arrival.put({"permit": 1})
         ag.add_event([arrival], [arrival, q["I"]], _arrive(rate), name=f"arrive_{tag}")
@@ -151,6 +184,19 @@ def make_bpic15(roster="2014", municipalities=(1, 2, 3, 4, 5), allocate=True,
                 seed.put({"stage": g})
         ag.add_event([seed], [q["I"], q["A"], q["D"]], _open, name=f"open_{tag}")
         for g, nxt in (("I", "A"), ("A", "D"), ("D", None)):
+            if wip:
+                busy = ag.add_var(f"busy{g}_{tag}", var_attributes=["permit"] + [f"f{x}" for x in GROUPS] + ["job"])
+                timer = ag.add_var(f"timer{g}_{tag}", var_attributes=["job"])
+                hidden_places.append(timer._id)
+                hidden_attrs[busy._id] = ["job"]
+                ag.add_action([q[g], team], [busy, timer], behavior=_wip_starter(g), name=f"do{g}_{tag}")
+                if nxt is None:
+                    ag.add_event([busy, timer], [team], _wip_decided, name=f"done{g}_{tag}", guard=_same_job,
+                                 reward_function=lambda b, t: 1)
+                else:
+                    ag.add_event([busy, timer], [team, q[nxt]], _wip_handover, name=f"done{g}_{tag}",
+                                 guard=_same_job)
+                continue
             busy = ag.add_var(f"busy{g}_{tag}", var_attributes=["permit"] + [f"f{x}" for x in GROUPS])
             ag.add_action([q[g], team], [busy], behavior=_starter(g), name=f"do{g}_{tag}")
             if nxt is None:
@@ -166,7 +212,27 @@ def make_bpic15(roster="2014", municipalities=(1, 2, 3, 4, 5), allocate=True,
             pool.put(_fit(fit))
             for m in pair:
                 ag.add_action([pool], [teams[m]], behavior=_move, name=f"al_{emp}_{m}")
+    if wip:
+        ag.set_unobservable(simvars=hidden_places, token_attrs=hidden_attrs)
     return ag
+
+
+def bpic15_resample_hidden(pn):
+    """Redraw what a policy cannot know (for a fair rollout planner,
+    gympn.policy_iteration.RolloutPlanner(resample=...)): the time of each
+    municipality's next arrival. The simulator draws it when the previous
+    arrival fires, and the observation does not show it (only tokens whose
+    time has come are observed). Arrivals are Poisson, so the waiting time
+    redrawn from the same rate is exactly what an observer faces. Uses the
+    global `random` stream, which the planner seeds per rollout."""
+    from simpn.simulator import SimToken
+    for place in pn.places:
+        rate = pn.__dict__.get("arrival_rates", {}).get(place._id)
+        if rate is None:
+            continue
+        for tok in [t for t in place.marking if t.time > pn.clock]:
+            place.remove_token(tok)
+            place.add_token(SimToken(tok.value, time=pn.clock + random.expovariate(rate)))
 
 
 # ----------------------------------------------------------- heuristic
@@ -201,9 +267,9 @@ def bpic15_heuristic(observable_net, tokens_comb, bindings=None):
     return max(real, key=score)
 
 
-def _builder(roster, allocate=True, municipalities=(1, 2, 3, 4, 5)):
+def _builder(roster, allocate=True, municipalities=(1, 2, 3, 4, 5), wip=False):
     def build(n=1, allow_postpone=False):
-        return make_bpic15(roster, municipalities, allocate, allow_postpone)
+        return make_bpic15(roster, municipalities, allocate, allow_postpone, wip)
     build.uw_mismatch = 3
     build.wait_anchor = False
     return build
@@ -214,5 +280,6 @@ BPIC15_BUILDERS = {
     "bpic15": _builder("2014"),
     "bpic15_2012": _builder("2012"),
     "bpic15_noshare": _builder("2014", allocate=False),
+    "bpic15_wip": _builder("2014", wip=True),
 }
 BPIC15_HEURISTICS = {name: bpic15_heuristic for name in BPIC15_BUILDERS}

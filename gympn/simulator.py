@@ -6,6 +6,7 @@ import inspect
 import subprocess
 
 import numpy as np
+import math
 import torch
 from torch_geometric.data import HeteroData
 from torch_geometric.transforms import BaseTransform
@@ -28,6 +29,38 @@ def _is_real_binding_tuple(b) -> bool:
         isinstance(b, tuple) and len(b) >= 2 and
         isinstance(b[0], list) and len(b[0]) > 0 and isinstance(b[0][0], tuple)
     )
+
+
+def binding_option_key(b):
+    """Bindings with equal keys are exactly equivalent: same transition and
+    same token values (postpone: same component). Tokens with equal values
+    differ only in their times, which decide when a token is available, not
+    what firing it does."""
+    if isinstance(b[0], list) and b[0] == ['postpone']:
+        return ('postpone', getattr(b[2], 'comp', None))
+    return (b[2]._id, tuple(repr(tok.value) for _p, tok in b[0]))
+
+
+def merge_option_bindings(bindings):
+    """Group the bindings by binding_option_key; per group the FIFO binding
+    (its tokens' times, in input-place order, lexicographically smallest:
+    the longest-waiting tokens; the first in order on ties) and the group's
+    size. Postpone entries are groups of one. Returns (kept indices into
+    bindings, in order, and their multiplicities)."""
+    rep, count, order = {}, {}, []
+    for i, b in enumerate(bindings):
+        k = binding_option_key(b)
+        if k not in rep:
+            rep[k], count[k] = i, 0
+            order.append(k)
+        count[k] += 1
+        if _is_real_binding_tuple(b):
+            ti = tuple(tok.time for _p, tok in b[0])
+            if ti < tuple(tok.time for _p, tok in bindings[rep[k]][0]):
+                rep[k] = i
+    kept = sorted(rep[k] for k in order)
+    size = {rep[k]: count[k] for k in order}
+    return kept, [size[i] for i in kept]
 
 
 class PostponeRef:
@@ -649,7 +682,7 @@ class GymProblem(SimProblem):
             if self.allow_postpone:
                 transition_binding_map.extend(self._postpone_entries(transition_binding_map))
             self.expanded_pn = None
-            self.pn_actions = transition_binding_map
+            self.pn_actions = transition_binding_map        # (merged already: _direct_option_combos)
             return transition_binding_map
         self.expanded_pn, _ = self.expand_no_future_tokens(actions_only=True)
         keep_comp = self._turn_component(self.expanded_pn) if getattr(self, 'component_turns', False) else None
@@ -670,7 +703,7 @@ class GymProblem(SimProblem):
         if self.allow_postpone:
             transition_binding_map.extend(self._postpone_entries(transition_binding_map))
         self.pn_actions = transition_binding_map
-        return transition_binding_map
+        return self._merged_actions()
 
     def get_graph_observation(self, minimal_obs=False, normalize=False, remove_empty_nodes=True, add_self_loops=True):
         """
@@ -690,7 +723,7 @@ class GymProblem(SimProblem):
         #graph observation expects places to contain their color sets types (only the types of variables for each token)
 
         if self._use_direct_flat(minimal_obs, normalize, remove_empty_nodes, add_self_loops):
-            return self._direct_flat_observation()
+            return self._add_clock_node(self._direct_flat_observation())
 
         ret_graph = HeteroData()
         token_value = None  # used to store the token value of the current place
@@ -759,6 +792,10 @@ class GymProblem(SimProblem):
                                             torch.float32) #floats are always observable
                                 else:
                                     raise TypeError("Unsupported token value type.")
+                                extra = self._token_time_features(token)
+                                if extra:
+                                    token_value = torch.cat((token_value, torch.tensor(
+                                        extra, dtype=torch.float32)), dim=0)
 
                             p_nodes.append(token_value)
 
@@ -768,6 +805,7 @@ class GymProblem(SimProblem):
                                 [el for el in self.var_attributes[n_t] if el not in self.unobservable_token_attrs[n_t]])
                             if n_t in self.categorical_token_attrs.keys():
                                 len_attrs += sum(len(v) - 1 for v in self.categorical_token_attrs[n_t].values())
+                            len_attrs += int(self.obs_token_age) + int(self.obs_clock)
                             p_nodes.append(torch.tensor([], dtype=torch.float32).reshape(0, len_attrs))
 
                 nodes = p_nodes
@@ -974,8 +1012,136 @@ class GymProblem(SimProblem):
         if keep_comp is not None:
             # whose turn it is, by member transitions (gympn.component_agents)
             obs['component'] = self.net_component_members(keep_comp)
-        return obs
+        return self._add_clock_node(self._merge_options_obs(obs))
 
+
+    # Opt-in: a dedicated clock node (node type 'clock', one feature: clock /
+    # length, the raw clock when no length is set) with an edge to every
+    # action node and every event node, so every component (each has events)
+    # reads the time of day directly. It has no incoming edges and no
+    # component (comp -1: the masked attention keeps it in a group of its
+    # own), so it is a function of the clock alone and carries nothing from
+    # one component to another: NF-GAE's locality (C2) is untouched. Added
+    # after either observation path, as the last node. Flat observations only.
+    # (obs_clock instead copies the clock onto every token.)
+    clock_node = False
+
+    CLOCK_EDGES = (('clock', 'clock_to_a_transition', 'a_transition'),
+                   ('clock', 'clock_to_e_transition', 'e_transition'))
+
+    def _add_clock_node(self, obs):
+        if not self.clock_node:
+            return obs
+        g = obs['graph']
+        if not hasattr(g, 'a_idx'):
+            raise ValueError("clock_node needs flat observations (flat_obs=True)")
+        from gympn.flat_graph import vocab
+        ntype_idx, etype_idx = vocab(self._flat_meta)
+        n = int(g.num_nodes)
+        length = getattr(self, 'length', None)
+        row = torch.zeros(1, g.x.size(1), dtype=g.x.dtype)
+        row[0, 0] = float(self.clock / length) if length else float(self.clock)
+        e_nodes = (g.ntype == ntype_idx['e_transition']).nonzero().reshape(-1)
+        dst = [g.a_idx.reshape(-1), e_nodes]
+        src = [torch.full((int(d.numel()),), n, dtype=torch.long) for d in dst]
+        et = [torch.full((int(d.numel()),), etype_idx[k], dtype=torch.long) for d, k in zip(dst, self.CLOCK_EDGES)]
+        kw = {}
+        if getattr(g, 'comp', None) is not None:
+            kw['comp'] = torch.cat((g.comp, torch.tensor([-1], dtype=torch.long)))
+        graph = type(g)(x=torch.cat((g.x, row)), ntype=torch.cat((g.ntype, torch.tensor([ntype_idx['clock']]))),
+                        edge_index=torch.cat((g.edge_index, torch.stack((torch.cat(src), torch.cat(dst)))), dim=1),
+                        etype=torch.cat([g.etype] + et), a_idx=g.a_idx, p_idx=g.p_idx, num_nodes=n + 1, **kw)
+        out = dict(obs)
+        out['graph'] = graph
+        return out
+
+
+    # Opt-in: one action node per OPTION (bindings with equal
+    # binding_option_key: same transition, same token values), not one per
+    # binding. Interchangeable tokens (identical permits in a queue, identical
+    # employees) otherwise give an option one action node per token
+    # combination: the policy spreads over redundant copies, an option's
+    # probability grows with its number of copies, and the greedy choice
+    # (the most probable binding) can differ from the most probable option.
+    # The kept binding is the FIFO one (merge_option_bindings: the
+    # longest-waiting tokens); its node keeps its edges to those tokens and
+    # gets one more feature, log(number of merged bindings), in the column
+    # after the transition one-hot. pn_actions holds the kept bindings only,
+    # so action indices, heuristics and planners all work on options.
+    # Flat observations only. The direct builders create only the kept nodes
+    # and bindings (_direct_option_combos); the HeteroData path builds every
+    # binding and merges afterwards (_merge_options_obs), and the two agree
+    # exactly (tests/test_direct_obs.py).
+    merge_options = False
+
+    def _merged_actions(self):
+        if self.merge_options:
+            kept, _ = merge_option_bindings(self.pn_actions)
+            self.pn_actions = [self.pn_actions[i] for i in kept]
+        return self.pn_actions
+
+    def _merge_options_obs(self, obs):
+        """obs with its action nodes merged by option (merge_options)."""
+        if not self.merge_options:
+            return obs
+        g = obs['graph']
+        if not hasattr(g, 'a_idx'):
+            raise ValueError("merge_options needs flat observations (flat_obs=True)")
+        B = obs['actions_dict']
+        kept, mult = merge_option_bindings(B)
+        real = [i for i, b in enumerate(B) if _is_real_binding_tuple(b)]
+        if len(real) != int(g.a_idx.numel()):
+            raise RuntimeError("action nodes and bindings do not correspond")
+        node_of = dict(zip(real, g.a_idx.tolist()))
+        keep_b = set(kept)
+        keep_n = torch.ones(int(g.num_nodes), dtype=torch.bool)
+        for i in real:
+            if i not in keep_b:
+                keep_n[node_of[i]] = False
+        x = g.x.clone()
+        col = len(self.actions)
+        for i, m in zip(kept, mult):
+            if i in node_of:
+                x[node_of[i], col] = math.log(m)
+        new_id = torch.cumsum(keep_n.long(), 0) - 1
+        ei = g.edge_index
+        ek = keep_n[ei[0]] & keep_n[ei[1]]
+        kw = {}
+        if getattr(g, 'comp', None) is not None:
+            kw['comp'] = g.comp[keep_n]
+        a_keep = torch.tensor([node_of[i] for i in kept if i in node_of], dtype=torch.long)
+        graph = type(g)(x=x[keep_n], ntype=g.ntype[keep_n], edge_index=new_id[ei[:, ek]],
+                        etype=g.etype[ek], a_idx=new_id[a_keep], p_idx=new_id[g.p_idx],
+                        num_nodes=int(keep_n.sum()), **kw)
+        self.pn_actions = [B[i] for i in kept]
+        out = dict(obs)
+        out['graph'], out['actions_dict'] = graph, self.pn_actions
+        return out
+
+
+    # Opt-in: every observed token gets one more feature, its age
+    # clock - token.time: how long it has been available (a permit's waiting
+    # time; for a task modelled as a busy token that is present while the
+    # work goes on and a timer token in an unobservable place, the time spent
+    # on it so far). It uses no future information: token times in the past
+    # only (future tokens are not observed).
+    obs_token_age = False
+
+    # Opt-in: every observed token gets the time of day, clock / length (the
+    # raw clock when no length is set): the same for all tokens, so a token
+    # node carries what a wall clock shows. Without it the observation does
+    # not tell how much of the episode is left.
+    obs_clock = False
+
+    def _token_time_features(self, token):
+        """The opt-in time features appended to a token's values."""
+        out = []
+        if self.obs_token_age:
+            out.append(float(self.clock - token.time))
+        if self.obs_clock:
+            length = getattr(self, 'length', None)
+            out.append(float(self.clock / length) if length else float(self.clock))
+        return out
 
     # Build flat observations directly (see _direct_flat_observation). False
     # forces the HeteroData path everywhere (equivalence testing).
@@ -1077,6 +1243,50 @@ class GymProblem(SimProblem):
             for combo in itertools.product(*in_places.values()):
                 yield t, pids, combo
 
+    def _direct_option_combos(self, valid):
+        """_direct_action_combos, merged by option when merge_options is on:
+        per transition, one combination per option (equal token values), the
+        FIFO one (merge_option_bindings), in the order of the kept
+        combinations, with the option's number of combinations. Yields
+        (transition, input place ids, token index per place, multiplicity)."""
+        if not self.merge_options:
+            for t, pids, combo in self._direct_action_combos(valid):
+                yield t, pids, combo, 1
+            return
+        reprs = {}
+
+        def key_of(pid, ci):
+            k = (pid, ci)
+            r = reprs.get(k)
+            if r is None:
+                r = reprs[k] = repr(valid[pid][ci].value)
+            return r
+
+        def flush(group):
+            rep_of, count = {}, {}
+            for j, (pids, combo) in enumerate(group):
+                k = tuple(key_of(pid, ci) for pid, ci in zip(pids, combo))
+                if k not in rep_of:
+                    rep_of[k], count[k] = j, 0
+                count[k] += 1
+                ti = tuple(valid[pid][ci].time for pid, ci in zip(pids, combo))
+                r_pids, r_combo = group[rep_of[k]]
+                if ti < tuple(valid[pid][ci].time for pid, ci in zip(r_pids, r_combo)):
+                    rep_of[k] = j
+            return sorted((j, count[k]) for k, j in rep_of.items())
+
+        cur, group = None, []
+        for t, pids, combo in self._direct_action_combos(valid):
+            if t is not cur:
+                if group:
+                    for j, m in flush(group):
+                        yield (cur,) + group[j] + (m,)
+                cur, group = t, []
+            group.append((pids, combo))
+        if group:
+            for j, m in flush(group):
+                yield (cur,) + group[j] + (m,)
+
     def _direct_place_by_id(self):
         d = self.__dict__.get('_direct_place_by_id_cache')
         if d is None:
@@ -1093,7 +1303,7 @@ class GymProblem(SimProblem):
         valid = {p._id: [tk for tk in p.marking if tk.time <= clock] for p in self.places}
         place_by_id = self._direct_place_by_id()
         out = []
-        for t, pids, combo in self._direct_action_combos(valid):
+        for t, pids, combo, _m in self._direct_option_combos(valid):
             toks = [valid[pid][ci] for pid, ci in zip(pids, combo)]
             out.append(([(place_by_id[pid], SimToken(tok.value, tok.time)) for pid, tok in zip(pids, toks)],
                         max(tok.time for tok in toks), t))
@@ -1102,6 +1312,9 @@ class GymProblem(SimProblem):
     def _token_feature_list(self, p_name, token):
         """A token's node features as a list of floats: the HeteroData path's
         token_value, value for value."""
+        return self._token_value_features(p_name, token) + self._token_time_features(token)
+
+    def _token_value_features(self, p_name, token):
         v = token.value
         if isinstance(v, dict):
             hidden = self.unobservable_token_attrs.get(p_name, [])
@@ -1155,6 +1368,7 @@ class GymProblem(SimProblem):
                                        if el not in self.unobservable_token_attrs[nt]])
                 else:
                     empty_w[nt] = len(self.var_attributes[nt])
+                empty_w[nt] += int(self.obs_token_age) + int(self.obs_clock)
             cache = self._direct_flat_cache = (obs_places, place_by_id, a_onehot, e_rows, empty_w,
                                                vocab(self._flat_meta))
         obs_places, place_by_id, a_onehot, e_rows, empty_w, (ntype_idx, etype_idx) = cache
@@ -1210,7 +1424,9 @@ class GymProblem(SimProblem):
 
         binding_map, a_rows = [], []
         last_t = None
-        for t, pids, combo in self._direct_action_combos(valid):
+        merge = self.merge_options
+        log_m = math.log
+        for t, pids, combo, mult in self._direct_option_combos(valid):
             if t is not last_t:
                 last_t = t
                 out = t.outgoing[0]._id
@@ -1221,7 +1437,7 @@ class GymProblem(SimProblem):
             binding_map.append(([(place_by_id[pid], SimToken(tok.value, tok.time))
                                  for pid, tok in zip(pids, toks)],
                                 max(tok.time for tok in toks), t))
-            a_rows.append(a_onehot[t._id])
+            a_rows.append(a_onehot[t._id] + [log_m(mult)] if merge else a_onehot[t._id])
             for pid, ci in zip(pids, combo):
                 if pid not in unobs:
                     arc((pid, 'edge_to_a_transition', 'a_transition'), (ci, k))
@@ -1230,7 +1446,7 @@ class GymProblem(SimProblem):
                     arc(('a_transition', 'edge_to_' + out, out), None if ci is None else (k, ci))
 
         if a_rows:
-            types.append(['a_transition', len(a_rows), len(self.actions), a_rows])
+            types.append(['a_transition', len(a_rows), len(self.actions) + int(merge), a_rows])
         if events:
             types.append(['e_transition', len(e_rows), len(self.events), e_rows])
         if a_rows:
@@ -1401,7 +1617,8 @@ class GymProblem(SimProblem):
         from gympn.flat_graph import feature_width, hetero_to_flat
         if getattr(self, '_flat_meta', None) is None:
             self._flat_meta = self.make_metadata()
-            self._flat_width = max(feature_width(ret_graph.x_dict), len(self.actions), len(self.events), 1)
+            self._flat_width = max(feature_width(ret_graph.x_dict), len(self.actions) + int(self.merge_options),
+                                   len(self.events), 1)
         if feature_width(ret_graph.x_dict) > self._flat_width:
             raise ValueError(f"observation feature width {feature_width(ret_graph.x_dict)} > "
                              f"fixed flat width {self._flat_width}")
@@ -2243,6 +2460,10 @@ class GymProblem(SimProblem):
                 rev = (dst, rel + '_rev', src)
                 if rev not in edges_meta:
                     edges_meta.append(rev)
+
+        if getattr(self, 'clock_node', False):
+            nodes_meta.append('clock')
+            edges_meta.extend(self.CLOCK_EDGES)
 
         return tuple([nodes_meta, edges_meta])
 
