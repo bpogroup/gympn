@@ -53,6 +53,40 @@ All notable changes to gympn are recorded here. The format follows
   simulate only the acting component, and a rollout that re-merges with the
   base choice's rollout stops and takes its remaining return (exact).
 
+- Observation options on `GymProblem` (opt-in; flat observations for the
+  last two):
+  - `obs_token_age`: every observed token gets its age, `clock - token.time`.
+  - `obs_clock`: every observed token gets the time of day, `clock / length`.
+  - `clock_node`: a dedicated clock node (feature `clock / length`) with an
+    edge to every action and event node, no incoming edges and no component,
+    so the component locality of the actor's logits is unchanged (tested).
+    On bpic15 a clock cuts the held-out error of a critic regressed on the
+    heuristic's state values by more than half (R^2 0.86-0.90 to 0.95-0.96).
+  - `merge_options`: one action node per option (bindings with the same
+    transition and token values, `binding_option_key`), carrying
+    `log(multiplicity)` as a feature; the FIFO binding (longest-waiting
+    tokens, `merge_option_bindings`) is the one fired. `pn_actions` holds the
+    kept bindings, so heuristics, planners and policies all choose among
+    options. Built directly by the direct observation builder and
+    `compute_pn_actions`; the HeteroData path merges afterwards, and the two
+    agree exactly (tested). bpic15: 59 -> 12 action nodes per decision,
+    observations 1.4x faster to build.
+- `RolloutPlanner` additions: `option_values` (every option's mean rollout
+  return, reusable outside `choose`); `test`/`min_t`, a paired test of a
+  departure from the base on fresh rollouts before it is kept; and
+  `sh_budget`, Deep Controlled Learning's action selection (Sequential
+  Halving with common random numbers; Temizoz et al., EJOR 2025).
+  `advantage_loss` / `advantage_loss_from_probs` (minus the expected
+  advantage over the base by the planner's option scores) and the
+  `adv_weight` / `ce_weight` options of `distill`.
+- Vine decisions in training (`--vine_prob`, `--vine_rollouts`,
+  `--vine_weight`): at a random share of the decisions collected for training,
+  every option of the deciding component is scored by paired rollouts of the
+  problem's `rollout_base` heuristic, and the policy loss adds the expected
+  advantage on those decisions. Leaves the collected episodes unchanged
+  (tested). Expensive: on bpic15 at 10% of decisions an epoch takes roughly
+  10x longer.
+
 ### Changed
 
 - `compute_pn_actions` (steps without observations, as planners take them)

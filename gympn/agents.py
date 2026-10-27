@@ -108,6 +108,12 @@ def _policy_step_terms(new_lp_a, new_lp_p, old_lp_a, old_lp_p, idx_a, idx_p, act
     return new_sel, old_logprob[sel], advantages[sel], kld
 
 
+def _vine_seed(agent_seed):
+    """The vine generator's and planner's seed: from the agent's seed, so
+    runs are reproducible, and distinct from the streams the episodes use."""
+    return 7_919 * (0 if agent_seed is None else int(agent_seed)) + 104_729
+
+
 # ============================================================================
 # MULTIPROCESSING WORKER FUNCTION
 # ============================================================================
@@ -228,6 +234,21 @@ class Agent:
         self.test_during_train = test_in_train
         self.eps = eps
         self.vf_coeff = vf_coeff
+
+        # Paired-rollout option values ("vine" decisions, _vine_label): at a
+        # random share vine_prob of the decisions collected for training,
+        # every option of the deciding component is scored by vine_rollouts
+        # paired rollouts of the problem's rollout_base heuristic (common
+        # random numbers, component-restricted: gympn.policy_iteration
+        # RolloutPlanner.option_values), and the policy update adds
+        # vine_weight * the expected advantage loss on those decisions
+        # (policy_iteration.advantage_loss_from_probs). 0 = off.
+        self.vine_prob = 0.0
+        self.vine_rollouts = 8
+        self.vine_weight = 1.0
+        self._vine_planner = None
+        self._vine_rng = None
+        self._vine_n = 0
 
     def act(self, state, return_logprob=False, deterministic=False):
         """Return an action for the given state using the policy model.
@@ -522,6 +543,41 @@ class Agent:
 
         return history
 
+    def _vine_label(self, env, state, action):
+        """With probability vine_prob, score every option of the deciding
+        component at env's current decision by paired rollouts and attach the
+        option labels to the observation graph (policy_iteration._record:
+        option classes, their mean returns, the taken option as the
+        reference); otherwise attach empty labels, so the graphs batch
+        together. env is left exactly as it was (state and random streams),
+        and the agent's own random generator decides, so the episode is the
+        one it would have been without vine labels."""
+        if not getattr(self, 'vine_prob', 0.0):
+            return
+        from .policy_iteration import RolloutPlanner, HeuristicBase, _record, unlabelled_record
+        import random as _random
+        g = state['graph']
+        pn = env.pn
+        if self._vine_rng is None:
+            self._vine_rng = _random.Random(_vine_seed(getattr(self, 'agent_seed', None)))
+        if self._vine_rng.random() < self.vine_prob and len(pn.pn_actions) > 1:
+            if self._vine_planner is None:
+                base = getattr(pn, 'rollout_base', None)
+                if base is None:
+                    raise ValueError("vine_prob > 0 needs a rollout policy: set problem.rollout_base "
+                                     "to a heuristic (observable_net, tokens, bindings) -> binding")
+                self._vine_planner = RolloutPlanner(
+                    HeuristicBase(base), rollouts=int(self.vine_rollouts),
+                    seed=_vine_seed(getattr(self, 'agent_seed', None)),
+                    resample=getattr(pn, 'rollout_resample', None))
+            self._vine_n += 1
+            B = pn.pn_actions
+            reps, scores, _h = self._vine_planner.option_values(env, tag=('vine', self._vine_n), anchor=action)
+            if scores is not None:
+                _record(g, B, action, {"reps": reps, "scores": scores, "base": action})
+                return
+        unlabelled_record(g)
+
     def run_episode(self, env, max_episode_length=None, buffer=None):
         """Run an episode and return total reward and episode length.
 
@@ -582,6 +638,7 @@ class Agent:
 
             if nf_on:
                 nf_comp_ep.append(self._nf_decision(pn, state, action))
+            self._vine_label(env, state, action)
 
             # Collect for batch processing
             states_batch.append(state)
@@ -709,6 +766,7 @@ class Agent:
                     decision_time = float(getattr(pn, 'clock', 0.0))
                     if nf_on:
                         s['nf_comp'].append(self._nf_decision(pn, s['state'], action.item()))
+                    self._vine_label(envs[s['k']], s['state'], action.item())
                     next_state, reward, done, _, info = envs[s['k']].step(action.item())
                     if nf_on:
                         s['nf_rew'].append(dict(info.get('comp_reward', {})))
@@ -1535,6 +1593,10 @@ class Agent:
         ent = _normalized_entropy(new_probs, new_logpis, _ent_idx)
 
         loss_policy = loss_policy_core - self.ent_bonus * ent
+        if getattr(self, 'vine_prob', 0.0) and self.vine_weight and hasattr(batch, 't_scores'):
+            from .policy_iteration import advantage_loss_from_probs
+            loss_policy = loss_policy + self.vine_weight * advantage_loss_from_probs(
+                new_probs, batch, per_labelled=True)
 
         # Policy backward + step
         loss_policy.backward()

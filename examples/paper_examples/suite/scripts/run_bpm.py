@@ -23,6 +23,16 @@ Run:  python scripts/run_bpm.py env=insurer N=2 [workers] [seeds=20] [methods=pp
                                           each component, as the actor's does; *_cm)
                         [postpone=0|1|component]  (no / global / per-component
                                      postpone; *_nopp, unsuffixed, *_ppc)
+                        [clock=node|token]  (the time of day in the observation: a dedicated
+                                     clock node, GymProblem.clock_node, or on every token,
+                                     obs_clock; *_clkn / *_clkt; needs flat=1)
+                        [merge=1]    (one action node per option, the FIFO binding fired,
+                                     GymProblem.merge_options; *_mrg; needs flat=1)
+                        [vine=p] [vrol=R] [vw=w]  (paired-rollout option values at a share p of
+                                     the training decisions, R rollouts per option of the env's
+                                     heuristic, expected-advantage loss weight w; Agent._vine_label;
+                                     *_vine<p>r<R>w<w>; defaults R=8, w=1)
+                        [ent=x]      (entropy bonus override, default Hyper.ent_bonus; *_ent<x>)
 The insurer and bpic15 envs default to postpone=0. nfgae needs postpone=0 or component.
 Output: results/bpm_<env>_n<N>_ep<epochs>.../cells/N<N>__<method>__s<seed>.json
 (epochs != 40 routes to a *_smoke<epochs> dir), relative to the suite directory
@@ -77,6 +87,10 @@ MARKING = False                # cert=marking: nfgae recomputes the certificate 
 VIEW = None                    # view=local|full (*'' / *_fv); default full for aepn (the library default), local otherwise
 AGENT_BATCH = "share"          # abatch=full: component agents each get the full batch size (*_abfull)
 GPU = False                    # gpu=1: PPO updates on the CUDA GPU (Agent.update_device)
+CLOCK = None                   # clock=node|token: time of day in the observation (*_clkn / *_clkt)
+MERGE = False                  # merge=1: one action node per option (*_mrg)
+VINE, VROL, VW = 0.0, 8, 1.0   # vine=p vrol=R vw=w: paired-rollout option values (*_vine<p>r<R>w<w>)
+ENT = None                     # ent=x: entropy bonus override (*_ent<x>)
 CRITIC_MASK = False            # critic_mask=1: view=full critic attention also stays inside components (*_cm)
 
 for _a in sys.argv[1:]:
@@ -128,6 +142,20 @@ for _a in sys.argv[1:]:
         GPU = _a.split("=", 1)[1] in ("1", "true", "True")
     elif _a.startswith("critic_mask="):
         CRITIC_MASK = _a.split("=", 1)[1] in ("1", "true", "True")
+    elif _a.startswith("clock="):
+        CLOCK = _a.split("=", 1)[1]
+        if CLOCK not in ("node", "token"):
+            raise SystemExit(f"clock must be node or token, got {CLOCK!r}")
+    elif _a.startswith("vine="):
+        VINE = float(_a.split("=", 1)[1])
+    elif _a.startswith("vrol="):
+        VROL = int(_a.split("=", 1)[1])
+    elif _a.startswith("vw="):
+        VW = float(_a.split("=", 1)[1])
+    elif _a.startswith("ent="):
+        ENT = float(_a.split("=", 1)[1])
+    elif _a.startswith("merge="):
+        MERGE = _a.split("=", 1)[1] in ("1", "true", "True")
     elif _a.startswith("bs="):
         BS = int(_a.split("=", 1)[1])
     elif _a.startswith("bases="):
@@ -172,6 +200,10 @@ OUTDIR = RESULTS / (f"bpm_{ENV}_n{N}_ep{EPOCHS}" + ("" if EPOCHS == 40 else f"_s
               + ("_mc" if MARKING else "")
               + {"local": "", "full": "_fv"}[VIEW]
               + ("_cm" if CRITIC_MASK else "")
+              + ({"node": "_clkn", "token": "_clkt"}[CLOCK] if CLOCK else "")
+              + ("_mrg" if MERGE else "")
+              + (f"_vine{VINE:g}r{VROL}w{VW:g}" if VINE else "")
+              + ("" if ENT is None else f"_ent{ENT:g}")
               + ("_abfull" if AGENT_BATCH == "full" else ""))
 TAG = f"bpm-{ENV}-n{N}"
 
@@ -201,7 +233,8 @@ def _args(method, seed, cfg, logdir):
         "episodes": EPISODES, "epochs": EPOCHS, "batch_size": cfg.batch_size if BS is None else BS,
         "policy_lr": cfg.policy_lr if PLR is None else PLR, "policy_updates": cfg.policy_updates,
         "value_lr": cfg.value_lr, "value_updates": cfg.value_updates,
-        "eps": cfg.ppo_eps, "gam": cfg.gam, "lam": cfg.lam if LAM is None else LAM, "ent_bonus": cfg.ent_bonus,
+        "eps": cfg.ppo_eps, "gam": cfg.gam, "lam": cfg.lam if LAM is None else LAM,
+        "ent_bonus": cfg.ent_bonus if ENT is None else ENT,
         "policy_kld_limit": getattr(cfg, "policy_kld_limit", None),
         "beta": cfg.beta,
         "verbose": 0, "use_gpu": GPU, "agent_seed": int(seed),
@@ -239,6 +272,8 @@ def _args(method, seed, cfg, logdir):
     if MARKING and method in ("nfgae", "agents"):
         a["marking_certificate"] = True
     a["global_view"] = {"local": False, "full": "edges"}[VIEW]
+    if VINE:
+        a.update({"vine_prob": VINE, "vine_rollouts": VROL, "vine_weight": VW})
     if method == "agents":
         a["agent_batch"] = AGENT_BATCH
     a.update({"smdp_discount": True, "nfgae": method in ("nfgae", "agents"),
@@ -246,9 +281,26 @@ def _args(method, seed, cfg, logdir):
     return a
 
 
+def _obs_options(pn):
+    """clock= and merge=: set on the problem before training_run copies it."""
+    if (CLOCK or MERGE) and not FLAT:
+        raise SystemExit("clock= and merge= need flat=1")
+    pn.clock_node = CLOCK == "node"
+    pn.obs_clock = CLOCK == "token"
+    pn.merge_options = MERGE
+    if VINE:
+        # the vine rollouts play the env's heuristic; on bpic15 they redraw the
+        # already-drawn next arrivals, which no policy observes (fair rollouts)
+        pn.rollout_base = HEUR
+        if ENV.startswith("bpic15"):
+            from bpic15_env import bpic15_resample_hidden
+            pn.rollout_resample = bpic15_resample_hidden
+    return pn
+
+
 def train_cell(method, seed, cfg, logdir, baselines):
     set_seed(seed)
-    env = BUILD(N, allow_postpone=POSTPONE)
+    env = _obs_options(BUILD(N, allow_postpone=POSTPONE))
     env.postpone_scope = POSTPONE_SCOPE
     args = _args(method, seed, cfg, logdir)
     saved = sys.argv; sys.argv = sys.argv[:1]
@@ -275,6 +327,7 @@ def _heldout_scores(method, logdir, name):
         return None
     env = make_env(BUILD, N, LENGTH, POSTPONE, POSTPONE_SCOPE, FLAT,
                    {"local": False, "full": "edges"}[VIEW], MARKING and method in ("nfgae", "agents"))
+    _obs_options(env.pn); _obs_options(env.frozen_pn)
     out = {}
     for which in ("final", "best"):
         path = os.path.join(logdir, name, f"{which}_policy.pth")

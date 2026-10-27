@@ -129,6 +129,20 @@ def make_parser():
                         help='episodes stepped side by side during collection, their observations '
                              'scored in one batched forward pass (on the GPU with --use_gpu); '
                              'same distribution of episodes, not the same episodes. 1 = one at a time')
+    policy.add_argument('--vine_prob',
+                        type=float,
+                        default=0.0,
+                        help='share of training decisions whose options are scored by paired rollouts of the '
+                             "problem's rollout_base heuristic; their expected advantage enters the policy loss "
+                             '(Agent._vine_label). 0 = off')
+    policy.add_argument('--vine_rollouts',
+                        type=int,
+                        default=8,
+                        help='paired rollouts per option at a vine decision')
+    policy.add_argument('--vine_weight',
+                        type=float,
+                        default=1.0,
+                        help='weight of the vine expected-advantage loss in the policy loss')
     policy.add_argument('--critic_warmup',
                         type=int,
                         default=0,
@@ -508,6 +522,9 @@ def make_agent(args, metadata=None):
     agent.update_device = update_device
     agent.critic_warmup = getattr(args, 'critic_warmup', 0)
     agent.rollout_batch = getattr(args, 'rollout_batch', 1)
+    agent.vine_prob = getattr(args, 'vine_prob', 0.0)
+    agent.vine_rollouts = getattr(args, 'vine_rollouts', 8)
+    agent.vine_weight = getattr(args, 'vine_weight', 1.0)
 
     return agent
 
