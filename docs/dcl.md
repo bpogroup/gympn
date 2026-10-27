@@ -33,7 +33,7 @@ held-out days with random = 0 and heuristic = 1:
 | Rollout planner over the heuristic (needs a simulator at decision time) | 1.28 |
 | DCL, round 1, Sequential Halving with 32 rollouts per option, 40 days | 1.22 |
 | DCL with component-local loss, same data | 1.28 |
-| Certificate-factored DCL, round 1, same compute | 1.31 |
+| Certificate-factored DCL, round 1, about half the collection time | 1.29-1.31 |
 
 ## The planner
 
@@ -184,7 +184,7 @@ inside the whole net.
 from gympn.policy_iteration import episode_components, collect_component_decisions
 
 comps = episode_components(make_env)            # static components, as sets of transition ids
-days = [35, 24, 58, 56]                         # component-days per component
+days = [40] * len(comps)                        # component-days per component
 tasks = [(2_000_000 + d, members) for members, n in zip(comps, days) for d in range(n)]
 graphs = collect_component_decisions(make_env, make_planner, tasks, workers=8)
 distill(policy, graphs, epochs=15, tau=0.25)
@@ -194,19 +194,24 @@ Each task `(seed, members)` simulates one component on one training day. A
 component's decisions are then labelled at the cost of that component alone,
 and the labels are component-local by construction: the observation holds
 only the component, so `renorm` is not needed.
-More importantly, simulation can be **allocated**: spend more component-days
-where labels change the policy and fewer where the base is already right.
-On BPIC 2015 we allocated in proportion to the planner's gain per component,
-estimated on a pilot of a few days.
+The number of days can differ per component (`days`), so simulation can be
+spent unevenly. On BPIC 2015 this did not matter: an allocation proportional
+to the planner's gain per component and an equal allocation (40 days each)
+scored the same within seed noise (1.31 and 1.29). Equal days are a sound
+default.
 
 `episode_components` uses the static certificate on purpose. The marking
 certificate after a reset can drop start-of-episode transitions (for example,
 the release of a backlog), and a component simulated without them would
 start from the wrong marking.
 
-On BPIC 2015 the factored variant reached 1.31 (3 training seeds) against
-1.22 for plain DCL. It used about the same number of labelled decisions (7,213 vs 7,047)
-and about half the collection wall time (18 vs 34 minutes on 8 workers).
+On BPIC 2015 the factored variant reached 1.29-1.31 (3 training seeds per
+allocation) against 1.22 for plain DCL and 1.28 for plain DCL with the
+component-local loss. Most of its gain therefore comes from the local labels.
+Its main practical advantage is cost: about the same number of labelled
+decisions (7,213 vs 7,047) for about half the collection wall time (18 vs 34
+minutes on 8 workers), because each rollout simulates one component only from
+the start of the day.
 
 ### Conditions
 

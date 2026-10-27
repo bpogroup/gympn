@@ -689,9 +689,8 @@ def collect_component_decisions(make_env: Callable, planner_fn: Callable, tasks:
     own marking only, so its days have the distribution they have inside the
     whole net, and its decisions get the labels they would get there; the
     actor's logits for a component read that component only, so they are
-    the same on the component's subgraph. Simulation can then be allocated
-    across components (more days where labels are informative) instead of
-    always simulating whole days. Returns graphs, in task order."""
+    the same on the component's subgraph. Each component can get its own number
+    of days, and every rollout simulates one component only. Returns graphs, in task order."""
     tasks = [(make_env, planner_fn, int(sd), frozenset(m)) for sd, m in tasks]
     if workers <= 1:
         out = [_collect_one(t) for t in tasks]

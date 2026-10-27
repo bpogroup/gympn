@@ -84,11 +84,12 @@ All notable changes to gympn are recorded here. The format follows
   `episode_components` (the static components as sets of transition ids) and
   `collect_component_decisions`, which simulates and labels each component
   alone on its own training days (exact by the certificate), so simulation
-  can be allocated across components; and `distill(renorm=True)`
+  can be spent per component; and `distill(renorm=True)`
   (`soft_class_nll(renorm=True)`), component-local labels: class
   probabilities renormalized within the deciding component. Rollouts now
   keep an episode's own `sim_only` restriction. On bpic15 (100 held-out
-  days, heuristic = 1): DCL 1.22, component-local loss 1.28, factored 1.31.
+  days, heuristic = 1): DCL 1.22, component-local loss 1.28, factored 1.29-1.31 at about half the
+  collection time.
 - Docs: a Deep Controlled Learning guide (`docs/dcl.md`) and a policy
   iteration API page.
   `advantage_loss` / `advantage_loss_from_probs` (minus the expected
