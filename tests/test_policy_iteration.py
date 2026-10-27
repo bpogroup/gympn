@@ -190,10 +190,12 @@ def test_lockstep_rollouts_equal_sequential_ones():
     assert out[0][1] == out[1][1]
 
 
-def _two_region_env(seed=8):
+def _two_region_env(seed=8, **flags):
     pn = INSURER_BUILDERS["insurer"](2, allow_postpone=False)
     pn.length = 8
     pn.flat_obs, pn.global_view, pn.marking_certificate = True, 'edges', True
+    for k, v in flags.items():
+        setattr(pn, k, v)
     env = AEPN_Env(pn)
     _reset(env, seed)
     for _ in range(4):
@@ -230,11 +232,14 @@ def test_restricted_simulation_fires_and_shows_only_the_component():
         env.set_state(snap)
 
 
-def test_component_logits_do_not_depend_on_the_rest_of_the_net():
+@pytest.mark.parametrize("flags", [{}, {"clock_node": True}, {"clock_node": True, "merge_options": True}],
+                         ids=["plain", "clock_node", "clock_node+merge"])
+def test_component_logits_do_not_depend_on_the_rest_of_the_net(flags):
     """Theorem 1 (C2), used by restricted rollouts: the actor's distribution
     over a component's actions, renormalised, is the same on the full graph
-    and on the component's subgraph."""
-    env = _two_region_env(seed=9)
+    and on the component's subgraph (also with the clock node, which every
+    component reads, and with options merged)."""
+    env = _two_region_env(seed=9, **flags)
     pn = env.pn
     pol = _policy(env).eval()
     full = pn.get_graph_observation()
@@ -344,3 +349,74 @@ def test_coalescing_is_exact(base_kind):
             assert out[0][2] == 0
         env.step(out[0][0])
     assert found > 0
+
+
+def test_held_out_test_keeps_only_tested_departures():
+    """test/min_t: a departure survives only with its paired test recorded and
+    passed; an unreachable threshold leaves the base's choice everywhere, and
+    the test never adds a departure the plain planner would not make."""
+    env = _env()
+    _reset(env)
+    plain = _planner(env, rollouts=4)
+    tested = RolloutPlanner(HeuristicBase(INSURER_HEURISTICS["insurer"]), rollouts=4, seed=1, test=6, min_t=1.0)
+    strict = RolloutPlanner(HeuristicBase(INSURER_HEURISTICS["insurer"]), rollouts=4, seed=1, test=6,
+                            min_t=float("inf"))
+    for step in range(30):
+        if not env.pn.pn_actions:
+            break
+        a = plain.choose(env, tag=(step,))
+        b = tested.choose(env, tag=(step,))
+        assert strict.choose(env, tag=(step,)) == strict.last["base"]
+        assert b in (a, tested.last["base"])
+        if b != tested.last["base"]:
+            assert tested.last["test_t"] >= 1.0 and tested.last["test_adv"] > 0
+        env.step(a)
+
+
+def test_advantage_loss_is_minus_the_expected_advantage():
+    """advantage_loss = -sum_c P(c) (Q(c) - Q(base)), by hand on recorded decisions."""
+    from gympn.policy_iteration import advantage_loss
+    env = _env()
+    graphs = [g for g in collect_decisions(_make_env, lambda e: _planner(e, rollouts=2), [11, 12], workers=1)
+              if int(g.t_ncls) > 1 and not torch.isnan(g.t_scores).any() and int(g.t_base) >= 0][:6]
+    assert graphs
+    pol = _policy(env)
+    batch = Batch.from_data_list(graphs)
+    with torch.no_grad():
+        got = float(advantage_loss(pol, batch))
+        want = 0.0
+        for g in graphs:
+            p = pol({'graph': Batch.from_data_list([g])}).reshape(-1)
+            cls = torch.cat([g.t_cls_a, g.t_cls_p])
+            P = torch.zeros(int(g.t_ncls)).index_add(0, cls[cls >= 0], p[cls >= 0])
+            want -= float((P * (g.t_scores - g.t_scores[int(g.t_base)])).sum())
+    assert abs(got - want / len(graphs)) < 1e-5
+
+
+def test_sequential_halving_spends_its_budget_and_leaves_the_episode():
+    """sh_budget (DCL's action selection): the choice is one of the
+    component's options, at most sh_budget rollouts per option are spent,
+    the survivor of the last round got the most rollouts, the episode is
+    left as it was, and the choice is deterministic for a tag."""
+    env = _env()
+    _reset(env)
+    for _ in range(3):
+        env.step(0)
+    pl = RolloutPlanner(HeuristicBase(INSURER_HEURISTICS["insurer"]), seed=1, sh_budget=8)
+    checked = 0
+    for step in range(25):
+        if not env.pn.pn_actions:
+            break
+        before = ([option_key(b) for b in env.pn.pn_actions], env.pn.clock, random.getstate())
+        a = pl.choose(env, tag=(step,))
+        assert ([option_key(b) for b in env.pn.pn_actions], env.pn.clock, random.getstate()) == before
+        assert pl.choose(env, tag=(step,)) == a
+        last = pl.last
+        if last["scores"] is not None:
+            n = len(last["reps"])
+            assert a in last["reps"]
+            assert sum(last["counts"]) <= 8 * n
+            assert last["counts"][last["reps"].index(a)] == max(last["counts"])
+            checked += 1
+        env.step(a)
+    assert checked > 0

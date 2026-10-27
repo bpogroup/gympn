@@ -21,8 +21,36 @@ recorded decisions and option scores, reused if present), and per tau
 policy_tau<tau>.pth (the selected network, loadable as run_bpm init=),
 policy_tau<tau>_final.pth and summary_tau<tau>.json; eval_anchors.json.
 
+Later rounds of policy iteration: base=<policy.pth> makes the planner play
+out with that network (greedy) instead of the heuristic, init=<policy.pth>
+starts the distillation from a network, and round=k (k > 1) uses new training
+days (seeds 2_000_000 + 100_000 (k-1) + d) and writes to ..._mc_r<k>/.
+
 usage: python scripts/run_pi.py env=bpic15 [N=1] [days=40] [R=8] [workers=8]
                                 [epochs=15] [tau=0.25] [gpu=1] [seed=0]
+                                [base=<policy.pth>] [init=<policy.pth>] [round=1]
+                                [lr=1e-3] [ema=0.995] [extra=<dir>,<dir>] [name=<tag>]
+extra: the decisions recorded by earlier rounds (their results directories)
+are added to this round's (aggregation); name: a tag for this distillation's
+output files, so several distillations of the same decisions can coexist.
+margin=m: the planner departs from its base only when the best option's mean
+rollout return beats the base's by more than m (distil only its confident
+improvements); fair=1: every rollout redraws what a policy cannot observe
+(bpic15: the next arrival times); confirm=k: a departure from the base is kept
+only if an independent scoring with k rollouts per option repeats it; age=1:
+every observed token gets its age, clock - token.time (GymProblem.obs_token_age;
+with env=bpic15_wip that includes the time spent on each task in progress).
+clock=1: every observed token gets the time of day (GymProblem.obs_clock);
+merge=1: one action node per option, the FIFO binding fired (GymProblem.merge_options);
+clocknode=1: a dedicated clock node (GymProblem.clock_node);
+sh=M: Deep Controlled Learning's action selection, Sequential Halving with
+common random numbers and M rollouts per option in total (RolloutPlanner
+sh_budget; use with margin=0, no test). DCL's rounds: round=k base=<the
+previous round's policy_tau0.pth> init=<the same> (scripts/run_dcl.sh);
+test=k [min_t=2]: a departure is kept only if k fresh rollouts of it and
+of the base's choice, paired, give a mean advantage above the margin with a t
+statistic of at least min_t (RolloutPlanner test/min_t).
+All of these add a suffix to the results directory.
 """
 import json
 import os
@@ -44,8 +72,26 @@ ENV, N = opts.get("env", "bpic15"), int(opts.get("N", 1))
 DAYS, R, WORKERS = int(opts.get("days", 40)), int(opts.get("R", 8)), int(opts.get("workers", 8))
 EPOCHS, GPU, SEED = int(opts.get("epochs", 15)), opts.get("gpu", "0") == "1", int(opts.get("seed", 0))
 TAU = float(opts.get("tau", 0.25))
-LENGTH, TRAIN_SEED = 20, 2_000_000
-OUTDIR = SUITE / "results" / f"pi_{ENV}_n{N}_R{R}_d{DAYS}_mc"
+BASE = os.path.abspath(opts["base"]) if "base" in opts else None
+INIT = os.path.abspath(opts["init"]) if "init" in opts else None
+ROUND = int(opts.get("round", 1))
+LR = float(opts.get("lr", 1e-3))
+EMA = float(opts["ema"]) if "ema" in opts else None
+EXTRA = [d for d in opts.get("extra", "").split(",") if d]
+NAME = opts.get("name", "")
+MARGIN = float(opts.get("margin", 0.0))
+FAIR = opts.get("fair", "0") == "1"
+CONFIRM = int(opts.get("confirm", 0))
+AGE = opts.get("age", "0") == "1"
+CLOCK = opts.get("clock", "0") == "1"
+MERGE = opts.get("merge", "0") == "1"
+CLOCKNODE = opts.get("clocknode", "0") == "1"
+SH = int(opts.get("sh", 0))
+TEST, MIN_T = int(opts.get("test", 0)), float(opts.get("min_t", 2.0))
+LENGTH, TRAIN_SEED = 20, 2_000_000 + 100_000 * (ROUND - 1)
+OUTDIR = SUITE / "results" / (f"pi_{ENV}_n{N}_R{R}_d{DAYS}_mc" + (f"_r{ROUND}" if ROUND > 1 else "")
+                         + (f"_m{MARGIN:g}" if MARGIN else "") + ("_fair" if FAIR else "") + (f"_c{CONFIRM}" if CONFIRM else "")
+                         + ("_age" if AGE else "") + ("_clk" if CLOCK else "") + ("_mrg" if MERGE else "") + ("_clkn" if CLOCKNODE else "") + (f"_sh{SH}" if SH else "") + (f"_t{TEST}z{MIN_T:g}" if TEST else ""))
 
 
 def registries():
@@ -59,17 +105,37 @@ def registries():
 def make_env():
     """The training/evaluation env of run_bpm's AEPN marking-certificate runs."""
     builders, _ = registries()
-    return _make_env(builders[ENV], N, LENGTH, flat_obs=True, global_view='edges', marking_certificate=True)
+    env = _make_env(builders[ENV], N, LENGTH, flat_obs=True, global_view='edges', marking_certificate=True)
+    env.pn.obs_token_age = env.frozen_pn.obs_token_age = AGE      # (reset starts from frozen_pn)
+    env.pn.obs_clock = env.frozen_pn.obs_clock = CLOCK
+    env.pn.merge_options = env.frozen_pn.merge_options = MERGE
+    env.pn.clock_node = env.frozen_pn.clock_node = CLOCKNODE
+    return env
 
 
 def make_planner(env):
-    from gympn.policy_iteration import RolloutPlanner, HeuristicBase
-    _, heur = registries()
-    return RolloutPlanner(HeuristicBase(heur[ENV]), rollouts=R, component=True, seed=SEED + 1)
+    from gympn.policy_iteration import RolloutPlanner, HeuristicBase, NetworkBase
+    if BASE is not None:
+        torch.set_num_threads(1)
+        base = NetworkBase(torch.load(BASE, weights_only=False).eval())
+    else:
+        _, heur = registries()
+        base = HeuristicBase(heur[ENV])
+    resample = None
+    if FAIR:
+        from bpic15_env import bpic15_resample_hidden
+        assert ENV.startswith("bpic15"), "fair=1: resampling defined for bpic15 only"
+        resample = bpic15_resample_hidden
+    return RolloutPlanner(base, rollouts=R, component=True, seed=SEED + ROUND, margin=MARGIN,
+                          resample=resample, confirm=CONFIRM,
+                          test=TEST, min_t=MIN_T, sh_budget=SH)
 
 
-def make_policy(env):
-    """PPO's actor, as gympn.train builds it for run_bpm's AEPN runs."""
+def make_policy(env, init=None):
+    """PPO's actor, as gympn.train builds it for run_bpm's AEPN runs (or the
+    saved network `init`)."""
+    if init is not None:
+        return torch.load(init, weights_only=False)
     from gympn.train import make_parser, make_policy_network
     args = make_parser().parse_args([])
     args.policy_kwargs = {"encoder": "aepn", "encoder_kwargs": {"global_attn": True, "count_aggr": True}}
@@ -107,22 +173,28 @@ def main():
     if graphs is not None:
         log(f"loaded {len(graphs)} recorded decisions")
     else:
-        log(f"planner (R={R}) on {DAYS} training days, {WORKERS} workers")
+        log(f"planner (R={R}, base {'network ' + os.path.basename(BASE) if BASE else 'heuristic'}) "
+            f"on {DAYS} training days (round {ROUND}), {WORKERS} workers")
         graphs = collect_decisions(make_env, make_planner, [TRAIN_SEED + d for d in range(DAYS)],
                                    workers=WORKERS, log=log)
         torch.save(graphs, fd)
         log(f"{len(graphs)} decisions recorded ({(time.time() - t0) / 60:.0f} min)")
 
-    policy = make_policy(env)
+    for d in EXTRA:
+        more = torch.load(SUITE / "results" / d / "decisions.pt", weights_only=False)
+        log(f"+ {len(more)} decisions from {d}")
+        graphs = graphs + more
+    policy = make_policy(env, INIT)
 
     def evaluate(pol):
         r = score_policy(make_env(), pol, EVAL_SEED, EVAL_DAYS)
         return {"eval_norm": float(nrm(np.mean(r), anc["eval"]))}
 
     hist = distill(policy, graphs, epochs=EPOCHS, device="cuda" if GPU and torch.cuda.is_available() else None,
-                   seed=SEED, log=log, evaluate=evaluate, eval_every=1, tau=TAU, select="eval_norm")
+                   seed=SEED, log=log, evaluate=evaluate, eval_every=1, tau=TAU, select="eval_norm",
+                   lr=LR, ema=EMA)
     ckpts = hist.pop("checkpoints")
-    tag = f"tau{TAU:g}"
+    tag = f"tau{TAU:g}" + (f"_{NAME}" if NAME else "")
     final = make_policy(env)
     with torch.no_grad():
         final({'graph': graphs[0]})
@@ -134,6 +206,8 @@ def main():
     ho_fin = score_policy(make_env(), final, HELDOUT_SEED, HELDOUT_DAYS)
     sel = hist["selected_epoch"]
     res = {"env": ENV, "N": N, "days": DAYS, "R": R, "epochs": EPOCHS, "tau": TAU, "seed": SEED,
+           "lr": LR, "ema": EMA, "extra": EXTRA, "init": INIT, "base": BASE, "round": ROUND,
+           "margin": MARGIN, "fair": FAIR, "confirm": CONFIRM, "age": AGE, "clock": CLOCK, "merge": MERGE, "clocknode": CLOCKNODE, "sh": SH, "test": TEST, "min_t": MIN_T,
            "decisions": len(graphs), "history": hist, "selected_epoch": sel,
            "eval_norm_selected": next(e["eval_norm"] for e in hist["evals"] if e["epoch"] == sel),
            "eval_norm_final": hist["evals"][-1]["eval_norm"],
