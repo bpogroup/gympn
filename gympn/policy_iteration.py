@@ -38,7 +38,8 @@ import torch
 
 __all__ = ["HeuristicBase", "NetworkBase", "RolloutPlanner", "option_key", "collect_decisions",
            "soft_targets", "distill", "class_nll", "soft_class_nll", "advantage_loss",
-           "advantage_loss_from_probs", "unlabelled_record"]
+           "advantage_loss_from_probs", "unlabelled_record",
+           "set_class_nll", "episode_components", "collect_component_decisions"]
 
 
 # --------------------------------------------------------------------------- base policies
@@ -162,6 +163,19 @@ class RolloutPlanner:
         all options, fresh seeds each round), returns accumulate over the
         rounds, and the better half (by mean accumulated return) survives.
         The last survivor is the choice; no margin, no test.
+    race_eps : when set (permits), choose() selects by racing, an adaptive
+        alternative to sh_budget: rounds of race_step paired rollouts of every
+        surviving option (the same seeds for all of them, fresh seeds each
+        round, so the survivors stay paired over all rounds). From race_min
+        rollouts on, an option is eliminated when the leader's mean paired
+        advantage over it exceeds race_z standard errors, and the race stops
+        when no survivor's upper bound (mean paired difference to the leader
+        + race_z standard errors) reaches race_eps, or at race_cap rollouts
+        per option. The leader is the choice; the survivors are its label set
+        (last["set"], _record's t_set). A clear winner stops early; a near tie
+        stops once its gap is shown to be below race_eps. race_z is a
+        per-look threshold (no correction for repeated looks), so the error
+        rate is controlled in practice, not guaranteed.
     test, min_t : when test > 0, a departure is tested on `test` fresh
         rollouts (other seeds) of only the chosen option and the base's,
         paired by rollout: it is kept only if the mean paired advantage
@@ -175,7 +189,8 @@ class RolloutPlanner:
                  seed: int = 0, lockstep: bool = True, restrict: bool = True, keyed: bool = True,
                  coalesce: bool = True, resample: Optional[Callable] = None,
                  margin: float = 0.0, confirm: int = 0, test: int = 0, min_t: float = 2.0,
-                 sh_budget: int = 0):
+                 sh_budget: int = 0, race_eps: Optional[float] = None, race_z: float = 2.0,
+                 race_step: int = 2, race_min: int = 4, race_cap: int = 64):
         self.base, self.rollouts, self.component, self.beta, self.seed = base, rollouts, component, beta, seed
         self.lockstep, self.restrict, self.keyed = lockstep, restrict, keyed
         self.coalesce = coalesce and keyed
@@ -184,6 +199,8 @@ class RolloutPlanner:
         self.confirm = confirm
         self.test, self.min_t = test, min_t
         self.sh_budget = sh_budget
+        self.race_eps, self.race_z = race_eps, race_z
+        self.race_step, self.race_min, self.race_cap = race_step, race_min, race_cap
         self._confirming = False
         self.steps = [0, 0]           # rollout steps simulated, and saved by coalescing
         self._only = None             # member transitions of the rollouts' component (restrict)
@@ -333,10 +350,11 @@ class RolloutPlanner:
         """Rollout returns of the options reps (array options x rollouts),
         env restored to snap afterwards."""
         pn = env.pn
+        prev_only = pn.sim_only             # an episode may itself be restricted (component-factored collection)
         try:
             if self.lockstep and getattr(self.base, 'policy', None) is not None:
                 return self._scores_lockstep(env, snap, reps, scored, tag, ref=h_rep)
-            env.pn.sim_only = self._only
+            env.pn.sim_only = self._only if self._only is not None else prev_only
             env.pn.stream_isolated = False      # the snapshot restores the random state afterwards
             env.set_state(snap)
             first = self._first_actions(env, B, reps)
@@ -363,7 +381,7 @@ class RolloutPlanner:
                 by_o[o] = g_o
             return np.array([by_o[o] for o in reps])
         finally:
-            pn.sim_only = None
+            pn.sim_only = prev_only
             pn.stream_isolated = True
             env.set_state(snap)       # back to the decision, with the episode's own random state
 
@@ -445,9 +463,58 @@ class RolloutPlanner:
                      "scores": [tot[o] / cnt[o] for o in reps], "counts": [cnt[o] for o in reps]}
         return chosen
 
+    def _choose_race(self, env, tag=()) -> int:
+        """Racing with paired rollouts (race_eps)."""
+        B, h, reps, h_rep, scored = self._prepare(env)
+        self.last = {"options": len(reps), "base": h, "scores": None, "reps": reps, "chosen": h}
+        if len(reps) < 2:
+            return h
+        snap = env.get_state()
+        z, eps = float(self.race_z), float(self.race_eps)
+        samples = {o: [] for o in reps}
+        alive = list(reps)
+        saved = self.rollouts
+        rnd = 0
+        try:
+            while True:
+                self.rollouts = int(self.race_step)
+                ref = h_rep if h_rep in alive else alive[0]
+                ret = self._returns(env, snap, B, alive, scored, (tag, 'race', rnd), ref)
+                rnd += 1
+                for o, row in zip(alive, ret):
+                    samples[o].extend(float(v) for v in row)
+                n = len(samples[alive[0]])
+                X = np.array([samples[o] for o in alive])          # survivors: aligned, paired
+                means = X.mean(axis=1)
+                b = int(np.argmax(means))
+                d = X[b] - X                                       # leader minus each, per rollout
+                dm = d.mean(axis=1)
+                se = d.std(axis=1, ddof=1) / math.sqrt(n) if n > 1 else np.full(len(alive), np.inf)
+                if n >= self.race_min:
+                    keep = [i for i in range(len(alive)) if i == b or not (dm[i] > z * se[i])]
+                    lead = alive[b]
+                    alive = [alive[i] for i in keep]
+                    dm, se = dm[keep], se[keep]
+                    b = alive.index(lead)
+                    ucb = max((-dm[i] + z * se[i] for i in range(len(alive)) if i != b), default=-np.inf)
+                    if ucb < eps:
+                        break
+                if n >= self.race_cap:
+                    break
+        finally:
+            self.rollouts = saved
+        means = {o: float(np.mean(samples[o])) for o in reps}
+        chosen = max(alive, key=lambda o: means[o])
+        self.last = {"options": len(reps), "base": h, "reps": reps, "chosen": chosen,
+                     "scores": [means[o] for o in reps], "counts": [len(samples[o]) for o in reps],
+                     "set": list(alive)}
+        return chosen
+
     def choose(self, env, tag=()) -> int:
         """The planner's action at env's current decision. `tag` (e.g. the
         episode and step) makes the rollout seeds distinct per decision."""
+        if self.race_eps is not None:
+            return self._choose_race(env, tag)
         if self.sh_budget:
             return self._choose_sh(env, tag)
         reps, scores, h = self.option_values(env, tag)
@@ -519,6 +586,8 @@ def _record(graph, B, chosen, last):
     h = last.get("base", chosen)
     graph.t_base = torch.tensor([rep_keys.index(keys[h]) if keys[h] in rep_keys else -1], dtype=torch.long)
     graph.t_keys = f"{keys[h]!r} -> {kc!r}"
+    members = {keys[i] for i in (last.get("set") or [chosen])} | {kc}
+    graph.t_set = torch.tensor([k in members for k in rep_keys], dtype=torch.bool)
     return graph
 
 
@@ -560,9 +629,19 @@ def collect_decisions(make_env: Callable, planner_fn: Callable, seeds: Sequence[
 
 
 def _collect_one(task):
-    make_env, planner_fn, seed = task
+    make_env, planner_fn, seed = task[:3]
+    members = task[3] if len(task) > 3 else None
     torch.set_num_threads(1)
     env = make_env()
+    if members is not None:             # component-factored: this component alone, from the reset on
+        # One unrestricted reset first fixes the flat observation's vocabulary
+        # and width, so every observation of the restricted run (the first
+        # one included) comes from the direct builder, which shows only the
+        # simulated transitions and places.
+        env.reset()
+        for k in ('_flat_meta', '_flat_width', 'metadata'):
+            setattr(env.frozen_pn, k, getattr(env.pn, k, None))
+        env.pn.sim_only = env.frozen_pn.sim_only = members
     planner = planner_fn(env)
     random.seed(seed); np.random.seed(seed % 2 ** 32)
     obs = env.reset()
@@ -580,6 +659,54 @@ def _collect_one(task):
     return graphs, total, changed
 
 
+def episode_components(make_env: Callable, seed: int = 0) -> List[frozenset]:
+    """The net's components by the STATIC certificate (the net structure,
+    before anything fires), each as the set of its member transitions, in a
+    fixed order (by smallest member id). Static, not the marking certificate
+    after a reset: the reset already fires start-of-episode transitions
+    (e.g. a backlog that opens the day), which the marking certificate then
+    drops as dead, and a component simulated alone without them would start
+    from the wrong marking. Static components are independent too, so
+    simulating one alone is exact. (seed is unused; kept for the signature.)"""
+    import copy
+    pn = copy.deepcopy(make_env().frozen_pn)
+    pn.marking_certificate = False
+    part = pn.net_partition()
+    comps = {}
+    for t in list(pn.actions) + list(pn.events):
+        comps.setdefault(part.get(t._id), set()).add(t._id)
+    comps.pop(None, None)
+    return sorted((frozenset(m) for m in comps.values()), key=min)
+
+
+def collect_component_decisions(make_env: Callable, planner_fn: Callable, tasks: Sequence, workers: int = 1,
+                                log: Optional[Callable] = None) -> List:
+    """Component-factored collection: like collect_decisions, but each task
+    (seed, members) simulates ONE net component of the episode alone
+    (GymProblem.sim_only = members, set before the reset, so the restricted
+    run starts from the same initial marking), with the planner choosing at
+    its decisions. By the certificate the component's future depends on its
+    own marking only, so its days have the distribution they have inside the
+    whole net, and its decisions get the labels they would get there; the
+    actor's logits for a component read that component only, so they are
+    the same on the component's subgraph. Simulation can then be allocated
+    across components (more days where labels are informative) instead of
+    always simulating whole days. Returns graphs, in task order."""
+    tasks = [(make_env, planner_fn, int(sd), frozenset(m)) for sd, m in tasks]
+    if workers <= 1:
+        out = [_collect_one(t) for t in tasks]
+    else:
+        import multiprocessing as mp
+        with mp.get_context("spawn").Pool(workers) as pool:
+            out = []
+            for res in pool.imap(_collect_one, tasks):
+                out.append(res)
+                if log:
+                    log(f"collected component-day {len(out)}/{len(tasks)}: {len(res[0])} decisions, "
+                        f"return {res[1]:.1f}, {res[2]} changed")
+    return [g for graphs, _, _ in out for g in graphs]
+
+
 # --------------------------------------------------------------------------- distillation
 def class_nll(policy, batch):
     """Mean over the batch's decisions of -log P(chosen class): the network's
@@ -593,10 +720,35 @@ def class_nll(policy, batch):
     return -(p_cls.clamp_min(1e-8)).log().mean()
 
 
-def soft_class_nll(policy, batch):
+def set_class_nll(policy, batch):
+    """Mean over the batch's decisions of -log of the network's probability
+    of the label SET t_set (the options the planner could not tell apart from
+    its choice, e.g. a race's survivors): a partial-label loss, so a near tie
+    does not force one arbitrary option."""
+    probs = policy({'graph': batch}).reshape(-1)
+    dev = probs.device
+    G = int(batch.num_graphs)
+    gidx = torch.cat([batch.batch[batch.a_idx], batch.batch[batch.p_idx]]).to(dev)
+    cls = torch.cat([batch.t_cls_a.reshape(-1), batch.t_cls_p.reshape(-1)]).to(dev)
+    ncls = batch.t_ncls.reshape(-1).to(dev)
+    off = torch.cumsum(ncls, 0) - ncls
+    keep = cls >= 0
+    P = torch.zeros(int(ncls.sum()), device=dev).index_add(0, cls[keep] + off[gidx[keep]], probs[keep])
+    owner = torch.repeat_interleave(torch.arange(G, device=dev), ncls)
+    inset = batch.t_set.reshape(-1).to(dev)
+    p_set = torch.zeros(G, device=dev).index_add(0, owner, P * inset)
+    return -(p_set.clamp_min(1e-8)).log().mean()
+
+
+def soft_class_nll(policy, batch, renorm: bool = False):
     """Mean over the batch's decisions of the cross-entropy between the
     target t_q over option classes (soft_targets) and the network's class
-    probabilities (summed over each class's equivalent bindings)."""
+    probabilities (summed over each class's equivalent bindings).
+    renorm: the class probabilities are renormalized over the compared
+    classes (the deciding component's options), as if the decision were
+    observed on the component's subgraph: the label then constrains only how
+    the component's own options compare, not how much probability the other
+    components' actions get."""
     probs = policy({'graph': batch}).reshape(-1)
     dev = probs.device
     G = int(batch.num_graphs)
@@ -607,6 +759,10 @@ def soft_class_nll(policy, batch):
     keep = cls >= 0
     gcls = cls[keep] + off[gidx[keep]]
     P = torch.zeros(int(ncls.sum()), device=dev).index_add(0, gcls, probs[keep])
+    if renorm:
+        owner = torch.repeat_interleave(torch.arange(G, device=dev), ncls)
+        tot = torch.zeros(G, device=dev).index_add(0, owner, P)
+        P = P / tot[owner].clamp_min(1e-8)
     q = batch.t_q.reshape(-1).to(dev)
     w = getattr(batch, 't_w', None)
     if w is None:
@@ -659,6 +815,7 @@ def unlabelled_record(graph):
     graph.t_ncls = torch.ones(1, dtype=torch.long)
     graph.t_base = torch.full((1,), -1, dtype=torch.long)
     graph.t_keys = ""
+    graph.t_set = torch.ones(1, dtype=torch.bool)
     return graph
 
 
@@ -676,7 +833,8 @@ def distill(policy, graphs: List, epochs: int = 15, lr: float = 1e-3, batch_size
             device: Optional[str] = None, seed: int = 0, log: Optional[Callable] = None,
             evaluate: Optional[Callable] = None, eval_every: int = 5, tau: float = 0.0,
             select: Optional[str] = None, ema: Optional[float] = None,
-            override_weight: float = 1.0, adv_weight: float = 0.0, ce_weight: float = 1.0):
+            override_weight: float = 1.0, adv_weight: float = 0.0, ce_weight: float = 1.0,
+            set_labels: bool = False, renorm: bool = False):
     """Train `policy` on the planner's choices with Adam: the cross-entropy
     with soft_targets(graphs, tau) (tau = 0: the chosen class only).
     evaluate(policy) -> dict is called every eval_every epochs and at the end
@@ -693,10 +851,18 @@ def distill(policy, graphs: List, epochs: int = 15, lr: float = 1e-3, batch_size
     others: they are few, and copying the base already fits the rest.
     adv_weight, ce_weight: the loss is ce_weight * the cross-entropy +
     adv_weight * advantage_loss (the network's expected advantage over the
-    base, by the planner's option scores).
+    base, by the planner's option scores). set_labels: the cross-entropy is
+    set_class_nll instead (the label is the set t_set; graphs recorded
+    without one use their chosen class). renorm: the cross-entropy uses class
+    probabilities renormalized within the deciding component
+    (soft_class_nll(renorm=True)).
     Returns the history."""
     import copy
     soft_targets(graphs, tau)
+    if set_labels:
+        for g in graphs:
+            if not hasattr(g, 't_set'):
+                g.t_set = torch.arange(int(g.t_ncls)) == int(g.t_chosen)
     if override_weight != 1.0:
         for g in graphs:
             g.t_w = torch.tensor([override_weight if int(g.t_chosen) != int(g.t_base) else 1.0])
@@ -726,7 +892,11 @@ def distill(policy, graphs: List, epochs: int = 15, lr: float = 1e-3, batch_size
         losses = []
         for i in range(0, len(order), batch_size):
             b = Batch.from_data_list([graphs[j] for j in order[i:i + batch_size]]).to(dev)
-            loss = ce_weight * soft_class_nll(policy, b) if ce_weight else 0.0
+            if set_labels:
+                ce_term = set_class_nll(policy, b)
+            else:
+                ce_term = soft_class_nll(policy, b, renorm=renorm)
+            loss = ce_weight * ce_term if ce_weight else 0.0
             if adv_weight:
                 loss = loss + adv_weight * advantage_loss(policy, b)
             opt.zero_grad()

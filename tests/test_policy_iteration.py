@@ -420,3 +420,161 @@ def test_sequential_halving_spends_its_budget_and_leaves_the_episode():
             checked += 1
         env.step(a)
     assert checked > 0
+
+
+def test_racing_stops_with_a_paired_survivor_set():
+    """race_eps: the choice and every survivor are options of the
+    component, the survivors got the same (paired) number of rollouts and at
+    most race_cap, eliminated options got fewer, the episode is left as it
+    was, and the choice is deterministic for a tag."""
+    env = _env()
+    _reset(env)
+    for _ in range(3):
+        env.step(0)
+    pl = RolloutPlanner(HeuristicBase(INSURER_HEURISTICS["insurer"]), seed=1, race_eps=0.25,
+                        race_step=2, race_min=4, race_cap=16)
+    checked = 0
+    for step in range(25):
+        if not env.pn.pn_actions:
+            break
+        before = ([option_key(b) for b in env.pn.pn_actions], env.pn.clock, random.getstate())
+        a = pl.choose(env, tag=(step,))
+        assert ([option_key(b) for b in env.pn.pn_actions], env.pn.clock, random.getstate()) == before
+        assert pl.choose(env, tag=(step,)) == a
+        last = pl.last
+        if last["scores"] is not None:
+            reps, cnt, sv = last["reps"], last["counts"], last["set"]
+            assert a in sv and set(sv) <= set(reps)
+            n = {cnt[reps.index(o)] for o in sv}
+            assert len(n) == 1 and max(n) <= 16
+            assert all(cnt[reps.index(o)] <= max(n) for o in reps)
+            checked += 1
+        env.step(a)
+    assert checked > 0
+
+
+def test_set_class_nll_is_minus_log_of_the_set_probability():
+    from gympn.policy_iteration import set_class_nll, soft_targets
+    env = _env()
+    graphs = [g for g in collect_decisions(_make_env, _make_planner, [11, 12], workers=1) if int(g.t_ncls) > 1][:6]
+    assert graphs
+    pol = _policy(env)
+    soft_targets(graphs, 0.0)
+    batch = Batch.from_data_list(graphs)
+    with torch.no_grad():
+        assert torch.allclose(set_class_nll(pol, batch), class_nll(pol, batch), atol=1e-6)
+        for g in graphs:                        # widen every set to two classes
+            g.t_set = torch.zeros(int(g.t_ncls), dtype=torch.bool)
+            g.t_set[int(g.t_chosen)] = True
+            g.t_set[(int(g.t_chosen) + 1) % int(g.t_ncls)] = True
+        want = 0.0
+        for g in graphs:
+            p = pol({'graph': Batch.from_data_list([g])}).reshape(-1)
+            cls = torch.cat([g.t_cls_a, g.t_cls_p])
+            P = torch.zeros(int(g.t_ncls)).index_add(0, cls[cls >= 0], p[cls >= 0])
+            want -= float(torch.log(P[g.t_set].sum()))
+        got = float(set_class_nll(pol, Batch.from_data_list(graphs)))
+    assert abs(got - want / len(graphs)) < 1e-5
+
+
+def _two_region_make_env():
+    return _two_region_env_fresh()
+
+
+def _two_region_env_fresh():
+    pn = INSURER_BUILDERS["insurer"](2, allow_postpone=False)
+    pn.length = 6
+    pn.flat_obs, pn.global_view, pn.marking_certificate = True, 'edges', True
+    pn.merge_options, pn.clock_node = True, True
+    return AEPN_Env(pn)
+
+
+def _two_region_planner(env):
+    return RolloutPlanner(HeuristicBase(INSURER_HEURISTICS["insurer"]), rollouts=2, seed=1)
+
+
+def test_component_factored_collection_stays_in_its_component():
+    """collect_component_decisions: every recorded decision of a
+    component-day offers only that component's bindings, its graph shows
+    only that component's action nodes (one per offered binding), and the
+    planner's rollouts leave the episode's restriction in place."""
+    from gympn.policy_iteration import episode_components, collect_component_decisions
+    comps = episode_components(_two_region_make_env, seed=3)
+    assert len(comps) >= 2
+    for k, members in enumerate(comps):
+        env = _two_region_make_env()
+        env.pn.sim_only = env.frozen_pn.sim_only = members
+        pl = _two_region_planner(env)
+        random.seed(3); np.random.seed(3)
+        obs = env.reset()
+        steps = 0
+        while env.pn.pn_actions and steps < 25:
+            B = env.pn.pn_actions
+            assert all(b[2]._id in members for b in B)
+            assert int(obs['graph'].a_idx.numel()) == len(B)
+            a = pl.choose(env, tag=(k, steps))
+            assert env.pn.sim_only == members
+            obs, _, done, _, _ = env.step(a)
+            steps += 1
+            if done:
+                break
+        assert steps > 0
+    graphs = collect_component_decisions(_two_region_make_env, _two_region_planner,
+                                         [(3, comps[0]), (4, comps[1])], workers=1)
+    assert graphs and all(hasattr(g, 't_cls_a') for g in graphs)
+
+
+def test_component_factored_collection_on_bpic15_shows_only_the_component():
+    """On bpic15 (string-valued backlog tokens in the other components'
+    unfired start-of-day places) the restricted run's observations, the first
+    one included, must come from the direct builder: only the component's
+    action nodes, one per offered binding."""
+    import bpic15_env
+    from gympn.policy_iteration import episode_components, _collect_one
+
+    def make():
+        pn = bpic15_env.BPIC15_BUILDERS["bpic15"](1, allow_postpone=False)
+        pn.length = 3
+        pn.flat_obs, pn.global_view, pn.marking_certificate = True, 'edges', True
+        pn.merge_options, pn.clock_node = True, True
+        return AEPN_Env(pn)
+
+    def planner(env):
+        return RolloutPlanner(HeuristicBase(bpic15_env.bpic15_heuristic), rollouts=1, seed=1)
+    comps = episode_components(make, seed=5)
+    # every transition belongs to a component, start-of-day events included
+    pn = make().frozen_pn
+    assert set().union(*comps) == {t._id for t in list(pn.actions) + list(pn.events)}
+    assert all(any(t.startswith("open_") for t in m) for m in comps)
+    graphs, _, _ = _collect_one((make, planner, 5, comps[-1]))
+    assert graphs
+    for g in graphs:
+        assert int(g.a_idx.numel()) == int(g.t_cls_a.numel())
+
+
+def test_renormalized_loss_ignores_other_components():
+    """soft_class_nll(renorm=True) depends only on how the compared classes
+    share their probability: scaling them all by the same factor (moving mass
+    to the other components' actions) leaves it unchanged."""
+    from gympn.policy_iteration import soft_class_nll, soft_targets
+    env = _two_region_env(seed=9)
+    graphs = [g for g in collect_decisions(lambda: _two_region_env(seed=9), lambda e: _planner(e, rollouts=1),
+                                           [3], workers=1) if int(g.t_ncls) > 1][:4]
+    assert graphs
+    soft_targets(graphs, 0.25)
+    batch = Batch.from_data_list(graphs)
+
+    class Fixed(torch.nn.Module):
+        def __init__(self, p):
+            super().__init__(); self.p = p
+
+        def forward(self, data):
+            return self.p
+    n = int(batch.a_idx.numel() + batch.p_idx.numel())
+    p = torch.rand(n)
+    cls = torch.cat([batch.t_cls_a, batch.t_cls_p])
+    q = p.clone(); q[cls >= 0] *= 0.3; q[cls < 0] += 1.0
+    a = soft_class_nll(Fixed(p), batch, renorm=True)
+    b = soft_class_nll(Fixed(q), batch, renorm=True)
+    assert torch.allclose(a, b, atol=1e-5)
+    assert not torch.allclose(soft_class_nll(Fixed(p), batch), soft_class_nll(Fixed(q), batch), atol=1e-5)
