@@ -75,7 +75,22 @@ All notable changes to gympn are recorded here. The format follows
   return, reusable outside `choose`); `test`/`min_t`, a paired test of a
   departure from the base on fresh rollouts before it is kept; and
   `sh_budget`, Deep Controlled Learning's action selection (Sequential
-  Halving with common random numbers; Temizoz et al., EJOR 2025).
+  Halving with common random numbers; Temizoz et al., EJOR 2025); and
+  `race_eps` (with `race_z`, `race_step`, `race_min`, `race_cap`), adaptive
+  racing on paired rollouts that stops early on clear winners and on near
+  ties and returns the survivor set as the label (`set_class_nll`,
+  `distill(set_labels=True)`).
+- Certificate-factored Deep Controlled Learning in `gympn.policy_iteration`:
+  `episode_components` (the static components as sets of transition ids) and
+  `collect_component_decisions`, which simulates and labels each component
+  alone on its own training days (exact by the certificate), so simulation
+  can be allocated across components; and `distill(renorm=True)`
+  (`soft_class_nll(renorm=True)`), component-local labels: class
+  probabilities renormalized within the deciding component. Rollouts now
+  keep an episode's own `sim_only` restriction. On bpic15 (100 held-out
+  days, heuristic = 1): DCL 1.22, component-local loss 1.28, factored 1.31.
+- Docs: a Deep Controlled Learning guide (`docs/dcl.md`) and a policy
+  iteration API page.
   `advantage_loss` / `advantage_loss_from_probs` (minus the expected
   advantage over the base by the planner's option scores) and the
   `adv_weight` / `ce_weight` options of `distill`.

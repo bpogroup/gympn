@@ -52,6 +52,13 @@ These documents explain key concepts and features:
 - A worked two-component example
 - ~30 minutes read
 
+**[Deep Controlled Learning (DCL)](./dcl.md)**
+- Approximate policy iteration: a rollout planner labels states, a network imitates them
+- Sequential Halving, keyed common random numbers, restricted rollouts, coalescing
+- Soft targets, rounds, and model selection on held-out episodes
+- Certificate-factored DCL: component-local labels and component-factored collection
+- ~30 minutes read
+
 **[Postponement and Net-Factored Credit](./postponement.md)** ⭐ Most Advanced
 - Postponement feature: defer decisions strategically
 - Net-factored credit (NF-GAE) for nets with independent parts
