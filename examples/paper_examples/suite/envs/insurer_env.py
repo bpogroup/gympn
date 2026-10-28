@@ -198,6 +198,24 @@ def make_insurer(regions=1, processes=PROCESSES, shared_clerks=False,
     return ag
 
 
+def insurer_resample_hidden(pn):
+    """Redraw what a policy cannot know (for a fair rollout planner,
+    gympn.policy_iteration.RolloutPlanner(resample=...)): the hidden outcome
+    `bad` of every waiting claim and complaint, from its visible risk level
+    (P_BAD). A reopened complaint is known to be fixed (bad = 0) and is kept.
+    The next arrival's case is drawn afresh when the arrival fires, so it needs
+    no redraw. Uses the global `random` stream, which the planner seeds per
+    rollout."""
+    for place in pn.places:
+        if not place._id.startswith(("cl_waiting_", "co_waiting_")):
+            continue
+        for tok in [t for t in place.marking if not t.value.get('reworked', 0)]:
+            case = dict(tok.value)
+            case['bad'] = 1 if random.random() < P_BAD[case['risk']] else 0
+            place.remove_token(tok)
+            place.add_token(SimToken(case, time=tok.time))
+
+
 # ----------------------------------------------------------- heuristic
 def _binding_rate(b, mismatch=3):
     """Myopic expected reward per expected resource time of one binding, by

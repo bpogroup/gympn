@@ -31,14 +31,30 @@ def _is_real_binding_tuple(b) -> bool:
     )
 
 
+def visible_value_repr(place, value):
+    """repr of a token value as the decision maker sees it: without the
+    attributes that set_unobservable hides in `place` (place.hidden_token_attrs;
+    '*' for an unobservable place)."""
+    hidden = getattr(place, 'hidden_token_attrs', None)
+    if not hidden:
+        return repr(value)
+    if hidden == '*':
+        return '<hidden>'
+    if isinstance(value, dict):
+        return repr({k: v for k, v in value.items() if k not in hidden})
+    return repr(value)
+
+
 def binding_option_key(b):
-    """Bindings with equal keys are exactly equivalent: same transition and
-    same token values (postpone: same component). Tokens with equal values
-    differ only in their times, which decide when a token is available, not
-    what firing it does."""
+    """Bindings with equal keys are equivalent to the decision maker: same
+    transition and same observable token values (postpone: same component).
+    Tokens with equal values differ only in their times, which decide when a
+    token is available, not what firing it does. Hidden attributes are left
+    out: two cases that differ only in what the decision maker cannot see are
+    the same option to it (otherwise the option set would reveal them)."""
     if isinstance(b[0], list) and b[0] == ['postpone']:
         return ('postpone', getattr(b[2], 'comp', None))
-    return (b[2]._id, tuple(repr(tok.value) for _p, tok in b[0]))
+    return (b[2]._id, tuple(visible_value_repr(p, tok.value) for p, tok in b[0]))
 
 
 def merge_option_bindings(bindings):
@@ -1254,12 +1270,13 @@ class GymProblem(SimProblem):
                 yield t, pids, combo, 1
             return
         reprs = {}
+        place_by_id = self._direct_place_by_id()
 
         def key_of(pid, ci):
             k = (pid, ci)
             r = reprs.get(k)
             if r is None:
-                r = reprs[k] = repr(valid[pid][ci].value)
+                r = reprs[k] = visible_value_repr(place_by_id[pid], valid[pid][ci].value)
             return r
 
         def flush(group):
@@ -3052,6 +3069,14 @@ class GymProblem(SimProblem):
             for attr in v:
                 if attr not in self.var_attributes[k]:
                     raise Exception(f"Exception in setting unobservable token attrs. Unobservable attribute {attr} must be present in the place's attributes.")
+        # the places carry what they hide, for visible_value_repr (option keys)
+        for p in self.places:
+            if p._id in simvars:
+                p.hidden_token_attrs = '*'
+            elif p._id in token_attrs:
+                p.hidden_token_attrs = tuple(token_attrs[p._id])
+            elif hasattr(p, 'hidden_token_attrs'):
+                del p.hidden_token_attrs
 
     def postpone(self, comp=None):
         """

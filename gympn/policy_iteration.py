@@ -248,6 +248,18 @@ class RolloutPlanner:
         remaining steps) for a run that ended with `total` after `steps`."""
         return {fp: (total - c, steps - k) for fp, (c, k) in record.items()}
 
+    def _redraw(self, env, a):
+        """Redraw the hidden state of env (resample) and return the index of
+        action a's option in the refreshed action list. A redraw may change
+        the hidden attributes of tokens that the bindings hold; option keys
+        leave them out, so the option is the same one."""
+        if self.resample is None:
+            return a
+        key = option_key(env.pn.pn_actions[a])
+        self.resample(env.pn)
+        env.pn.compute_pn_actions()
+        return [option_key(b) for b in env.pn.pn_actions].index(key)
+
     def _first_actions(self, renv, B, reps):
         """Each option's index in renv's action list (renv at the decision,
         possibly restricted to the component, so its list is shorter):
@@ -288,8 +300,7 @@ class RolloutPlanner:
                 o = first[reps[oi]]
                 sd = _seed(self.seed, tag, j)
                 random.seed(sd); np.random.seed(sd)
-                if self.resample is not None:
-                    self.resample(e.pn)
+                o = self._redraw(e, o)
                 if self.keyed:
                     e.pn.stream_seed = sd
                 # (keyed streams: no behaviour reads the global streams, so they need no swapping)
@@ -366,16 +377,15 @@ class RolloutPlanner:
                     env.set_state(snap)
                     sd = _seed(self.seed, tag, j)
                     random.seed(sd); np.random.seed(sd)
-                    if self.resample is not None:
-                        self.resample(env.pn)
+                    a = self._redraw(env, first[o])
                     if self.keyed:
                         env.pn.stream_seed = sd
                     if self._coalescing() and o == h_rep:
                         rec = {}
-                        g = self._play_out(env, first[o], scored, record=rec)
+                        g = self._play_out(env, a, scored, record=rec)
                         refs[j] = self._remaining(rec, g, self._k)
                     else:
-                        g = self._play_out(env, first[o], scored,
+                        g = self._play_out(env, a, scored,
                                            lookup=refs.get(j) if self._coalescing() else None)
                     g_o.append(g)
                 by_o[o] = g_o

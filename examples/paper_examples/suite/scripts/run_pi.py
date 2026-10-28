@@ -36,7 +36,7 @@ output files, so several distillations of the same decisions can coexist.
 margin=m: the planner departs from its base only when the best option's mean
 rollout return beats the base's by more than m (distil only its confident
 improvements); fair=1: every rollout redraws what a policy cannot observe
-(bpic15: the next arrival times); confirm=k: a departure from the base is kept
+(bpic15: the next arrival times; insurer: the hidden outcomes of waiting cases); confirm=k: a departure from the base is kept
 only if an independent scoring with k rollouts per option repeats it; age=1:
 every observed token gets its age, clock - token.time (GymProblem.obs_token_age;
 with env=bpic15_wip that includes the time spent on each task in progress).
@@ -146,8 +146,9 @@ def make_planner(env):
     resample = None
     if FAIR:
         from bpic15_env import bpic15_resample_hidden
-        assert ENV.startswith("bpic15"), "fair=1: resampling defined for bpic15 only"
-        resample = bpic15_resample_hidden
+        from insurer_env import insurer_resample_hidden
+        assert ENV.startswith(("bpic15", "insurer")), "fair=1: resampling defined for bpic15 and insurer only"
+        resample = bpic15_resample_hidden if ENV.startswith("bpic15") else insurer_resample_hidden
     return RolloutPlanner(base, rollouts=R, component=True, seed=SEED + ROUND, margin=MARGIN,
                           resample=resample, confirm=CONFIRM,
                           test=TEST, min_t=MIN_T, sh_budget=SH, race_eps=RACE, race_z=RZ,

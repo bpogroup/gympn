@@ -93,3 +93,34 @@ def test_heuristic_returns_unchanged(seed):
                 break
         out.append(total)
     assert out[0] == out[1]
+
+
+def test_hidden_attributes_do_not_split_options():
+    """Cases that differ only in a hidden attribute (the insurer's `bad`) are
+    one option: the option set must not reveal what the decision maker cannot
+    see. Keys, merged pn_actions and multiplicities all ignore it."""
+    env, _ = _env(True, build=lambda: INSURER_BUILDERS["insurer"](1))
+    pn = env.pn
+    assert pn.places[[p._id for p in pn.places].index("cl_waiting_0")].hidden_token_attrs == ('bad',)
+    keys = [binding_option_key(b) for b in pn.pn_actions]
+    assert len(keys) == len(set(keys))
+    assert not any("'bad'" in repr(k) for k in keys)
+    # the initial claims are risk 0 (good), 1, 2 (bad), 0: approve risk 0 is one option for both
+    raw, _ = _env(False, build=lambda: INSURER_BUILDERS["insurer"](1))
+    vis = Counter(binding_option_key(b) for b in raw.pn.pn_actions)
+    assert set(vis) == set(keys)
+
+
+def test_planner_redraw_keeps_the_option():
+    """A redraw of the hidden outcomes (insurer_resample_hidden) changes the
+    token values that the bindings hold; the planner still plays the same
+    option in every rollout."""
+    from gympn.policy_iteration import RolloutPlanner, HeuristicBase, option_key
+    from insurer_env import insurer_heuristic, insurer_resample_hidden
+    env, _ = _env(True, build=lambda: INSURER_BUILDERS["insurer"](1))
+    planner = RolloutPlanner(HeuristicBase(insurer_heuristic), rollouts=2, component=True,
+                             resample=insurer_resample_hidden, sh_budget=8)
+    B = list(env.pn.pn_actions)
+    a = planner.choose(env, tag=(0,))
+    assert [option_key(b) for b in env.pn.pn_actions] == [option_key(b) for b in B]
+    assert 0 <= a < len(B)
