@@ -4,6 +4,7 @@
 # Creates .venv in the repository with a CPU-only PyTorch and gympn installed
 # in editable mode. Check `module avail Python` if the module below is gone.
 set -e
+cd "$(dirname "$0")/../../../.."   # the repository root, wherever this is run from
 module purge
 module load 2024
 module load Python/3.12.3-GCCcore-13.3.0
