@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..",
 
 from gympn.environment import AEPN_Env  # noqa: E402
 from gympn.policy_iteration import (HeuristicBase, NetworkBase, RolloutPlanner, option_key,  # noqa: E402
-                                    collect_decisions, class_nll, distill)
+                                    collect_decisions, class_nll, distill, _collect_one, episode_components)
 from gympn.train import make_parser, make_policy_network  # noqa: E402
 from insurer_env import INSURER_BUILDERS, INSURER_HEURISTICS  # noqa: E402
 
@@ -578,3 +578,59 @@ def test_renormalized_loss_ignores_other_components():
     b = soft_class_nll(Fixed(q), batch, renorm=True)
     assert torch.allclose(a, b, atol=1e-5)
     assert not torch.allclose(soft_class_nll(Fixed(p), batch), soft_class_nll(Fixed(q), batch), atol=1e-5)
+
+
+def _alloc_env(length=4):
+    pn = INSURER_BUILDERS["insurer_alloc"](1, allow_postpone=False)
+    pn.length = length
+    pn.flat_obs, pn.global_view, pn.marking_certificate = True, 'edges', True
+    pn.merge_options = True
+    return AEPN_Env(pn)
+
+
+def test_alloc_heuristic_follows_its_plan_with_merged_options():
+    # equal-skill pool members offer one merged option, not one binding each;
+    # the heuristic reads its plan step off the marking
+    from insurer_env import ALLOC_PLAN
+    env = _alloc_env()
+    _reset(env)
+    base = HeuristicBase(INSURER_HEURISTICS["insurer_alloc"])
+    done_plan = []
+    while len(done_plan) < len(ALLOC_PLAN):
+        b = env.pn.pn_actions[base(env)]
+        tr = b[2]._id
+        assert tr.startswith('al_')
+        done_plan.append((tr.split('_')[1], b[0][0][1].value['skill']))
+        env.step(base(env))
+    assert done_plan == list(ALLOC_PLAN)
+
+
+class _OpsFirst:
+    """Plays every operation before the last allocation, so that the pool runs
+    empty when only some processes have work: the split leaves parts with
+    nothing enabled. Records the restricted set of every decision."""
+    seen = []
+
+    def __init__(self, env):
+        self.base = HeuristicBase(INSURER_HEURISTICS["insurer_alloc"])
+
+    def choose(self, env, tag=()):
+        B = env.pn.pn_actions
+        ops = [i for i, b in enumerate(B) if not b[2]._id.startswith('al_')]
+        a = ops[0] if ops else self.base(env)
+        _OpsFirst.seen.append((env.pn.sim_only, {b[2]._id for b in B}))
+        self.last = {"base": a}
+        return a
+
+
+def test_dynamic_collection_continues_every_part_alone():
+    _OpsFirst.seen = []
+    comps = episode_components(_alloc_env)
+    assert len(comps) == 1                                  # one static component (the pool couples the region)
+    graphs, total, _ = _collect_one((_alloc_env, _OpsFirst, 5, comps[0], True))
+    parts = {s for s, _ in _OpsFirst.seen if s is not None and s != comps[0]}
+    assert len(parts) == 3                                  # claims, complaints, underwriting, each alone
+    for s, names in _OpsFirst.seen:
+        if s in parts:
+            assert names <= s                               # a part only ever offers its own transitions
+    assert len(graphs) == len(_OpsFirst.seen) and total > 0

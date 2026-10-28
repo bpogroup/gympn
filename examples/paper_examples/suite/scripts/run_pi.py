@@ -54,7 +54,9 @@ days offset by 10 000 k (suffix _cset<k>);
 cf=n0,n1,...: component-factored collection (policy_iteration
 collect_component_decisions): component k of the episode (episode_components
 order, logged) is simulated alone on n_k training days, instead of DAYS whole
-days; allocate simulation where labels are worth most;
+days; allocate simulation where labels are worth most; dyn=1: a component
+is split further where the marking certificate splits it (each part continues
+alone from there; collect_component_decisions dynamic);
 sh=M: Deep Controlled Learning's action selection, Sequential Halving with
 common random numbers and M rollouts per option in total (RolloutPlanner
 sh_budget; use with margin=0, no test). DCL's rounds: round=k base=<the
@@ -105,6 +107,7 @@ RMIN, RCAP = int(opts.get("rmin", 4)), int(opts.get("rcap", 64))
 SETLAB = opts.get("setlab", "0") == "1"
 CF = [int(x) for x in opts["cf"].split(",")] if "cf" in opts else None
 RENORM = opts.get("renorm", "0") == "1"
+DYN = opts.get("dyn", "0") == "1"
 CSET = int(opts.get("cset", 0))
 TEST, MIN_T = int(opts.get("test", 0)), float(opts.get("min_t", 2.0))
 LENGTH, TRAIN_SEED = 20, 2_000_000 + 100_000 * (ROUND - 1) + 10_000 * CSET
@@ -112,7 +115,7 @@ OUTDIR = SUITE / "results" / (f"pi_{ENV}_n{N}_R{R}_d{DAYS}_mc" + (f"_r{ROUND}" i
                          + (f"_m{MARGIN:g}" if MARGIN else "") + ("_fair" if FAIR else "") + (f"_c{CONFIRM}" if CONFIRM else "")
                          + ("_age" if AGE else "") + ("_clk" if CLOCK else "") + ("_mrg" if MERGE else "") + ("_clkn" if CLOCKNODE else "") + (f"_sh{SH}" if SH else "")
                          + (f"_race{RACE:g}z{RZ:g}c{RCAP}" if RACE is not None else "")
-                         + ("_cf" + "-".join(map(str, CF)) if CF else "")
+                         + ("_cf" + "-".join(map(str, CF)) if CF else "") + ("_dyn" if DYN else "")
                          + (f"_cset{CSET}" if CSET else "") + (f"_t{TEST}z{MIN_T:g}" if TEST else ""))
 
 
@@ -206,7 +209,8 @@ def main():
             for k, (m, n) in enumerate(zip(comps, CF)):
                 log(f"component {k}: {n} days, {len(m)} transitions, e.g. {sorted(m)[:3]}")
             tasks = [(TRAIN_SEED + d, m) for m, n in zip(comps, CF) for d in range(n)]
-            graphs = collect_component_decisions(make_env, make_planner, tasks, workers=WORKERS, log=log)
+            graphs = collect_component_decisions(make_env, make_planner, tasks, workers=WORKERS, log=log,
+                                                 dynamic=DYN)
         else:
             graphs = collect_decisions(make_env, make_planner, [TRAIN_SEED + d for d in range(DAYS)],
                                        workers=WORKERS, log=log)
@@ -241,7 +245,7 @@ def main():
     res = {"env": ENV, "N": N, "days": DAYS, "R": R, "epochs": EPOCHS, "tau": TAU, "seed": SEED,
            "lr": LR, "ema": EMA, "extra": EXTRA, "init": INIT, "base": BASE, "round": ROUND,
            "margin": MARGIN, "fair": FAIR, "confirm": CONFIRM, "age": AGE, "clock": CLOCK, "merge": MERGE, "clocknode": CLOCKNODE, "sh": SH, "race": RACE, "rz": RZ, "rstep": RSTEP,
-           "rmin": RMIN, "rcap": RCAP, "setlab": SETLAB, "cf": CF, "renorm": RENORM, "cset": CSET, "test": TEST, "min_t": MIN_T,
+           "rmin": RMIN, "rcap": RCAP, "setlab": SETLAB, "cf": CF, "dyn": DYN, "renorm": RENORM, "cset": CSET, "test": TEST, "min_t": MIN_T,
            "decisions": len(graphs), "history": hist, "selected_epoch": sel,
            "eval_norm_selected": next(e["eval_norm"] for e in hist["evals"] if e["epoch"] == sel),
            "eval_norm_final": hist["evals"][-1]["eval_norm"],

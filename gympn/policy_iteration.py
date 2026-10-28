@@ -28,6 +28,7 @@ heuristic, NetworkBase a policy network.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import math
 import random
@@ -652,21 +653,57 @@ def _collect_one(task):
         for k in ('_flat_meta', '_flat_width', 'metadata'):
             setattr(env.frozen_pn, k, getattr(env.pn, k, None))
         env.pn.sim_only = env.frozen_pn.sim_only = members
-    planner = planner_fn(env)
+    dynamic = len(task) > 4 and task[4]
     random.seed(seed); np.random.seed(seed % 2 ** 32)
     obs = env.reset()
-    graphs, total, changed, step = [], 0.0, 0, 0
-    while env.pn.pn_actions:
-        B = env.pn.pn_actions
-        a = planner.choose(env, tag=(seed, step))
-        changed += a != planner.last["base"]
-        graphs.append(_record(obs['graph'], B, a, planner.last))
-        obs, r, done, _, _ = env.step(a)
-        total += r
-        step += 1
-        if done:
-            break
+    graphs, total, changed = [], 0.0, 0
+    branches = [(env, obs, ())]
+    while branches:                     # dynamic: one branch per component the marking certificate splits off
+        env, obs, br = branches.pop(0)
+        planner = planner_fn(env)
+        step = 0
+        while env.pn.pn_actions:
+            subs = _marking_split(env) if dynamic else []
+            if len(subs) > 1:
+                # The couplings have dissolved: by the marking certificate each
+                # sub-component's future depends on its own marking only, so it
+                # is continued alone, exactly, from here (its own simulation,
+                # observation and planner).
+                for i, m in enumerate(subs):
+                    e = copy.deepcopy(env)
+                    e.pn.sim_only = m
+                    # Its own run up to its first choice (a part may have
+                    # nothing enabled at the split, or a single binding,
+                    # which is fired without asking), as env.step would.
+                    r0 = e.pn.reward
+                    o, done, e.i = e.pn.run_evolutions(e.run, e.i, e.active_model)
+                    total += e.pn.reward - r0
+                    if not done:
+                        branches.append((e, o, br + (i,)))
+                break
+            B = env.pn.pn_actions
+            a = planner.choose(env, tag=(seed, step) if not br else (seed, br, step))
+            changed += a != planner.last["base"]
+            graphs.append(_record(obs['graph'], B, a, planner.last))
+            obs, r, done, _, _ = env.step(a)
+            total += r
+            step += 1
+            if done:
+                break
     return graphs, total, changed
+
+
+def _marking_split(env) -> List[frozenset]:
+    """The components of the marking certificate among the simulated
+    transitions (GymProblem.sim_only, all if None), as member sets in a fixed
+    order; more than one once a coupling has dissolved."""
+    pn = env.pn
+    only = pn.sim_only
+    comps = {}
+    for t, k in pn.net_partition().items():
+        if k is not None and (only is None or t in only):
+            comps.setdefault(k, set()).add(t)
+    return sorted((frozenset(m) for m in comps.values()), key=min)
 
 
 def episode_components(make_env: Callable, seed: int = 0) -> List[frozenset]:
@@ -690,7 +727,7 @@ def episode_components(make_env: Callable, seed: int = 0) -> List[frozenset]:
 
 
 def collect_component_decisions(make_env: Callable, planner_fn: Callable, tasks: Sequence, workers: int = 1,
-                                log: Optional[Callable] = None) -> List:
+                                log: Optional[Callable] = None, dynamic: bool = False) -> List:
     """Component-factored collection: like collect_decisions, but each task
     (seed, members) simulates ONE net component of the episode alone
     (GymProblem.sim_only = members, set before the reset, so the restricted
@@ -700,8 +737,11 @@ def collect_component_decisions(make_env: Callable, planner_fn: Callable, tasks:
     whole net, and its decisions get the labels they would get there; the
     actor's logits for a component read that component only, so they are
     the same on the component's subgraph. Each component can get its own number
-    of days, and every rollout simulates one component only. Returns graphs, in task order."""
-    tasks = [(make_env, planner_fn, int(sd), frozenset(m)) for sd, m in tasks]
+    of days, and every rollout simulates one component only.
+    dynamic: a component is split further once the MARKING certificate splits
+    it (a coupling dissolves, e.g. a start-of-shift pool runs empty): each
+    sub-component continues alone from the split. Returns graphs, in task order."""
+    tasks = [(make_env, planner_fn, int(sd), frozenset(m), dynamic) for sd, m in tasks]
     if workers <= 1:
         out = [_collect_one(t) for t in tasks]
     else:

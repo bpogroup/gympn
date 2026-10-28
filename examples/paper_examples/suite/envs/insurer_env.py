@@ -408,9 +408,11 @@ def _alloc_binding(b):
 def make_alloc_heuristic(plan):
     """Heuristic for the allocation variant: allocate by `plan`, an ordered list
     of (destination, skill), then run the insurer's myopic rule. Step k of a
-    region's allocation is read off the bindings (k = pool size - pool members
-    still enabled), so the heuristic is stateless and works with
-    HeuristicSolver."""
+    region's allocation is read off the marking (k = plan length - pool members
+    left in the region's pool place, which every allocation binding consumes
+    from), so the heuristic is stateless
+    and works with HeuristicSolver. (Not from the bindings: with merged options,
+    pool members with equal skills offer one option, not one binding each.)"""
     plan = list(plan)
 
     def heuristic(observable_net, tokens_comb, bindings=None):
@@ -422,13 +424,8 @@ def make_alloc_heuristic(plan):
                   else None)
             (alloc if ab is not None else ops).append((b, ab))
         if alloc:
-            pool_left = {}
-            for b, _ in alloc:
-                region = str(getattr(b[2], '_id', '')).rsplit('_', 1)[-1]
-                pool_left.setdefault(region, set()).add(id(b[0][0][1]))
             for b, (dest, skill) in alloc:
-                region = str(getattr(b[2], '_id', '')).rsplit('_', 1)[-1]
-                k = len(plan) - len(pool_left[region])
+                k = len(plan) - len(b[0][0][0].marking)     # the binding's pool place
                 if 0 <= k < len(plan) and plan[k] == (dest, skill):
                     return b
             return alloc[0][0]
