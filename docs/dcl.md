@@ -254,6 +254,12 @@ python scripts/run_pi.py env=bpic15 days=40 sh=32 fair=1 merge=1 clocknode=1 tau
 python scripts/run_pi.py env=bpic15 days=40 sh=32 fair=1 merge=1 clocknode=1 tau=0.25 cf=35,24,58,56
 ```
 
+Certificate-factored collection splits a component further when the
+certificate recomputed at the current marking splits it, for example once a
+start-of-shift pool has been allocated (`collect_component_decisions(...,
+dynamic=True)`, the default). `dyn=0` keeps the components of the initial
+marking.
+
 ## See also
 
 - [NF-GAE](./nfgae.md) for net components and the certificate.

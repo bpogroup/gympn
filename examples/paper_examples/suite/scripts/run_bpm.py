@@ -10,7 +10,7 @@ Arms: ppo (SMDP-GAE PPO, one agent), nfgae (net-factored GAE, one agent,
 component turns, credited with its component's return; gympn.component_agents).
 
 Run:  python scripts/run_bpm.py env=insurer N=2 [workers] [seeds=20] [methods=ppo,nfgae]
-                        [epochs=40] [threads=k] [episodes=8] [plr=x] [lam=x] [bs=k] [init=<policy.pth>] [cwarm=k] [rb=k] [cert=static|marking]
+                        [epochs=40] [threads=k] [episodes=8] [plr=x] [lam=x] [bs=k] [init=<policy.pth>] [cwarm=k] [rb=k] [cert=marking|static]
                         [net=aepn|hgt|temb|tembf] [bases=K] [flat=1] [local=1]
                         [beta=0.5]   (SMDP discount, default 0.05; any value but the legacy 0.5 routes to *_beta<val>)
                         [view=full]  (default for aepn: reverse edges + per-layer global attention +
@@ -83,7 +83,8 @@ FLAT = False                   # flat=1: flat graph observations (needs net=temb
 NET = "aepn"                   # net=hgt|temb|tembf|aepn: actor+critic encoder (default aepn; *_aepn dirs, hgt = the old unsuffixed dirs)
 BASES = None                   # bases=K: AEPNStack basis count (default 8; routes to *_b<K>)
 BS = None                      # bs=k: minibatch size override (default Hyper.batch_size; routes to *_bs<k>)
-MARKING = False                # cert=marking: nfgae recomputes the certificate at the current marking (routes to *_mc)
+MARKING = True                 # cert=static|marking: nfgae recomputes the certificate at the current marking (default; *_mc),
+                               # or keeps the one at the initial marking (cert=static, the runs before 2026-10-29)
 VIEW = None                    # view=local|full (*'' / *_fv); default full for aepn (the library default), local otherwise
 AGENT_BATCH = "share"          # abatch=full: component agents each get the full batch size (*_abfull)
 GPU = False                    # gpu=1: PPO updates on the CUDA GPU (Agent.update_device)

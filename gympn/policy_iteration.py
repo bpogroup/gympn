@@ -727,7 +727,7 @@ def episode_components(make_env: Callable, seed: int = 0) -> List[frozenset]:
 
 
 def collect_component_decisions(make_env: Callable, planner_fn: Callable, tasks: Sequence, workers: int = 1,
-                                log: Optional[Callable] = None, dynamic: bool = False) -> List:
+                                log: Optional[Callable] = None, dynamic: bool = True) -> List:
     """Component-factored collection: like collect_decisions, but each task
     (seed, members) simulates ONE net component of the episode alone
     (GymProblem.sim_only = members, set before the reset, so the restricted
@@ -738,9 +738,11 @@ def collect_component_decisions(make_env: Callable, planner_fn: Callable, tasks:
     actor's logits for a component read that component only, so they are
     the same on the component's subgraph. Each component can get its own number
     of days, and every rollout simulates one component only.
-    dynamic: a component is split further once the MARKING certificate splits
-    it (a coupling dissolves, e.g. a start-of-shift pool runs empty): each
-    sub-component continues alone from the split. Returns graphs, in task order."""
+    dynamic (default): a component is split further once the MARKING
+    certificate splits it (a coupling dissolves, e.g. a start-of-shift pool
+    runs empty): each sub-component continues alone from the split. Needs
+    GymProblem.marking_certificate; without it, or with dynamic=False, the
+    components stay the ones at the initial marking. Returns graphs, in task order."""
     tasks = [(make_env, planner_fn, int(sd), frozenset(m), dynamic) for sd, m in tasks]
     if workers <= 1:
         out = [_collect_one(t) for t in tasks]

@@ -29,17 +29,21 @@ critic's attention reads across components (the actor's stays inside its compone
 
 ## Insurer (RQ1): PPO versus NF-GAE
 
+Since 2026-10-29 `run_bpm.py` recomputes the certificate at the current marking by
+default (`*_mc` directories); the commands below add `cert=static` to reproduce the
+runs with the certificate at the initial marking.
+
 ```
-python scripts/run_bpm.py env=insurer        N=1 methods=ppo,nfgae seeds=20 flat=1 threads=1 8
-python scripts/run_bpm.py env=insurer        N=2 methods=ppo,nfgae seeds=20 flat=1 threads=1 10
-python scripts/run_bpm.py env=insurer_shared N=1 methods=ppo,nfgae seeds=10 flat=1 threads=1 8
+python scripts/run_bpm.py env=insurer        N=1 methods=ppo,nfgae seeds=20 flat=1 threads=1 cert=static 8
+python scripts/run_bpm.py env=insurer        N=2 methods=ppo,nfgae seeds=20 flat=1 threads=1 cert=static 10
+python scripts/run_bpm.py env=insurer_shared N=1 methods=ppo,nfgae seeds=10 flat=1 threads=1 cert=static 8
 ```
 
 Per-process controls (one process alone, PPO only; the per-process learner baseline):
 
 ```
 for p in claims underwriting complaints; do
-  python scripts/run_bpm.py env=insurer_$p N=1 methods=ppo seeds=10 flat=1 threads=1 2
+  python scripts/run_bpm.py env=insurer_$p N=1 methods=ppo seeds=10 flat=1 threads=1 cert=static 2
 done
 ```
 
@@ -54,7 +58,7 @@ postponement is unsound and refused), component-scoped postponement (PPO, NF-GAE
 
 ```
 for N in 1 2; do
-  C="env=insurer_slow N=$N seeds=20 flat=1 threads=1"
+  C="env=insurer_slow N=$N seeds=20 flat=1 threads=1 cert=static"
   python scripts/run_bpm.py $C postpone=0         methods=ppo,nfgae 6
   python scripts/run_bpm.py $C postpone=1         methods=ppo       4
   python scripts/run_bpm.py $C postpone=component methods=ppo,nfgae 6
@@ -87,11 +91,11 @@ Results: `results/multisite_protocol_aepn_flat` (AEPN encoder, both arms) and
 ## PPO variants on the 2-region insurer (`results/ablations/`)
 
 ```
-C="env=insurer N=2 methods=ppo seeds=5 flat=1 threads=1"
+C="env=insurer N=2 methods=ppo seeds=5 flat=1 threads=1 cert=static"
 python scripts/run_bpm.py $C episodes=16   5    # ..._eps16_flat
 python scripts/run_bpm.py $C plr=0.00015   4    # ..._plr0.00015_flat
 python scripts/run_bpm.py $C plr=0.0006    4    # ..._plr0.0006_flat (also run with methods=nfgae)
-python scripts/run_bpm.py env=insurer N=2 methods=nfgae seeds=5 flat=1 threads=1 local=1 5   # ..._flat_local (component turns)
+python scripts/run_bpm.py env=insurer N=2 methods=nfgae seeds=5 flat=1 threads=1 cert=static local=1 5   # ..._flat_local (component turns)
 ```
 
 These write to `results/`; the archived copies were moved to `results/ablations/` by hand.

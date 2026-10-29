@@ -19,8 +19,8 @@ python -u scripts/run_pi.py $E $COMMON workers=$W round=1 > $L/plain.log 2>&1
 for s in 1 2; do OMP_NUM_THREADS=2 python -u scripts/run_pi.py $E $COMMON seed=$s name=s$s round=1 > $L/plain_s$s.log 2>&1 & done
 for s in 0 1 2; do OMP_NUM_THREADS=2 python -u scripts/run_pi.py $E $COMMON seed=$s name=rn_s$s renorm=1 round=1 > $L/rn_s$s.log 2>&1 & done
 wait
-python -u scripts/run_pi.py $E $COMMON workers=$W round=1 cf=$CF > $L/cf.log 2>&1
-for s in 1 2; do OMP_NUM_THREADS=2 python -u scripts/run_pi.py $E $COMMON cf=$CF seed=$s name=s$s round=1 > $L/cf_s$s.log 2>&1 & done
+python -u scripts/run_pi.py $E $COMMON workers=$W round=1 cf=$CF dyn=0 > $L/cf.log 2>&1
+for s in 1 2; do OMP_NUM_THREADS=2 python -u scripts/run_pi.py $E $COMMON cf=$CF dyn=0 seed=$s name=s$s round=1 > $L/cf_s$s.log 2>&1 & done
 wait
 python -u scripts/planner_heldout.py env=insurer N=$N workers=$W \
     anchors=results/pi_insurer_n${N}_R8_d40_mc_fair_mrg_clkn_sh32/eval_anchors.json > $L/planner.log 2>&1

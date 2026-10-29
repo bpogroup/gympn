@@ -28,5 +28,5 @@ chain() {  # $1 = log tag, $2 = directory suffix of the method, $3 = its extra a
     done
 }
 chain plain "" "" &
-chain cf _cf35-24-58-56 "cf=35,24,58,56" &
+chain cf _cf35-24-58-56 "cf=35,24,58,56 dyn=0" &
 wait
