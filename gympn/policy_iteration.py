@@ -31,6 +31,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import math
+import pickle
 import random
 from typing import Callable, List, Optional, Sequence
 
@@ -631,12 +632,21 @@ def collect_decisions(make_env: Callable, planner_fn: Callable, seeds: Sequence[
         import multiprocessing as mp
         with mp.get_context("spawn").Pool(workers) as pool:
             out = []
-            for res in pool.imap(_collect_one, tasks):
+            for res in pool.imap(_collect_one_bytes, tasks):
+                res = pickle.loads(res)
                 out.append(res)
                 if log:
                     log(f"collected episode {len(out)}/{len(tasks)}: {len(res[0])} decisions, "
                         f"return {res[1]:.1f}, {res[2]} changed")
     return [g for graphs, _, _ in out for g in graphs]
+
+
+def _collect_one_bytes(task):
+    """_collect_one for a worker pool: the result pickled by value. Sent as tensors,
+    every one of the thousands of small tensors of a collection would be mapped
+    into the parent as its own shared-memory segment (torch's multiprocessing
+    reductions), which exceeds the mapping limit of a Linux node."""
+    return pickle.dumps(_collect_one(task), protocol=pickle.HIGHEST_PROTOCOL)
 
 
 def _collect_one(task):
@@ -750,7 +760,8 @@ def collect_component_decisions(make_env: Callable, planner_fn: Callable, tasks:
         import multiprocessing as mp
         with mp.get_context("spawn").Pool(workers) as pool:
             out = []
-            for res in pool.imap(_collect_one, tasks):
+            for res in pool.imap(_collect_one_bytes, tasks):
+                res = pickle.loads(res)
                 out.append(res)
                 if log:
                     log(f"collected component-day {len(out)}/{len(tasks)}: {len(res[0])} decisions, "
