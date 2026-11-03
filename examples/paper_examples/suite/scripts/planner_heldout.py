@@ -5,7 +5,7 @@ Per day: return, decisions changed, rollout steps simulated, seconds. Every
 finished day is appended to results/planner_heldout_<env>_n<N>.jsonl at once,
 so the run resumes where it stopped.
 
-usage: python scripts/planner_heldout.py env=bpic15|insurer [N=1] [workers=8]
+usage: python scripts/planner_heldout.py env=bpic15|insurer [N=1] [workers=8] [postpone=component]
                                          [anchors=<eval_anchors.json>]
 anchors: normalize with these held-out anchors (e.g. those of the DCL run on
 the same env), so the planner and the networks share one scale.
@@ -27,7 +27,8 @@ sys.path.insert(0, str(SUITE / "envs"))
 opts = dict(a.split("=", 1) for a in sys.argv[1:] if "=" in a)
 ENV, N = opts.get("env", "bpic15"), int(opts.get("N", 1))
 WORKERS = int(opts.get("workers", 8))
-OUT = SUITE / "results" / f"planner_heldout_{ENV}_n{N}.jsonl"
+POSTPONE = opts.get("postpone", "0") == "component"
+OUT = SUITE / "results" / f"planner_heldout_{ENV}_n{N}{'_ppc' if POSTPONE else ''}.jsonl"
 BASE, DAYS = 888_000, 100
 RULES = {"heuristic": None, "sh32": dict(sh_budget=32)}
 
@@ -38,7 +39,10 @@ def _setup():
         from bpic15_env import BPIC15_BUILDERS as B, BPIC15_HEURISTICS as H, bpic15_resample_hidden as rs
     else:
         from insurer_env import INSURER_BUILDERS as B, INSURER_HEURISTICS as H, insurer_resample_hidden as rs
-    return make_env(B[ENV], N, 20, marking_certificate=True), H[ENV], rs
+        if POSTPONE:                   # postpone=component: the waiting heuristic is the base
+            from insurer_env import INSURER_WAIT_HEURISTICS
+            H = {**H, **INSURER_WAIT_HEURISTICS}
+    return make_env(B[ENV], N, 20, POSTPONE, 'component', marking_certificate=True), H[ENV], rs
 
 
 def day(task):

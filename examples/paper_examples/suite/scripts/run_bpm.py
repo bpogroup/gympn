@@ -54,6 +54,7 @@ from common import Hyper, set_seed, extract_metrics, threads_per_worker, beta_ta
 from bpm_envs import BPM_BUILDERS, BPM_HEURISTICS  # noqa: E402
 from insurer_env import INSURER_BUILDERS, INSURER_HEURISTICS  # noqa: E402
 from bpic15_env import BPIC15_BUILDERS, BPIC15_HEURISTICS  # noqa: E402
+from heldout import machine_info  # noqa: E402
 
 BPM_BUILDERS = {**BPM_BUILDERS, **INSURER_BUILDERS, **BPIC15_BUILDERS}
 BPM_HEURISTICS = {**BPM_HEURISTICS, **INSURER_HEURISTICS, **BPIC15_HEURISTICS}
@@ -68,6 +69,7 @@ TEST_EPISODES = 20
 EVAL_SEED = 555_000
 SEEDS = 20
 THREADS = None
+WORKERS = None                 # set in the worker processes (payload), reported in each cell's machine field
 BETA = None                    # SMDP discount override (Hyper.beta if None)
 METHODS = ["ppo", "nfgae"]
 POSTPONE = True
@@ -300,6 +302,7 @@ def _obs_options(pn):
 
 
 def train_cell(method, seed, cfg, logdir, baselines):
+    import torch
     set_seed(seed)
     env = _obs_options(BUILD(N, allow_postpone=POSTPONE))
     env.postpone_scope = POSTPONE_SCOPE
@@ -315,7 +318,8 @@ def train_cell(method, seed, cfg, logdir, baselines):
     m.update({"env": ENV, "N": N, "method": method, "seed": seed,
               "epochs": EPOCHS, "episodes": EPISODES, "eval_seed": EVAL_SEED,
               "baselines": baselines, "minutes": (time.time() - t0) / 60.0,
-              "update_device": "cuda" if GPU else "cpu"})
+              "update_device": "cuda" if GPU else "cpu",
+              "machine": machine_info(workers=WORKERS, threads=torch.get_num_threads())})
     return m
 
 
@@ -323,18 +327,22 @@ def _heldout_scores(method, logdir, name):
     """Greedy returns of the cell's final and best checkpoints on the held-out
     days (envs/heldout.py), or None for component agents / local turns."""
     import torch
-    from heldout import make_env, score_policy, HELDOUT_SEED, HELDOUT_DAYS
-    if method == "agents" or (LOCAL and method == "nfgae"):
+    from heldout import make_env, score_policy, score_component_policy, HELDOUT_SEED, HELDOUT_DAYS
+    if LOCAL and method == "nfgae":
         return None
     env = make_env(BUILD, N, LENGTH, POSTPONE, POSTPONE_SCOPE, FLAT,
                    {"local": False, "full": "edges"}[VIEW], MARKING and method in ("nfgae", "agents"))
     _obs_options(env.pn); _obs_options(env.frozen_pn)
+    score = score_component_policy if method == "agents" else score_policy
     out = {}
     for which in ("final", "best"):
         path = os.path.join(logdir, name, f"{which}_policy.pth")
         if os.path.exists(path):
             pol = torch.load(path, weights_only=False).eval()
-            out[which] = score_policy(env, pol, HELDOUT_SEED, HELDOUT_DAYS)
+            try:
+                out[which] = score(env, pol, HELDOUT_SEED, HELDOUT_DAYS)
+            except Exception as e:          # never lose the cell's training metrics
+                out[which + "_error"] = f"{type(e).__name__}: {e}"
     return out
 
 
@@ -345,6 +353,14 @@ def _paired_anchors():
     f = OUTDIR / "eval_anchors.json"
     if f.exists():
         return json.loads(f.read_text())
+    if getattr(BUILD, "wait_anchor", False):     # insurer slow-mismatch: one scale for every postpone arm
+        from heldout import wait_anchors_on
+        from insurer_env import INSURER_WAIT_HEURISTICS
+        wh = INSURER_WAIT_HEURISTICS[ENV]
+        a = {"eval": wait_anchors_on(BUILD, N, LENGTH, wh, EVAL_SEED, EVAL_DAYS),
+             "heldout": wait_anchors_on(BUILD, N, LENGTH, wh, HELDOUT_SEED, HELDOUT_DAYS)}
+        f.write_text(json.dumps(a, indent=1))
+        return a
     env = make_env(BUILD, N, LENGTH, POSTPONE, POSTPONE_SCOPE)
     a = {"eval": anchors(env, HEUR, EVAL_SEED, EVAL_DAYS),
          "heldout": anchors(env, HEUR, HELDOUT_SEED, HELDOUT_DAYS)}
@@ -354,7 +370,8 @@ def _paired_anchors():
 
 def _worker(payload):
     import torch
-    method, seed, cfg, logdir, baselines, threads = payload
+    global WORKERS
+    method, seed, cfg, logdir, baselines, threads, WORKERS = payload
     torch.set_num_threads(max(1, int(threads)))
     try:
         return (method, seed, train_cell(method, seed, cfg, logdir, baselines), None)
@@ -452,7 +469,7 @@ def main(workers):
         r, h = paired["eval"]["random_mean"], paired["eval"]["heuristic_mean"]
         t0 = time.time()
         with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as ex:
-            futs = [ex.submit(_worker, (m, s, cfg, logdir, baselines, tpw)) for (m, s) in pending]
+            futs = [ex.submit(_worker, (m, s, cfg, logdir, baselines, tpw, workers)) for (m, s) in pending]
             for fut in as_completed(futs):
                 m, s, res, err = fut.result()
                 if err:

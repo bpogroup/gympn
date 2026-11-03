@@ -64,7 +64,13 @@ sh_budget; use with margin=0, no test). DCL's rounds: round=k base=<the
 previous round's policy_tau0.pth> init=<the same> (scripts/run_dcl.sh);
 test=k [min_t=2]: a departure is kept only if k fresh rollouts of it and
 of the base's choice, paired, give a mean advantage above the margin with a t
-statistic of at least min_t (RolloutPlanner test/min_t).
+statistic of at least min_t (RolloutPlanner test/min_t);
+postpone=component: component-scoped postponement (suffix _ppc). Every
+component with an enabled binding offers its own wait option, which the
+lookahead compares like any other option; on the variants where waiting pays
+(insurer_slow), the base policy is the waiting heuristic, and every arm, with
+or without postponement, is normalized with the same anchors (random without
+postponement, the waiting heuristic; heldout.wait_anchors_on).
 All of these add a suffix to the results directory.
 """
 import json
@@ -80,7 +86,7 @@ SUITE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SUITE / "envs"))
 
 from heldout import (make_env as _make_env, anchors, score_policy, EVAL_SEED, EVAL_DAYS,  # noqa: E402
-                     HELDOUT_SEED, HELDOUT_DAYS)
+                     HELDOUT_SEED, HELDOUT_DAYS, machine_info)
 
 opts = dict(a.split("=", 1) for a in sys.argv[1:] if "=" in a)
 ENV, N = opts.get("env", "bpic15"), int(opts.get("N", 1))
@@ -109,10 +115,14 @@ SETLAB = opts.get("setlab", "0") == "1"
 CF = [int(x) for x in opts["cf"].split(",")] if "cf" in opts else None
 RENORM = opts.get("renorm", "0") == "1"
 DYN = opts.get("dyn", "1") == "1"
+POSTPONE = opts.get("postpone", "0")
+if POSTPONE not in ("0", "component"):
+    raise SystemExit(f"postpone must be 0 or component, got {POSTPONE!r}")
+POSTPONE = POSTPONE == "component"
 CSET = int(opts.get("cset", 0))
 TEST, MIN_T = int(opts.get("test", 0)), float(opts.get("min_t", 2.0))
 LENGTH, TRAIN_SEED = 20, 2_000_000 + 100_000 * (ROUND - 1) + 10_000 * CSET
-OUTDIR = SUITE / "results" / (f"pi_{ENV}_n{N}_R{R}_d{DAYS}_mc" + (f"_r{ROUND}" if ROUND > 1 else "")
+OUTDIR = SUITE / "results" / (f"pi_{ENV}_n{N}_R{R}_d{DAYS}_mc" + ("_ppc" if POSTPONE else "") + (f"_r{ROUND}" if ROUND > 1 else "")
                          + (f"_m{MARGIN:g}" if MARGIN else "") + ("_fair" if FAIR else "") + (f"_c{CONFIRM}" if CONFIRM else "")
                          + ("_age" if AGE else "") + ("_clk" if CLOCK else "") + ("_mrg" if MERGE else "") + ("_clkn" if CLOCKNODE else "") + (f"_sh{SH}" if SH else "")
                          + (f"_race{RACE:g}z{RZ:g}c{RCAP}" if RACE is not None else "")
@@ -122,16 +132,30 @@ OUTDIR = SUITE / "results" / (f"pi_{ENV}_n{N}_R{R}_d{DAYS}_mc" + (f"_r{ROUND}" i
 
 def registries():
     from bpm_envs import BPM_BUILDERS, BPM_HEURISTICS
-    from insurer_env import INSURER_BUILDERS, INSURER_HEURISTICS
+    from insurer_env import INSURER_BUILDERS, INSURER_HEURISTICS, INSURER_WAIT_HEURISTICS
     from bpic15_env import BPIC15_BUILDERS, BPIC15_HEURISTICS
-    return ({**BPM_BUILDERS, **INSURER_BUILDERS, **BPIC15_BUILDERS},
-            {**BPM_HEURISTICS, **INSURER_HEURISTICS, **BPIC15_HEURISTICS})
+    heur = {**BPM_HEURISTICS, **INSURER_HEURISTICS, **BPIC15_HEURISTICS}
+    if POSTPONE:                    # the base policy may wait where waiting pays
+        heur.update(INSURER_WAIT_HEURISTICS)
+    return {**BPM_BUILDERS, **INSURER_BUILDERS, **BPIC15_BUILDERS}, heur
+
+
+def _anchors(env, base, days):
+    """Random and heuristic on the given days (on the variants where waiting
+    pays: the same anchors for every arm, heldout.wait_anchors_on)."""
+    builders, heur = registries()
+    if getattr(builders[ENV], "wait_anchor", False):
+        from heldout import wait_anchors_on
+        from insurer_env import INSURER_WAIT_HEURISTICS
+        return wait_anchors_on(builders[ENV], N, LENGTH, INSURER_WAIT_HEURISTICS[ENV], base, days)
+    return anchors(env, heur[ENV], base, days)
 
 
 def make_env():
     """The training/evaluation env of run_bpm's AEPN marking-certificate runs."""
     builders, _ = registries()
-    env = _make_env(builders[ENV], N, LENGTH, flat_obs=True, global_view='edges', marking_certificate=True)
+    env = _make_env(builders[ENV], N, LENGTH, allow_postpone=POSTPONE, postpone_scope='component',
+                    flat_obs=True, global_view='edges', marking_certificate=True)
     env.pn.obs_token_age = env.frozen_pn.obs_token_age = AGE      # (reset starts from frozen_pn)
     env.pn.obs_clock = env.frozen_pn.obs_clock = CLOCK
     env.pn.merge_options = env.frozen_pn.merge_options = MERGE
@@ -185,8 +209,8 @@ def main():
     if fa.exists():
         anc = json.loads(fa.read_text())
     else:
-        anc = {"eval": anchors(env, heur[ENV], EVAL_SEED, EVAL_DAYS),
-               "heldout": anchors(env, heur[ENV], HELDOUT_SEED, HELDOUT_DAYS)}
+        anc = {"eval": _anchors(env, EVAL_SEED, EVAL_DAYS),
+               "heldout": _anchors(env, HELDOUT_SEED, HELDOUT_DAYS)}
         fa.write_text(json.dumps(anc, indent=1))
     nrm = lambda v, a: (v - a["random_mean"]) / (a["heuristic_mean"] - a["random_mean"])
     log(f"anchors random/heuristic: eval {anc['eval']['random_mean']:.2f}/{anc['eval']['heuristic_mean']:.2f}, "
@@ -217,6 +241,8 @@ def main():
                                        workers=WORKERS, log=log)
         torch.save(graphs, fd)
         log(f"{len(graphs)} decisions recorded ({(time.time() - t0) / 60:.0f} min)")
+    collect_min = (time.time() - t0) / 60
+    t1 = time.time()
 
     for d in EXTRA:
         more = torch.load(SUITE / "results" / d / "decisions.pt", weights_only=False)
@@ -232,6 +258,7 @@ def main():
                    seed=SEED, log=log, evaluate=evaluate, eval_every=1, tau=TAU, select="eval_norm",
                    lr=LR, ema=EMA, set_labels=SETLAB, renorm=RENORM)
     ckpts = hist.pop("checkpoints")
+    train_min = (time.time() - t1) / 60
     tag = f"tau{TAU:g}" + ("_rn" if RENORM else "") + (f"_{NAME}" if NAME else "")
     final = make_policy(env)
     with torch.no_grad():
@@ -246,13 +273,15 @@ def main():
     res = {"env": ENV, "N": N, "days": DAYS, "R": R, "epochs": EPOCHS, "tau": TAU, "seed": SEED,
            "lr": LR, "ema": EMA, "extra": EXTRA, "init": INIT, "base": BASE, "round": ROUND,
            "margin": MARGIN, "fair": FAIR, "confirm": CONFIRM, "age": AGE, "clock": CLOCK, "merge": MERGE, "clocknode": CLOCKNODE, "sh": SH, "race": RACE, "rz": RZ, "rstep": RSTEP,
-           "rmin": RMIN, "rcap": RCAP, "setlab": SETLAB, "cf": CF, "dyn": bool(CF) and DYN, "renorm": RENORM, "cset": CSET, "test": TEST, "min_t": MIN_T,
+           "rmin": RMIN, "rcap": RCAP, "setlab": SETLAB, "cf": CF, "dyn": bool(CF) and DYN, "postpone": "component" if POSTPONE else "0", "renorm": RENORM, "cset": CSET, "test": TEST, "min_t": MIN_T,
            "decisions": len(graphs), "history": hist, "selected_epoch": sel,
            "eval_norm_selected": next(e["eval_norm"] for e in hist["evals"] if e["epoch"] == sel),
            "eval_norm_final": hist["evals"][-1]["eval_norm"],
            "heldout_norm_selected": float(nrm(np.mean(ho_sel), anc["heldout"])),
            "heldout_norm_final": float(nrm(np.mean(ho_fin), anc["heldout"])),
-           "heldout_selected": ho_sel, "heldout_final": ho_fin, "minutes": (time.time() - t0) / 60}
+           "heldout_selected": ho_sel, "heldout_final": ho_fin, "minutes": (time.time() - t0) / 60,
+           "collect_minutes": collect_min, "train_minutes": train_min,
+           "machine": machine_info(workers=WORKERS, threads=torch.get_num_threads())}
     (OUTDIR / f"summary_{tag}.json").write_text(json.dumps(res, indent=1))
     log(f"tau={TAU:g}: selected epoch {sel} (eval days {res['eval_norm_selected']:.3f}, selected on them) "
         f"-> held-out {res['heldout_norm_selected']:.3f}; final epoch: eval {res['eval_norm_final']:.3f}, "

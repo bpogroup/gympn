@@ -220,6 +220,8 @@ class ComponentAgents:
             if verbose > 0:
                 print(f"\rEpoch {i + 1}/{epochs} - mean_returns: {R.mean():.4f} - agents: {len(self.agents)}",
                       end="\n" if i + 1 == epochs else "")
+        if logdir is not None:                       # the last epoch's policies, as Agent.train
+            self.save_policy_network(os.path.join(logdir, "final_policy.pth"))
         if test_env is not None and logdir is not None and self.best_test_metric > float('-inf'):
             self.load_best(logdir)
         return history

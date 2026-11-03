@@ -290,6 +290,59 @@ def insurer_wait_choice(pn_actions, part, mismatch):
     return real[0][0]
 
 
+def make_wait_heuristic(mismatch):
+    """The waiting heuristic of insurer_wait_choice as a gympn heuristic (an
+    index into the offered bindings), for HeuristicSolver and HeuristicBase.
+    If only mismatched underwriting assignments are left, it selects the first
+    offered component postpone: a component is only offered one while it has
+    an enabled binding, so every offered postpone then belongs to an
+    underwriting process."""
+    def heuristic(observable_net, tokens_comb, bindings=None):
+        real = [(i, b) for i, b in enumerate(bindings) if not _is_postpone(b)]
+        ok = [(_binding_rate(b, mismatch) or 0.0, i) for i, b in real if not _is_uw_mismatch(b)]
+        if ok:
+            return max(ok)[1]
+        wait = [i for i, b in enumerate(bindings) if _is_postpone(b)]
+        return wait[0] if wait else real[0][0]
+    return heuristic
+
+
+def make_threshold_heuristic(mismatch, k):
+    """A threshold policy in the spirit of Lin and Kumar (1984) for the
+    slow-mismatch variant: the best-rate binding that is not a mismatched
+    underwriting assignment is taken whenever there is one; otherwise, a
+    mismatched underwriter is assigned only if at least k tasks of that type
+    are waiting in its process (the queue of its matching underwriter), and the
+    process waits otherwise. k = 1 is the work-conserving heuristic, k = inf
+    the waiting heuristic of make_wait_heuristic."""
+    def heuristic(observable_net, tokens_comb, bindings=None):
+        real = [(i, b) for i, b in enumerate(bindings) if not _is_postpone(b)]
+        ok = [(_binding_rate(b, mismatch) or 0.0, i) for i, b in real if not _is_uw_mismatch(b)]
+        if ok:
+            return max(ok)[1]
+        # only mismatched underwriting assignments are left: count the waiting
+        # tasks of every (process, task type) among the offered bindings
+        queue = {}
+        for i, b in real:
+            tr = str(getattr(b[2], '_id', ''))
+            toks = [tok for (_p, tok) in b[0]]
+            task = next((t for t in toks if 'task_type' in getattr(t, 'value', {})), None)
+            if task is not None:
+                queue.setdefault((tr, task.value['task_type']), set()).add(id(task))
+        over = []
+        for i, b in real:
+            tr = str(getattr(b[2], '_id', ''))
+            toks = [tok for (_p, tok) in b[0]]
+            task = next((t for t in toks if 'task_type' in getattr(t, 'value', {})), None)
+            if task is not None and len(queue[(tr, task.value['task_type'])]) >= k:
+                over.append((_binding_rate(b, mismatch) or 0.0, i))
+        if over:
+            return max(over)[1]
+        wait = [i for i, b in enumerate(bindings) if _is_postpone(b)]
+        return wait[0] if wait else real[0][0]
+    return heuristic
+
+
 def wait_anchors(build, n, length, episodes=40):
     """Anchors for the slow-mismatch variant: random = uniform over production
     bindings (no postpone), heuristic = the waiting heuristic (component
@@ -465,3 +518,6 @@ _alloc_builder.wait_anchor = False
 INSURER_BUILDERS["insurer_alloc"] = _alloc_builder
 INSURER_HEURISTICS = {name: insurer_heuristic for name in INSURER_BUILDERS}
 INSURER_HEURISTICS["insurer_alloc"] = alloc_heuristic
+# the waiting heuristic of the variants where waiting pays (component postpone)
+INSURER_WAIT_HEURISTICS = {name: make_wait_heuristic(b.uw_mismatch)
+                           for name, b in INSURER_BUILDERS.items() if getattr(b, "wait_anchor", False)}

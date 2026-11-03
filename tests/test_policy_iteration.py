@@ -14,7 +14,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..",
 
 from gympn.environment import AEPN_Env  # noqa: E402
 from gympn.policy_iteration import (HeuristicBase, NetworkBase, RolloutPlanner, option_key,  # noqa: E402
-                                    collect_decisions, class_nll, distill, _collect_one, episode_components)
+                                    collect_decisions, class_nll, distill, _collect_one, episode_components,
+                                    _is_postpone)
 from gympn.train import make_parser, make_policy_network  # noqa: E402
 from insurer_env import INSURER_BUILDERS, INSURER_HEURISTICS  # noqa: E402
 
@@ -634,3 +635,59 @@ def test_dynamic_collection_continues_every_part_alone():
         if s in parts:
             assert names <= s                               # a part only ever offers its own transitions
     assert len(graphs) == len(_OpsFirst.seen) and total > 0
+
+
+def _slow_env(length=8, regions=1):
+    pn = INSURER_BUILDERS["insurer_slow"](regions, allow_postpone=True)
+    pn.postpone_scope = 'component'
+    pn.length = length
+    pn.flat_obs, pn.global_view, pn.marking_certificate = True, 'edges', True
+    pn.merge_options = True
+    return AEPN_Env(pn)
+
+
+def _uw_component(env):
+    part = env.pn.net_partition()
+    return {part[t] for t in part if t.startswith('uw_')}
+
+
+def test_waiting_heuristic_waits_only_in_underwriting():
+    from insurer_env import INSURER_WAIT_HEURISTICS, _is_uw_mismatch
+    env = _slow_env(regions=2)
+    _reset(env)
+    base = HeuristicBase(INSURER_WAIT_HEURISTICS["insurer_slow"])
+    waits = 0
+    while env.pn.pn_actions:
+        B = env.pn.pn_actions
+        a = base(env)
+        if _is_postpone(B[a]):
+            waits += 1
+            assert B[a][2].comp in _uw_component(env)          # only underwriting waits
+            assert all(_is_uw_mismatch(b) for b in B if not _is_postpone(b))
+        _, _, done, _, _ = env.step(a)
+        if done:
+            break
+    assert waits > 0
+
+
+def test_planner_compares_waiting_like_any_option():
+    # a wait is an option of its component: the lookahead's choice, wait or
+    # binding, always lies in the component of the base policy's choice, and
+    # where the base waits, the lookahead compares the wait with the bindings
+    from insurer_env import INSURER_WAIT_HEURISTICS
+    env = _slow_env()
+    _reset(env, seed=5)
+    pl = RolloutPlanner(HeuristicBase(INSURER_WAIT_HEURISTICS["insurer_slow"]), rollouts=2,
+                        component=True, seed=1)
+    comp = lambda b, part: b[2].comp if _is_postpone(b) else part[b[2]._id]  # noqa: E731
+    base_waits = 0
+    while env.pn.pn_actions:
+        B, part = env.pn.pn_actions, env.pn.net_partition()
+        a = pl.choose(env, tag=(0,))
+        b = B[pl.last["base"]]
+        assert comp(B[a], part) == comp(b, part)
+        base_waits += _is_postpone(b)
+        _, _, done, _, _ = env.step(a)
+        if done:
+            break
+    assert base_waits > 0
