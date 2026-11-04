@@ -1,0 +1,81 @@
+{
+  "env": "insurer_alloc",
+  "N": 1,
+  "baselines": {
+    "random_mean": 37.575,
+    "heuristic_mean": 53.775,
+    "random_std": 3.2854794170714263,
+    "heuristic_std": 2.1964459929622673,
+    "episodes": 40
+  },
+  "paired_anchors": {
+    "eval": {
+      "seed": 555000,
+      "days": 20,
+      "random_mean": 35.5,
+      "heuristic_mean": 55.1
+    },
+    "heldout": {
+      "seed": 888000,
+      "days": 100,
+      "random_mean": 36.19,
+      "heuristic_mean": 54.35
+    }
+  },
+  "rows": {
+    "ppo": {
+      "n": 1,
+      "final_mean": -0.05867346938775503,
+      "final_sd": 0.0,
+      "heldout_final_mean": -0.0870044052863435,
+      "heldout_best_mean": -0.0870044052863435,
+      "collapsed": 1,
+      "entropy_final": 0.9535539096051996,
+      "finals": [
+        -0.05867346938775503
+      ],
+      "heldout_finals": [
+        -0.0870044052863435
+      ],
+      "heldout_bests": [
+        -0.0870044052863435
+      ]
+    },
+    "nfgae": {
+      "n": 1,
+      "final_mean": 0.09948979591836749,
+      "final_sd": 0.0,
+      "heldout_final_mean": 0.09361233480176225,
+      "heldout_best_mean": 0.09361233480176225,
+      "collapsed": 1,
+      "entropy_final": 0.9450471798578898,
+      "finals": [
+        0.09948979591836749
+      ],
+      "heldout_finals": [
+        0.09361233480176225
+      ],
+      "heldout_bests": [
+        0.09361233480176225
+      ]
+    },
+    "agents": {
+      "n": 1,
+      "final_mean": -0.01785714285714293,
+      "final_sd": 0.0,
+      "heldout_final_mean": -0.046255506607929306,
+      "heldout_best_mean": -0.046255506607929306,
+      "collapsed": 1,
+      "entropy_final": 0.9046421163369224,
+      "finals": [
+        -0.01785714285714293
+      ],
+      "heldout_finals": [
+        -0.046255506607929306
+      ],
+      "heldout_bests": [
+        -0.046255506607929306
+      ]
+    }
+  }
+}

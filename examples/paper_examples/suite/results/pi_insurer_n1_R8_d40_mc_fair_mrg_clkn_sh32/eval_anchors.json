@@ -1,0 +1,15 @@
+{
+ "heldout": {
+  "seed": 888000,
+  "days": 100,
+  "random_mean": 39.84,
+  "heuristic_mean": 54.35
+ },
+ "eval": {
+  "seed": 555000,
+  "days": 20,
+  "random_mean": 41.4,
+  "heuristic_mean": 55.1
+ },
+ "note": "transcribed from Snellius results/snellius_ins1 (job insurer_dcl.sbatch N=1), 2026-11-02; only the held-out fields"
+}

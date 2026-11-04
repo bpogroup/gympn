@@ -41,7 +41,7 @@ held-out days with random = 0 and heuristic = 1:
 
 1. The base policy picks an action. The planner takes the **net component**
    that action belongs to (`GymProblem.net_partition()`, the static or the
-   marking certificate; see [NF-GAE](./nfgae.md#net-components)).
+   marking certificate; see [the certificate](./nfgae.md#net-components-and-the-certificate)).
 2. It plays every distinct **option** of that component out to the end of the
    episode with the base policy. An option is a class of equivalent bindings:
    same transition, same token values (`option_key`).
@@ -255,8 +255,9 @@ python scripts/run_pi.py env=bpic15 days=40 sh=32 fair=1 merge=1 clocknode=1 tau
 ```
 
 Certificate-factored collection splits a component further when the
-certificate recomputed at the current marking splits it, for example once a
-start-of-shift pool has been allocated (`collect_component_decisions(...,
+certificate recomputed at the current marking splits it (see
+[the certificate along a run](./nfgae.md#the-certificate-along-a-run)), for
+example once a start-of-shift pool has been allocated (`collect_component_decisions(...,
 dynamic=True)`, the default). `dyn=0` keeps the components of the initial
 marking.
 

@@ -1,0 +1,4 @@
+held-out anchors random 36.19 heuristic 54.35
+  PPO                              n=10  selected 0.910  final 0.845  last10 0.832
+  NF-GAE, marking, forward only    n=10  selected 0.803  final 0.782  last10 0.769
+  NF-GAE, marking, component       n=10  selected 1.034  final 1.043  last10 1.036

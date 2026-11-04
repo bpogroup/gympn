@@ -1,0 +1,81 @@
+{
+  "env": "bpic15",
+  "N": 1,
+  "baselines": {
+    "random_mean": 37.35,
+    "heuristic_mean": 56.375,
+    "random_std": 4.709299310937881,
+    "heuristic_std": 3.291561179744347,
+    "episodes": 40
+  },
+  "paired_anchors": {
+    "eval": {
+      "seed": 555000,
+      "days": 20,
+      "random_mean": 37.4,
+      "heuristic_mean": 54.75
+    },
+    "heldout": {
+      "seed": 888000,
+      "days": 100,
+      "random_mean": 38.73,
+      "heuristic_mean": 55.3
+    }
+  },
+  "rows": {
+    "ppo": {
+      "n": 1,
+      "final_mean": -0.05763688760806916,
+      "final_sd": 0.0,
+      "heldout_final_mean": -0.08509354254677107,
+      "heldout_best_mean": -0.08509354254677107,
+      "collapsed": 1,
+      "entropy_final": 0.9762416741786859,
+      "finals": [
+        -0.05763688760806916
+      ],
+      "heldout_finals": [
+        -0.08509354254677107
+      ],
+      "heldout_bests": [
+        -0.08509354254677107
+      ]
+    },
+    "nfgae": {
+      "n": 1,
+      "final_mean": 0.4726224783861673,
+      "final_sd": 0.0,
+      "heldout_final_mean": 0.5069402534701271,
+      "heldout_best_mean": 0.5069402534701271,
+      "collapsed": 0,
+      "entropy_final": 0.9547221981562101,
+      "finals": [
+        0.4726224783861673
+      ],
+      "heldout_finals": [
+        0.5069402534701271
+      ],
+      "heldout_bests": [
+        0.5069402534701271
+      ]
+    },
+    "agents": {
+      "n": 1,
+      "final_mean": 0.5043227665706052,
+      "final_sd": 0.0,
+      "heldout_final_mean": 0.49849124924562493,
+      "heldout_best_mean": 0.49849124924562493,
+      "collapsed": 0,
+      "entropy_final": 0.9088729109507385,
+      "finals": [
+        0.5043227665706052
+      ],
+      "heldout_finals": [
+        0.49849124924562493
+      ],
+      "heldout_bests": [
+        0.49849124924562493
+      ]
+    }
+  }
+}

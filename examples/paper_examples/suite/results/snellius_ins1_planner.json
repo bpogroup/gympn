@@ -1,0 +1,7 @@
+{
+ "heldout_days": 100,
+ "sh32_mean": 56.22,
+ "heuristic_mean": 54.35,
+ "random_mean": 39.84,
+ "note": "transcribed from Snellius results/snellius_ins1 (job insurer_dcl.sbatch N=1), 2026-11-02; only the held-out fields"
+}

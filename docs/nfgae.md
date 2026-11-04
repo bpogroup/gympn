@@ -24,30 +24,72 @@ when every part is individually easy.
 NF-GAE removes this noise by crediting each decision only with the rewards of
 its own part of the net.
 
-## Net components
+## Net components and the certificate
 
 gympn derives the parts from the net itself. Build the undirected graph whose
 nodes are the places and transitions, with an edge between a place and every
 transition that consumes from or produces into it. Its connected components
 are the **net components**. Two transitions that share any place, be it a
-queue, a resource pool or a counter, are in the same component. The partition
-depends only on the net structure, never on the marking or on what happened
-during an episode.
+queue, a resource pool or a counter, are in the same component.
 
-Transitions that can never fire are pruned before the partition is computed
-(a transition is live when all its input places can ever be marked). This
-matters when an empty place would otherwise glue independent parts together.
+Transitions that can never fire again are removed before the components are
+computed. Given a marking `M`, a place is *markable* if it is marked in `M` or
+produced into by a live transition, and a transition is *live* if all its
+input places are markable (the smallest such set). This over-approximates
+what can fire, because it ignores token counts and guards, so a transition it
+calls dead never fires under any policy. Without the pruning, an empty place
+such as a flexible pool that has been handed out would keep gluing
+independent parts together.
+
+The partition at `M` is the **independence certificate**: as long as no live
+transition crosses a component boundary, the future of each component depends
+only on its own marking and its own decisions. This is what NF-GAE, the
+rollout planner and component-scoped postponement rely on.
+
+### The certificate along a run
+
+A transition that cannot fire from `M` cannot fire from any marking reachable
+from `M`, because every place marked later was markable from `M`. So along a
+run the certificate only **refines**: components split, and never merge. A
+decision's component therefore contains every component its consequences can
+reach later, and crediting the decision with the rewards of that component and
+of the parts it splits into is exact.
+
+gympn offers the certificate in two forms:
+
+- **At the initial marking** (the default for `GymProblem`). The partition is
+  computed once, at first use, and fixed for the episode.
+- **At the current marking** (`marking_certificate=True`). The partition is
+  recomputed whenever the set of marked places changes (and cached per set),
+  so a component splits as soon as a coupling dissolves.
+
+The first form is the second one evaluated at `M0` only. On a net where nothing
+dissolves during a run the two give the same components and the same
+advantages; recomputing costs a fixed-point pass over the transitions when the
+set of marked places changes, which is small next to an encoder forward pass.
+
+Example: a region of an insurer has claims, complaints and underwriting
+processes, plus a pool of flexible staff assigned to them at the start of the
+shift. While the pool holds staff, the allocation transitions join the three
+processes into one component. Once the pool is empty, the allocation
+transitions are dead (nothing refills the pool), and the certificate at the
+current marking splits the region into three components; the certificate at
+the initial marking keeps one per region for the whole day.
 
 Inspect the partition of a problem:
 
 ```python
-partition = problem.net_partition()      # transition id -> component index
-print(sorted(set(partition.values())))   # e.g. [0, 1, 2]
+partition = problem.net_partition()      # transition id -> component index (None: dead)
+print(sorted({c for c in partition.values() if c is not None}))   # e.g. [0, 1, 2]
 ```
 
-If this prints a single component, NF-GAE reduces exactly to PPO and there is
-nothing to gain. If it prints several, every one of them has its own queues,
-resources and rewards, and NF-GAE applies.
+With `marking_certificate` on, component indices are renumbered when the
+partition refines; `problem.net_component_members(c)` gives a component's live
+transitions as a frozenset, which is the stable name of a component.
+
+If the partition has a single component, NF-GAE reduces exactly to PPO and
+there is nothing to gain. If it has several, every one of them has its own
+queues, resources and rewards, and NF-GAE applies.
 
 ## What NF-GAE computes
 
@@ -58,12 +100,19 @@ gympn's SMDP variant of GAE discounts the continuation after a decision by
 with rate `beta`. With `beta=0` nothing is discounted.
 
 NF-GAE runs one such SMDP-GAE per component, on that component's own decision
-clock. For a component `c` with decision steps `t_1 < t_2 < ...`:
+clock. For a component `c` with decision steps `t_1 < t_2 < ...` (certificate
+at the initial marking):
 
 - `R_i` is the reward produced by `c`'s own events between `t_i` and `t_{i+1}`;
 - `d_i = exp(-beta * (time[t_{i+1}] - time[t_i]))`, and 0 after `c`'s last decision;
 - `delta_i = R_i + d_i * V_c(s_{t_{i+1}}) - V_c(s_{t_i})`;
 - `A_i = delta_i + lam * d_i * A_{i+1}`.
+
+With the certificate at the current marking, a component that splits hands its
+future to its parts: the successors of its last decision are the first
+decisions of each part, and the rewards of transitions no part covers run to
+the end of the episode. With `lam=1` this telescopes to the component's
+discounted return minus its value, as in the static case.
 
 The critic is component-indexed: `V_c` is read by pooling the critic's node
 embeddings over component `c`'s action nodes only, and it is regressed on
@@ -120,6 +169,7 @@ problem.training_run(length=20, args_dict={
 | `smdp_discount` | `False` | Discount by `exp(-beta * tau)` per sojourn instead of a constant `gam`. |
 | `beta` | `0.05` | SMDP discount rate. Ignored when `smdp_discount` is off. |
 | `lam` | `0.99` | GAE lambda, as in PPO. |
+| `marking_certificate` | `False` | Recompute the certificate at the current marking (see [the certificate along a run](#the-certificate-along-a-run)). Requires `nfgae`. |
 | `local_obs` | `False` | Component turns: each decision observes and encodes only its own component (see below). |
 
 The same flags work on the command line of a training script:
@@ -181,7 +231,8 @@ one process does influence the other.
 
 ## When to use it
 
-- **Use it** when `net_partition()` reports more than one component. The gain
+- **Use it** when `net_partition()` reports more than one component, or when
+  components appear during a run (then with `marking_certificate=True`). The gain
   grows with the number of components, and it costs nothing at one.
 - **It is not a substitute** for a good model of the coupling. If two parts
   interact through a shared place, they form one component and are credited

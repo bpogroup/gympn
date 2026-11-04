@@ -1,0 +1,24 @@
+{
+ "note": "slow mismatch WITHOUT postponement, round 1, Snellius rounds array of 2026-11-03 run with the committed run_pi.py (postpone option ignored); collections cset1-3, seed = collection; run anchors held-out random 33.17 / heuristic without waiting 51.29, mapped to the paper's 33.88 / 54.61 (waiting heuristic)",
+ "dcl_final_run": [
+  1.142935982339956,
+  1.1208609271523178,
+  1.1434878587196469
+ ],
+ "nfdcl_final_run": [
+  1.142935982339956,
+  1.120309050772627,
+  1.1346578366445914
+ ],
+ "dcl_final": [
+  0.9647853352629041,
+  0.9454896285576458,
+  0.9652677279305355
+ ],
+ "nfdcl_final": [
+  0.9647853352629041,
+  0.9450072358900145,
+  0.9575494452484321
+ ],
+ "p_welch": 0.7694596622791994
+}

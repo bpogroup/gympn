@@ -49,3 +49,6 @@ examples/paper_examples/suite/**/train/
 # The BPM manuscript is an Overleaf clone (paper/bpm/); it is versioned on
 # Overleaf, not here. The figure script and notes next to it stay tracked.
 examples/paper_examples/suite/paper/bpm/
+
+# Raw labeled collections of the DCL runs (hundreds of MB each; regenerable with run_pi.py)
+examples/paper_examples/suite/results/**/*.pt

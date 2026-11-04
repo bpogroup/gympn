@@ -1,0 +1,25 @@
+{
+  "env": "bpic15",
+  "N": 1,
+  "baselines": {
+    "random_mean": 37.35,
+    "heuristic_mean": 56.375,
+    "random_std": 4.709299310937881,
+    "heuristic_std": 3.291561179744347,
+    "episodes": 40
+  },
+  "rows": {
+    "nfgae": {
+      "n": 2,
+      "final_mean": 0.7069645203679368,
+      "final_sd": 0.0371672421123021,
+      "best_mean": 0.7371879106438896,
+      "collapsed": 0,
+      "entropy_final": 0.6659153316489155,
+      "finals": [
+        0.7332457293035478,
+        0.6806833114323257
+      ]
+    }
+  }
+}

@@ -82,7 +82,9 @@ A net often contains parts that share no place: separate processes, each with
 its own queue and resources. `GymProblem.net_partition()` returns these
 connected components of the place-transition graph (transitions that can never
 fire are pruned first). Two transitions that share any place, such as a queue
-or a resource pool, are in the same component.
+or a resource pool, are in the same component. See
+[the certificate](./nfgae.md#net-components-and-the-certificate) for the
+definition and for the version recomputed at the current marking.
 
 With the default global postponement, choosing postpone freezes every
 component until the next event. With component-scoped postponement, every

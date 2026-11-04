@@ -1,0 +1,45 @@
+{
+  "env": "bpic15",
+  "N": 1,
+  "baselines": {
+    "random_mean": 37.35,
+    "heuristic_mean": 56.375,
+    "random_std": 4.709299310937881,
+    "heuristic_std": 3.291561179744347,
+    "episodes": 40
+  },
+  "paired_anchors": {
+    "eval": {
+      "seed": 555000,
+      "days": 20,
+      "random_mean": 37.4,
+      "heuristic_mean": 54.75
+    },
+    "heldout": {
+      "seed": 888000,
+      "days": 100,
+      "random_mean": 38.73,
+      "heuristic_mean": 55.3
+    }
+  },
+  "rows": {
+    "nfgae": {
+      "n": 1,
+      "final_mean": 0.9394812680115275,
+      "final_sd": 0.0,
+      "heldout_final_mean": 0.9070609535304768,
+      "heldout_best_mean": 1.0102595051297527,
+      "collapsed": 0,
+      "entropy_final": 0.3140746093377834,
+      "finals": [
+        0.9394812680115275
+      ],
+      "heldout_finals": [
+        0.9070609535304768
+      ],
+      "heldout_bests": [
+        1.0102595051297527
+      ]
+    }
+  }
+}

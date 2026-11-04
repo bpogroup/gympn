@@ -30,7 +30,10 @@ WORKERS = int(opts.get("workers", 8))
 POSTPONE = opts.get("postpone", "0") == "component"
 OUT = SUITE / "results" / f"planner_heldout_{ENV}_n{N}{'_ppc' if POSTPONE else ''}.jsonl"
 BASE, DAYS = 888_000, 100
-RULES = {"heuristic": None, "sh32": dict(sh_budget=32)}
+RULES = {"heuristic": None, "sh32": dict(sh_budget=32),
+         "u8t32": dict(rollouts=8, test=32, min_t=2.0, margin=0.5)}   # uniform 8 per option, paired test of 32
+if "rules" in opts:
+    RULES = {k: v for k, v in RULES.items() if k in opts["rules"].split(",")}
 
 
 def _setup():

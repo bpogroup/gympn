@@ -1,0 +1,68 @@
+{
+ "Insurer, 1 region": {
+  "run": "pi_insurer_n1_R8_d4_mc_fair_mrg_clkn_sh32",
+  "decisions": 270,
+  "multi_component": 0.6518518518518519,
+  "other_share": 0.38506739120240563,
+  "components_with_options": 1.9185185185185185,
+  "options": 9.91851851851852,
+  "other_options": 5.140740740740741,
+  "own_options": 4.777777777777778,
+  "classes": 4.777777777777778
+ },
+ "Insurer, 2 regions": {
+  "run": "pi_insurer_n2_R8_d4_mc_fair_mrg_clkn_sh32",
+  "decisions": 550,
+  "multi_component": 0.8163636363636364,
+  "other_share": 0.5534303960745985,
+  "components_with_options": 3.129090909090909,
+  "options": 17.46727272727273,
+  "other_options": 12.543636363636363,
+  "own_options": 4.923636363636364,
+  "classes": 4.923636363636364
+ },
+ "Allocation, 1 region": {
+  "run": "pi_insurer_alloc_n1_R8_d40_mc_fair_mrg_clkn_sh32",
+  "decisions": 2850,
+  "multi_component": 0.527719298245614,
+  "other_share": 0.32102228725427073,
+  "components_with_options": 1.7150877192982457,
+  "options": 9.830877192982456,
+  "other_options": 4.286666666666667,
+  "own_options": 5.54421052631579,
+  "classes": 5.54421052631579
+ },
+ "Allocation, 2 regions": {
+  "run": "pi_insurer_alloc_n2_R8_d40_mc_fair_mrg_clkn_sh32",
+  "decisions": 5709,
+  "multi_component": 0.8444561219127693,
+  "other_share": 0.5323327099847321,
+  "components_with_options": 2.956734979856367,
+  "options": 16.813452443510247,
+  "other_options": 11.334734629532317,
+  "own_options": 5.47871781397793,
+  "classes": 5.47871781397793
+ },
+ "Slow mismatch, 1 region": {
+  "run": "pi_insurer_slow_n1_R8_d40_mc_ppc_fair_mrg_clkn_sh32",
+  "decisions": 3064,
+  "multi_component": 0.6612271540469974,
+  "other_share": 0.3799861036532853,
+  "components_with_options": 1.927219321148825,
+  "options": 11.960509138381202,
+  "other_options": 6.294386422976501,
+  "own_options": 5.6661227154047,
+  "classes": 5.6661227154047
+ },
+ "Municipalities": {
+  "run": "pi_bpic15_n1_R8_d40_mc_fair_mrg_clkn_sh32",
+  "decisions": 7047,
+  "multi_component": 0.826876685114233,
+  "other_share": 0.5267410454345169,
+  "components_with_options": 2.920249751667376,
+  "options": 12.62892010784731,
+  "other_options": 8.316304810557684,
+  "own_options": 4.312615297289627,
+  "classes": 4.312615297289627
+ }
+}
