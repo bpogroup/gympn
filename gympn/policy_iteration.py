@@ -41,7 +41,7 @@ import torch
 __all__ = ["HeuristicBase", "NetworkBase", "RolloutPlanner", "option_key", "collect_decisions",
            "soft_targets", "distill", "class_nll", "soft_class_nll", "advantage_loss",
            "advantage_loss_from_probs", "unlabelled_record",
-           "set_class_nll", "episode_components", "collect_component_decisions"]
+           "set_class_nll", "episode_components", "collect_component_decisions", "nf_dcl"]
 
 
 # --------------------------------------------------------------------------- base policies
@@ -767,6 +767,32 @@ def collect_component_decisions(make_env: Callable, planner_fn: Callable, tasks:
                     log(f"collected component-day {len(out)}/{len(tasks)}: {len(res[0])} decisions, "
                         f"return {res[1]:.1f}, {res[2]} changed")
     return [g for graphs, _, _ in out for g in graphs]
+
+
+def nf_dcl(make_env: Callable, planner_fn: Callable, policy, days=40, seed: int = 0, workers: int = 1,
+           dynamic: bool = True, log: Optional[Callable] = None, **distill_kwargs):
+    """One round of net-factored DCL (NF-DCL): the net's components
+    (episode_components) are simulated and labelled alone
+    (collect_component_decisions) and `policy` is trained on their decisions
+    (distill).
+    days: the component-days of every component (an int), or one number per
+    component, in the order of episode_components. Component-day d of a
+    component is played from seed + d, so the components share their days.
+    dynamic: see collect_component_decisions. distill_kwargs go to distill
+    (epochs, tau, lr, evaluate, select, ...).
+    For a further round, pass a planner_fn whose base is NetworkBase(policy)
+    and another seed. make_env() and planner_fn(env) must be picklable when
+    workers > 1. Returns (graphs, history): the labelled decisions and
+    distill's history."""
+    comps = episode_components(make_env)
+    if isinstance(days, int):
+        days = [days] * len(comps)
+    days = [int(n) for n in days]
+    if len(days) != len(comps):
+        raise ValueError(f"days has {len(days)} entries, the net has {len(comps)} components")
+    tasks = [(seed + d, m) for m, n in zip(comps, days) for d in range(n)]
+    graphs = collect_component_decisions(make_env, planner_fn, tasks, workers=workers, log=log, dynamic=dynamic)
+    return graphs, distill(policy, graphs, log=log, **distill_kwargs)
 
 
 # --------------------------------------------------------------------------- distillation

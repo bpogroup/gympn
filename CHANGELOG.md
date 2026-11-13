@@ -6,6 +6,8 @@ All notable changes to gympn are recorded here. The format follows
 
 ## Unreleased
 
+## 0.2.0 - 2026-11-13
+
 ### Added
 
 - Component agents (`gympn.component_agents`, `--component_agents true`): one
@@ -90,6 +92,8 @@ All notable changes to gympn are recorded here. The format follows
   keep an episode's own `sim_only` restriction. On bpic15 (100 held-out
   days, heuristic = 1): DCL 1.22, component-local loss 1.28, factored 1.29-1.31 at about half the
   collection time.
+  `nf_dcl` runs one round in one call: the components, their
+  component-days and the distillation.
 - Docs: a Deep Controlled Learning guide (`docs/dcl.md`) and a policy
   iteration API page.
   `advantage_loss` / `advantage_loss_from_probs` (minus the expected

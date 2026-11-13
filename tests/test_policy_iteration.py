@@ -525,6 +525,22 @@ def test_component_factored_collection_stays_in_its_component():
     assert graphs and all(hasattr(g, 't_cls_a') for g in graphs)
 
 
+def test_nf_dcl_collects_every_component_and_trains():
+    """nf_dcl: the decisions are those of collect_component_decisions on
+    `days` component-days per component from seed on, and the policy is
+    trained on them; days must have one entry per component."""
+    from gympn.policy_iteration import episode_components, collect_component_decisions, nf_dcl
+    comps = episode_components(_two_region_make_env)
+    pol = _policy(_two_region_make_env())
+    graphs, hist = nf_dcl(_two_region_make_env, _two_region_planner, pol, days=1, seed=3,
+                          epochs=4, lr=3e-3, batch_size=16)
+    ref = collect_component_decisions(_two_region_make_env, _two_region_planner, [(3, m) for m in comps])
+    assert len(graphs) == len(ref) and [g.t_keys for g in graphs] == [g.t_keys for g in ref]
+    assert hist["loss"][-1] < hist["loss"][0]
+    with pytest.raises(ValueError):
+        nf_dcl(_two_region_make_env, _two_region_planner, pol, days=[1] * (len(comps) + 1))
+
+
 def test_component_factored_collection_on_bpic15_shows_only_the_component():
     """On bpic15 (string-valued backlog tokens in the other components'
     unfired start-of-day places) the restricted run's observations, the first

@@ -15,6 +15,8 @@ Rollout planner, decision collection and distillation; see the
 
 ::: gympn.policy_iteration.collect_component_decisions
 
+::: gympn.policy_iteration.nf_dcl
+
 ::: gympn.policy_iteration.soft_targets
 
 ::: gympn.policy_iteration.distill

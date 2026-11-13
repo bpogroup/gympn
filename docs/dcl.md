@@ -190,6 +190,18 @@ graphs = collect_component_decisions(make_env, make_planner, tasks, workers=8)
 distill(policy, graphs, epochs=15, tau=0.25)
 ```
 
+`nf_dcl` does the three steps in one call, for one round:
+
+```python
+from gympn.policy_iteration import nf_dcl
+
+graphs, history = nf_dcl(make_env, make_planner, policy, days=40, seed=2_000_000,
+                         workers=8, epochs=15, tau=0.25)
+```
+
+`days` is one number for all components or one per component, and the
+remaining keyword arguments go to `distill`.
+
 Each task `(seed, members)` simulates one component on one training day. A
 component's decisions are then labelled at the cost of that component alone,
 and the labels are component-local by construction: the observation holds
